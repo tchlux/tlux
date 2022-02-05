@@ -1,1 +1,1 @@
-An easy way to create and manage a `pip` Python package.
+A package.
