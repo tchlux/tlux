@@ -21,7 +21,7 @@ def read(f_name, empty_lines=False):
 
 # Go to the "about" directory in the package directory.
 package_about = ""
-package_name = read("package_name.txt")[0]
+package_name = "tlux"
 package_about = os.path.join(os.path.dirname(os.path.abspath(__file__)),package_name,"about")
 
 if __name__ == "__main__":
