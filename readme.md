@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-All the things necessary for reproducing work in my <a src=https://tchlux.github.io/blog>research blog</a>.
+All the things necessary for reproducing work in my <a href="https://tchlux.github.io/blog">research blog</a>.
 </p>
 
 
