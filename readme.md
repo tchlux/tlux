@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-All the things.
+All the things necessary for reproducing work in my [research blog](https://tchlux.github.io/blog).
 </p>
 
 
@@ -12,14 +12,14 @@ All the things.
   Install the latest stable release with:
 
 ```bash
-pip install https://github.com/tchlux/tlux/archive/0.0.0.zip
+python3 -m pip install --user tlux
 ```
 
   In order to install the current files in this repository
   (potentially less stable) use:
 
 ```bash
-pip install git+https://github.com/tchlux/tlux.git
+python3 -m pip install --user git+https://github.com/tchlux/tlux.git
 ```
 
 ## USAGE:
