@@ -353,7 +353,27 @@ class Plot:
                 if ('surface' in d['type']):
                     points_2D = np.vstack([d['x'], d['y']]).T
                     try:
-                        simps = Delaunay(points_2D).simplices
+                        mesh = Delaunay(points_2D)
+                        simps = mesh.simplices
+                        # Compute the diameter of all simplices.
+                        simp_diameters = {}
+                        for i in range(len(simps)):
+                            simp_pts = mesh.points[simps[i]]
+                            center = simp_pts.mean(axis=0)
+                            diameter = np.linalg.norm(center-simp_pts, axis=1).max()
+                            simp_diameters[i] = diameter
+                        diameters = list(simp_diameters.values())
+                        hull_indices = set(np.unique(mesh.convex_hull))
+                        # Filter out simplices with irregularly large diameter
+                        #   that are on the convex hull of the data.
+                        diameter_50, diameter_95 = np.percentile(diameters, [50,95])
+                        max_diameter = diameter_50 + 2*(diameter_95-diameter_50)
+                        for i in range(len(simps)):
+                            if ((simp_diameters[i] > max_diameter) and
+                                (len(set(simps[i]) & hull_indices) > 0)):
+                                simp_diameters.pop(i)
+                        simps = simps[sorted(simp_diameters)]
+                        # Add the plotly expected values.
                         d['type'] = 'mesh3d'
                         d['i'] = simps[:,0]
                         d['j'] = simps[:,1]
@@ -363,7 +383,8 @@ class Plot:
                             lambda simp: self._simp_color(
                                 simp, d['z'], ind,
                                 d['marker']['opacity'],
-                                d['marker']['color']), simps
+                                d['marker']['color']),
+                            simps
                         ))
                         if 'opacity' not in d:
                             d['opacity'] = d['marker']['opacity']
@@ -534,11 +555,15 @@ class Plot:
     #                 matrix of points as row-vectors for faster execution.
     # 
     #  ... <standard "add" arguments with adjusted defaults> ...
-    def add_function(self, name, func, min_max_x, min_max_y=[],
+    def add_function(self, name, func=None, min_max_x=None, min_max_y=[],
+                     x_vals=None, y_vals=None,
                      grid_lines=True, plot_points=PLOT_POINTS,
                      vectorized=False, mode=None, plot_type=None,
                      use_gradient=None, **kwargs):
-        if (len(min_max_y) > 0): self.is_3d = True
+        if (len(min_max_y) > 0):
+            self.is_3d = True
+        elif ((x_vals is not None) and (x_vals.shape[1] == 2)):
+            self.is_3d = True
         # If we have two control axes, square root the plot points
         if self.is_3d:
             plot_points = int(plot_points**(0.5) + 0.5)
@@ -551,27 +576,46 @@ class Plot:
         else:
             if mode == None: mode = 'lines'
 
-        # Convert the minimum and maximum values into floats.
-        min_max_x = (float(min_max_x[0]), float(min_max_x[1]))
-        # Generate the input points
-        x_vals = (np.linspace(*min_max_x, num=plot_points),)
-        if self.is_3d:
-            x_vals += (np.linspace(*min_max_y, num=plot_points),)
-        x_vals = tuple(x.flatten() for x in np.meshgrid(*x_vals))
-
-        # Get the response values
-        if vectorized:
-            # Try vectorizing the function evaluation
-            response = list(func(np.vstack(x_vals).T))
+        # If x_vals are not provided, then generate some.
+        if (x_vals is None):
+            assert (min_max_x is not None), "Expected either 'x_vals' or 'min_max_x' to be provided."
+            # Convert the minimum and maximum values into floats.
+            min_max_x = (float(min_max_x[0]), float(min_max_x[1]))
+            # Generate the input points
+            x_vals = (np.linspace(*min_max_x, num=plot_points),)
+            if self.is_3d:
+                x_vals += (np.linspace(*min_max_y, num=plot_points),)
+            x_vals = tuple(x.flatten() for x in np.meshgrid(*x_vals))
+            x_on_grid = True
         else:
-            # Otherwise evaluate the function one point at a time
-            response = [func(x[0] if len(x) == 1 else x) for x in np.vstack(x_vals).T]
-        try:
-            # Make sure all "None" values are in brackets
-            while None in response: response[response.index(None)] = [None]
-        except ValueError:
-            raise(Exception("The provided function returned a non-numeric value."))
-        response = np.array(response, dtype=float).flatten()
+            # If x_vals are provided, use those instead.
+            x_vals = np.asarray(x_vals)
+            if (len(x_vals.shape) == 1):
+                x_vals = x_vals.reshape((-1,1))
+            assert (x_vals.shape[1] in {1,2}), f"Expected 1 or 2 dimensions in 'x_vals', received {x_vals.shape[1]}."
+            x_vals = x_vals.T
+            x_on_grid = False
+
+        if ((y_vals is None) and (func is not None)):
+            assert (func is not None), "Expected either 'func' or 'y_vals' to be provided."
+            # Get the response values
+            if vectorized:
+                # Try vectorizing the function evaluation
+                response = list(func(np.vstack(x_vals).T))
+            else:
+                # Otherwise evaluate the function one point at a time
+                response = [func(x[0] if len(x) == 1 else x) for x in np.vstack(x_vals).T]
+            try:
+                # Make sure all "None" values are in brackets
+                while None in response: response[response.index(None)] = [None]
+            except ValueError:
+                raise(Exception("The provided function returned a non-numeric value."))
+            response = np.array(response, dtype=float).flatten()
+        else:
+            y_vals = np.asarray(y_vals)
+            assert ((len(y_vals.shape) == 1) or (y_vals.shape[1] == 1)), "Expected 1 dimension in 'y_vals', received {y_vals.shape[1]}."
+            y_vals = y_vals.flatten()
+            response = y_vals
 
         if "hoverinfo" not in kwargs: kwargs["hoverinfo"] = "name+x+y"+("+z" if self.is_3d else "")
         # Call the standard plot function
@@ -581,24 +625,30 @@ class Plot:
         # If this is a 3D surface plot and grid_lines=True, add grid lines
         if (self.is_3d and plot_type == 'surface') and grid_lines:
             opacity = kwargs.get("opacity",1.0)
+            line_width = kwargs.get("line_width",1.0)
             line_color = kwargs.get("line_color",'rgb(0,0,0)')
-            for row in range(plot_points):
-                x = x_vals[0][row*plot_points:(row+1)*plot_points]
-                y = x_vals[1][row*plot_points:(row+1)*plot_points]
-                z = response[row*plot_points:(row+1)*plot_points]
-                self.add("", x,y,z, show_in_legend=False,
-                         group=name+" (lines)", mode="lines",
-                         line_width=opacity, opacity=opacity, 
-                         color=line_color, hoverinfo="none")
+            if (x_on_grid):
+                for row in range(plot_points):
+                    x = x_vals[0][row*plot_points:(row+1)*plot_points]
+                    y = x_vals[1][row*plot_points:(row+1)*plot_points]
+                    z = response[row*plot_points:(row+1)*plot_points]
+                    self.add("", x,y,z, show_in_legend=False,
+                             group=name+" (lines)", mode="lines",
+                             line_width=line_width, opacity=opacity, 
+                             color=line_color, hoverinfo="none")
+                    indices = np.arange(plot_points)*plot_points + row
+                    x = x_vals[0][indices]
+                    y = x_vals[1][indices]
+                    z = response[indices]
+                    self.add("", x,y,z, show_in_legend=False,
+                             group=name+" (lines)", mode="lines",
+                             line_width=line_width, opacity=opacity,
+                             color=line_color, hoverinfo="none")
+            else:
+                # Create a triangulation of the points and add lines
+                #  around the simplices? That should probably not happen.
+                pass
 
-                indices = np.arange(plot_points)*plot_points + row
-                x = x_vals[0][indices]
-                y = x_vals[1][indices]
-                z = response[indices]
-                self.add("", x,y,z, show_in_legend=False,
-                         group=name+" (lines)", mode="lines",
-                         line_width=opacity, opacity=opacity,
-                         color=line_color, hoverinfo="none")
 
     @same_as(add_function, mention_usage=True)
     def add_func(self, *args, **kwargs): return self.add_function(*args, **kwargs)
