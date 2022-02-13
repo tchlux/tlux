@@ -1,4 +1,4 @@
 *.pyc
-*.so
+*.mod
 __pycache__
 .DS_Store

@@ -30,8 +30,8 @@ def well_spaced_ball(num_points, dimension, inside=True):
     for cell in cells: random.shuffle(cell)
     # Convert the random selected cells into points.
     coordinates = cell_width * (random.random((max(1,dimension-1), num_points)) + cells)
-    # Exit early if only a single direction is desired.
-    if (dimension == 1): return coordinates.T
+    # Exit early if only a single dimension is desired.
+    if (dimension == 1): return 2*coordinates.T - 1
     # Push coordinates through an appropriate inverse density function to make
     #  the uniform density over the cube into uniform density over the sphere.
     coordinates[-1,:] *= 2*pi    
