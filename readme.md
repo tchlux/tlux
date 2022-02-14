@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-All the things necessary for reproducing work in my <a href="https://tchlux.github.io/blog">research blog</a>.
+All the things necessary for reproducing work in my <a href="https://tchlux.github.io/research">research blog</a>.
 </p>
 
 
@@ -30,12 +30,12 @@ python3 -m pip install --user git+https://github.com/tchlux/tlux.git
 import tlux  
 ```
 
-  Descriptions of the contents follow.
+  Descriptions of the contents might follow.
 
 ### Command line
 
 ```bash
-python -m tlux <args>
+python -m tlux
 ```
 
   Run the `tlux` package.
