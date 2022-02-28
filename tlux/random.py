@@ -1,4 +1,25 @@
 
+# Generate "num_points" random points in "dimension" that have uniform
+# probability density over the unit ball scaled by "radius" (length of
+# points are in range [0, "radius"]).
+def ball(num_points, dimension, inside=True, radius=1.0):
+    from numpy import random, linalg
+    # First generate random directions by normalizing the length of a
+    # vector of random-normal values (these distribute evenly on ball).
+    random_directions = random.normal(size=(dimension, num_points))
+    random_directions /= linalg.norm(random_directions, axis=0)
+    # If inside, then generate a random radius with probability
+    #  proportional to the surface area of a ball with a given radius.
+    if (inside): random_directions *= random.random(num_points) ** (1/dimension)
+    # Return the list of random (direction & length) points.
+    return radius * random_directions.T
+
+
+# Wrapper for the "random.ball" function with no points inside.
+def sphere(num_points, dimension, radius=1.0):
+    return ball(num_points, dimension, inside=False, radius=radius)
+
+
 # Generate random points that are well spaced in the [0,1] box.
 def well_spaced_box(num_points, dimension):
     from numpy import random, ones, arange
@@ -33,7 +54,7 @@ def well_spaced_ball(num_points, dimension, inside=True):
     # Exit early if only a single dimension is desired.
     if (dimension == 1): return 2*coordinates.T - 1
     # Push coordinates through an appropriate inverse density function to make
-    #  the uniform density over the cube into uniform density over the sphere.
+    #  the uniform density over the box into uniform density over the sphere.
     coordinates[-1,:] *= 2*pi    
     density_x = linspace(0, pi, 1000)
     density_gaps = density_x[1:] - density_x[:-1]
