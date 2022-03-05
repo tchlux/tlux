@@ -263,7 +263,7 @@ class APOS:
         if (sizes is not None):
             sizes = np.asarray(sizes, dtype="int32")
             mn = sizes.shape[0]
-        if (x is None): sizes = np.zeros((mn,0), dtype="float32", order="C")
+        if (x is None):     x = np.zeros((mn,0), dtype="float32", order="C")
         if (sizes is None): sizes = np.zeros(0, dtype="int32")
         mdi = x.shape[1]
         an = sizes.sum()
