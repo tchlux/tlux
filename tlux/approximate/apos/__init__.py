@@ -13,18 +13,24 @@ class APOS(Approximator):
     # Initialize a new APOS model.
     def __init__(self, **kwargs):
         import fmodpy
+        # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
         apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
                               verbose=False, output_dir=_this_dir)
         # Store the Fortran module as an attribute.
         self.APOS = apos.apos
         # Set defaults for standard internal parameters.
+        self.steps = 1000
+        self.seed = None
         self.config = None
         self.model = np.zeros(0, dtype="float32")
-        self.x_mean = np.zeros(1, dtype="float32")
-        self.x_var = np.ones(1, dtype="float32")
-        self.y_mean = np.zeros(1, dtype="float32")
-        self.y_var = np.ones(1, dtype="float32")
         self.record = np.zeros(0, dtype="float32")
+        # Default descriptors for categorical inputs.
+        self.m_map = []
+        self.m_sizes = []
+        self.m_starts = []
+        self.a_map = []
+        self.a_sizes = []
+        self.a_starts = []
         # Initialize the attributes of the model that can be initialized.
         self._init_model(**kwargs)
 
@@ -47,8 +53,8 @@ class APOS(Approximator):
         ane = kwargs.pop("ane", None)
         # Number of threads.
         num_threads = kwargs.pop("num_threads", None)
-        self.seed = kwargs.pop("seed", None)
-        self.steps = kwargs.pop("steps", 1000)
+        self.seed = kwargs.pop("seed", self.seed)
+        self.steps = kwargs.pop("steps", self.steps)
         # Initialize if enough arguments were provided.
         if (None not in {mdi, mdo, adi}):
             self.config = self.APOS.new_model_config(
@@ -60,10 +66,6 @@ class APOS(Approximator):
             for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
                 setattr(self.config, n, kwargs[n])
             # Set all internal arrays and initialize the model.
-            self.x_mean = np.zeros(mdi, dtype="float32")
-            self.x_var = np.ones(mdi, dtype="float32")
-            self.y_mean = np.zeros(mdo, dtype="float32")
-            self.y_var = np.ones(mdo, dtype="float32")
             self.model = np.zeros(self.config.total_size, dtype="float32")
             self.APOS.init_model(self.config, self.model, seed=self.seed)
 
@@ -143,62 +145,96 @@ class APOS(Approximator):
 
 
     # Fit this model.
-    def _fit(self, x, y, xi=None, normalize_x=True, normalize_y=True,
-             new_model=False, **kwargs):
-        # If this model isn't initialized, then do that.
-        if (self.config is None):
-            self._init_model(di=x.shape[1], do=y.shape[1])
-        # Get the number of steps for training.
-        steps = kwargs.get("steps", self.steps)
-        # If a random seed is provided, then only 2 threads can be used
-        #  because nondeterministic behavior is exhibited otherwise.
-        seed = kwargs.get("seed", self.seed)
-        if (seed is not None):
-            num_threads = kwargs.get("num_threads", self.config.num_threads)
-            if ((num_threads is None) or (num_threads > 2)):
-                import warnings
-                warnings.warn("Seeding a APOS model will deterministically initialize weights, but num_threads > 2 will result in nondeterministic model updates.")
-        # Verify the shape of the model matches the data.
-        mn = x.shape[0]
-        mdi = x.shape[1]
+    def _fit(self, x=None, y=None, xi=None, ax=None, axi=None, sizes=None,
+             normalize_x=True, normalize_y=True, new_model=False, **kwargs):
+        # Ensure that 'y' values were provided.
+        assert (y is not None), "APOS.fit requires 'y' values, but not provided (use keyword argument 'y=<values>')."
+        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        if ((ax is not None) or (axi is not None)):
+            assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
+        # Make sure that all inputs are numpy arrays.
+        if (y is not None): y = np.asarray(y, dtype="float32", order="C")
+        mn = y.shape[0]
         mdo = y.shape[1]
-        mne = 0
-        mde = 0
-        # Check that the categories meet expectations.
-        if (xi is not None):
-            xi = np.asarray(xi, dtype="int32", order="C").T
-            minval = xi.min()
-            maxval = xi.max()
-            num_categories = int(maxval - minval + 1)
-            mne = max(self.config.mne, num_categories)
-            mde = self.config.mde
-            if (mne > 0): kwargs.update({"mne":mne})
-            if (mde > 0): kwargs.update({"mde":mde})
+        if (x is not None): x = np.asarray(x, dtype="float32", order="C")
+        else:               x = np.zeros((mn,0), dtype="float32", order="C")
+        mdi = x.shape[1]
+        if (xi is not None): xi = np.asarray(xi)
+        else:                xi = np.zeros((mn,0), dtype="int32", order="C")
+        if (sizes is not None): sizes = np.asarray(sizes, dtype="int32")
+        else:                   sizes = np.zeros(0, dtype="int32")
+        an = sizes.sum()
+        if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
+        else:                ax = np.zeros((an,0), dtype="float32", order="C")
+        adi = ax.shape[1]
+        if (axi is not None): axi = np.asarray(axi)
+        else:                 axi = np.zeros((an,0), dtype="int32", order="C")
+        # Make sure that all inputs have the expected shape.
+        assert (len(x.shape) in {1,2})
+        assert (len(y.shape) in {1,2})
+        assert (len(xi.shape) in {1,2})
+        assert (len(ax.shape) in {1,2})
+        assert (len(axi.shape) in {1,2})
+        assert (len(sizes.shape) == 1)
+        # Reshape inputs to all be two dimensional (except sizes).
+        if (len(x.shape) == 1): x = x.reshape((-1,1))
+        if (len(y.shape) == 1): y = y.reshape((-1,1))
+        if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
+        if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
+        if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
+        # Transform cetegorical inputs into expected format for model.
+        if (xi.shape[1] > 0):
+            self.m_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
+            self.m_sizes = [len(u) for u in self.m_map]
+            self.m_starts = (np.cumsum(self.m_sizes) - self.m_sizes[0] + 1).tolist()
+            mne = self.m_starts[-1] - 1
+            _xi = np.zeros((mn, xi.shape[1]), dtype="int32", order="C")
+            for i in range(xi.shape[1]):
+                start_index = self.m_starts[i]
+                num_unique = self.m_sizes[i]
+                unique_vals = self.m_map[i]
+                eq_val = xi[:,i].reshape(-1,1) == unique_vals
+                val_indices = np.ones((mn,num_unique), dtype="int32") * (
+                    start_index + np.arange(num_unique))
+                _xi[:,i] = val_indices[eq_val]
+            xi = _xi
+        else: mne = 0
+        if (axi.shape[1] > 0):
+            self.a_map = [np.unique(axi[:,i]) for i in range(axi.shape[1])]
+            self.a_sizes = [len(u) for u in self.a_map]
+            self.a_starts = np.cumsum(self.a_sizes) - self.a_sizes[0] + 1
+            ane = self.a_starts[-1] - 1
+            _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
+            for i in range(axi.shape[1]):
+                start_index = self.a_starts[i]
+                num_unique = self.a_sizes[i]
+                unique_vals = self.a_map[i]
+                eq_val = axi[:,i].reshape(-1,1) == unique_vals
+                val_indices = np.ones((an,num_unique), dtype="int32") * (
+                    start_index + np.arange(num_unique))
+                _axi[:,i] = val_indices[eq_val]
+            axi = _axi
+        else: ane = 0
         # ------------------------------------------------------------
         # If the shape of the model does not match the data, reinitialize.
-        if (new_model or (self.config is None)
-            or (self.config.mdi != mdi+mde)
-            or (self.config.mdo != mdo)
-            or ((mne > 0) and (mde <= 0))):
-            kwargs.update({"mdi":mdi, "mdo":mdo})
+        check_shape = lambda: self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
+        if (new_model or (self.config is None) or (check_shape() != 0)):
+            kwargs.update({
+                "mdi":mdi,
+                "mdo":mdo,
+                "adi":adi,
+                "ane":max(ane, kwargs.get("ane",0)),
+                "mne":max(mne, kwargs.get("mne",0)),
+            })
             self._init_model(**kwargs)
-        # Set any configuration keyword arguments given at initialization.
-        for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
-            setattr(self.config, n, kwargs[n])
-        # Verify that the necessary number of embeddings fit into the model.
-        if (xi is not None):
-            assert (minval == 1), f"Expected minimum category in 'xi' to be 1, received {minval}."
-            assert (maxval <= self.config.mne), f"Expected largest category in 'xi' to be at most {self.config.mne}, received {maxval}."
-        else:
-            xi = np.zeros((mn,0), dtype="int32", order="C")
-        an = 0
-        ax = np.zeros((an,0), dtype="float32", order="C")
-        axi = np.zeros((an,0), dtype="int32", order="C")
-        sizes = np.zeros(0, dtype="int32", order="C")
-        # ------------------------------------------------------------
-        # Make sure the points are stored properly in memory.
-        x = np.asarray(x, dtype="float32", order="C")
-        y = np.asarray(y, dtype="float32", order="C")
+        # If a random seed is provided, then only 2 threads can be used
+        #  because nondeterministic behavior is exhibited otherwise.
+        if (self.seed is not None):
+            if (self.config.num_threads > 2):
+                import warnings
+                warnings.warn("Seeding an APOS model will deterministically initialize weights, but num_threads > 2 will result in a nondeterministic model fit.")
+        # Get the number of steps for training.
+        steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Minimize the mean squared error.
         self.record = np.zeros((steps,2), dtype="float32", order="C")
@@ -211,63 +247,102 @@ class APOS(Approximator):
     # Make predictions for new data.
     def _predict(self, x=None, xi=None, ax=None, axi=None, sizes=None, **kwargs):
         # Evaluate the model at all data.
-        assert ((x is not None) or (sizes is not None)), "One of 'x' or 'sizes' must not be None for evaluate."
-        # Make sure the positional x values are in expected format.
+        assert ((x is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x' or 'sizes' to not be None."
+        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        if ((ax is not None) or (axi is not None)):
+            assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
+        # Make sure that all inputs are numpy arrays.
         if (x is not None):
             x = np.asarray(x, dtype="float32", order="C")
             mn = x.shape[0]
-        else:
-            mn = sizes.shape
-            x = np.zeros((mn,0), dtype="float32", order="C")
-        # Check that the positional categories meet expectations.
-        if (xi is not None):
-            xi = np.asarray(xi, dtype="int32", order="C")
-            minval = xi.min()
-            maxval = xi.max()
-            assert (0 <= minval <= self.config.mne), f"Expected minimum category in 'xi' to be 0 (for unknown) or 1, received {minval}."
-            assert (0 <= maxval <= self.config.mne), f"Expected largest category in 'xi' to be at most {self.config.mne}, received {maxval}."
-            assert (xi.shape[1] == x.shape[0]), f"Provided 'x' {x.shape} and 'xi' {xi.shape} do not match."
-        else:
-            xi = np.zeros((mn,0), dtype="int32", order="C")
-        # Make sure the apositional x values are in expected format.
-        if (ax is not None):
-            ax = np.asarray(ax, dtype="float32", order="C")
-            an = ax.shape[0]
-        else:
-            an = 0
-            ax = np.zeros((an,0), dtype="float32", order="C")
-        # Check that the apositional categories meet expectations.
-        if (axi is not None):
-            axi = np.asarray(axi, dtype="int32", order="C")
-            minval = axi.min()
-            maxval = axi.max()
-            assert (0 <= minval <= self.config.ane), f"Expected minimum category in 'axi' to be 0 (for unknown) or 1, received {minval}."
-            assert (0 <= maxval <= self.config.ane), f"Expected largest category in 'axi' to be at most {self.config.ane}, received {maxval}."
-            assert (axi.shape[1] == ax.shape[0]), f"Provided 'ax' {ax.shape} and 'axi' {axi.shape} do not match."
-        else:
-            axi = np.zeros((an,0), dtype="int32", order="C")
-        # Check that the apositional argument sizes are formatted correctly.
         if (sizes is not None):
-            sizes = np.asarray(sizes, dtype="int32", order="C")
-        else:
-            sizes = np.zeros(an, dtype="int32", order="C")
+            sizes = np.asarray(sizes, dtype="int32")
+            mn = sizes.shape[0]
+        if (x is None): sizes = np.zeros((mn,0), dtype="float32", order="C")
+        if (sizes is None): sizes = np.zeros(0, dtype="int32")
+        mdi = x.shape[1]
+        an = sizes.sum()
+        if (xi is not None): xi = np.asarray(xi)
+        else:                xi = np.zeros((mn,0), dtype="int32", order="C")
+        if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
+        else:                ax = np.zeros((an,0), dtype="float32", order="C")
+        adi = ax.shape[1]
+        if (axi is not None): axi = np.asarray(axi)
+        else:                 axi = np.zeros((an,0), dtype="int32", order="C")
+        # Make sure that all inputs have the expected shape.
+        assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
+        assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
+        assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
+        assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
+        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
+        # Reshape inputs to all be two dimensional (except sizes).
+        if (len(x.shape) == 1): x = x.reshape((-1,1))
+        if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
+        if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
+        if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
+        # Make sure the categorical inputs have the expected shape.
+        assert (xi.shape[1] == len(self.m_map)), f"Bad xi shape {xi.shape}, expected {len(self.m_map)} columns."
+        assert (axi.shape[1] == len(self.a_map)), f"Bad axi shape {axi.shape}, expected {len(self.a_map)} columns."
+        # Transform cetegorical inputs into expected format for model.
+        if (xi.shape[1] > 0):
+            mne = self.m_starts[-1] - 1
+            _xi = np.zeros((mn, xi.shape[1]), dtype="int32", order="C")
+            for i in range(xi.shape[1]):
+                start_index = self.m_starts[i]
+                num_unique = self.m_sizes[i]
+                unique_vals = self.m_map[i]
+                eq_val = xi[:,i].reshape(-1,1) == unique_vals
+                # Add a column to the front that is the default if none match.
+                eq_val = np.concatenate((
+                    np.logical_not(eq_val.max(axis=1)).reshape(mn,1),
+                    eq_val), axis=1)
+                val_indices = np.ones((mn,num_unique+1), dtype="int32") * np.arange(num_unique+1)
+                val_indices[:,1:] += start_index-1
+                _xi[:,i] = val_indices[eq_val]
+            xi = _xi
+        else: mne = 0
+        if (axi.shape[1] > 0):
+            ane = self.m_starts[-1] - 1
+            _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
+            for i in range(axi.shape[1]):
+                start_index = self.m_starts[i]
+                num_unique = self.m_sizes[i]
+                unique_vals = self.m_map[i]
+                eq_val = axi[:,i].reshape(-1,1) == unique_vals
+                # Add a column to the front that is the default if none match.
+                eq_val = np.concatenate((
+                    np.logical_not(eq_val.max(axis=1)).reshape(an,1),
+                    eq_val), axis=1)
+                val_indices = np.ones((an,num_unique+1), dtype="int32") * np.arange(num_unique+1)
+                val_indices[:,1:] += start_index-1
+                _axi[:,i] = val_indices[eq_val]
+            axi = _axi
+        else: ane = 0
         # Embed the inpputs into the purely positional form.
+        ade = self.config.ade
+        ads = self.config.ads
         ado = self.config.ado
+        mde = self.config.mde
+        mds = self.config.mds
         mdo = self.config.mdo
+        # Compute the true real-vector input dimensions given embeddings.
+        adi += ade
+        mdi += mde + ado
+        # Initialize storage for all arrays needed at evaluation time.
         y = np.zeros((mn, mdo), dtype="float32", order="C")
-        xxi = np.zeros((mn, self.config.mdi), dtype="float32", order="C")
-        axxi = np.zeros((an, self.config.adi), dtype="float32", order="C")
-        m_states = np.zeros((mn, self.config.mds, 2), dtype="float32", order="F")
-        a_states = np.zeros((an, self.config.ads, 2), dtype="float32", order="F")
-        ay = np.zeros((ado, an), dtype="float32", order="F")
+        xxi = np.zeros((mn, mdi), dtype="float32", order="C")
+        axxi = np.zeros((an, adi), dtype="float32", order="C")
+        m_states = np.zeros((mn, mds, 2), dtype="float32", order="F")
+        a_states = np.zeros((an, ads, 2), dtype="float32", order="F")
+        ay = np.zeros((an, ado), dtype="float32", order="F")
         # Call the unerlying library.
         info = self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
-        assert (info == 0), f"APOS.evaluate returned nonzero exit code {info}."
+        assert (info == 0), f"APOS.predict encountered nonzero exit code {info} when calling APOS.check_shape."
         self.APOS.embed(self.config, self.model, x.T, xi.T, ax.T, axi.T, xxi.T, axxi.T)
         self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
                            sizes, m_states, a_states, ay, **kwargs)
         # Denormalize the output values and return them.
-        return (y * self.y_var) + self.y_mean
+        return y
 
 
     # Save this model to a path.
@@ -283,6 +358,12 @@ class APOS(Approximator):
                 "config" : config,
                 "model"  : self.model.tolist(),
                 "record" : self.record.tolist(),
+                "m_map"    : [l.tolist() for l in self.m_map],
+                "m_sizes"  : self.m_sizes,
+                "m_starts" : self.m_starts,
+                "a_map"    : [l.tolist() for l in self.a_map],
+                "a_sizes"  : self.a_sizes,
+                "a_starts" : self.a_starts,
             }))
 
 
@@ -295,7 +376,11 @@ class APOS(Approximator):
         # Load the attributes of the model.
         for key in attrs:
             value = attrs[key]
-            if (type(value) is list): 
+            if (key[-4:] == "_map"):
+                value = [np.asarray(l) for l in value]
+            elif (key[:2] in {"m_","a_"}):
+                pass
+            elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
             setattr(self, key, value)
         # Convert the the dictionary configuration into the correct type.
@@ -327,38 +412,36 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
 
-    # TODO:
-    #  - bounds on curvature based on the layer in the model
-    #  - way to increase basis function diversity (different shift distribution?)
-    #    it gets very low with depth of model using uniform and random ortho on sphere
-    # 
-
+    seed = 0
     layer_dim = 32
     num_layers = 8
-    np.random.seed(0)
+    steps = 100
+    num_threads = None
+    np.random.seed(seed)
 
     TEST_SAVE_LOAD = True
-    TEST_INT_INPUT = False
-    VISUALIZE_EMBEDDINGS = False
-    TEST_SPECTRUM = False
-
+    TEST_INT_INPUT = True
+    TEST_APOSITIONAL = True
 
     if TEST_SAVE_LOAD:
         # Try saving an untrained model.
         m = APOS()
         print("Empty model:")
-        print(str(m))
+        print("  str(model) =", str(m))
         print()
         m.save("testing_empty_save.json")
         m.load("testing_empty_save.json")
         from util.approximate import PLRM
-        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, seed=0,
-                 num_threads=1, steps=1000, 
+        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, seed=seed,
+                 num_threads=num_threads, steps=steps, 
                  ) # discontinuity=-1000.0) # initial_step=0.01)
-        m2 = PLRM(di=2, ds=layer_dim, ns=num_layers, do=1, seed=0, num_threads=1, steps=1000)
+        m2 = PLRM(di=2, ds=layer_dim, ns=num_layers, do=1, seed=seed, num_threads=num_threads, steps=steps)
         m2.model_unpacked().input_vecs[:,:] = m.model_unpacked().m_input_vecs[:,:]
         m2.model_unpacked().input_shift[:] = m.model_unpacked().m_input_shift[:]
+        m2.model_unpacked().state_vecs[:,:] = m.model_unpacked().m_state_vecs[:,:]
+        m2.model_unpacked().state_shift[:] = m.model_unpacked().m_state_shift[:]
         m2.model_unpacked().output_vecs[:,:] = m.model_unpacked().m_output_vecs[:,:]
+
         print(m)
         print(m2)
         print()
@@ -375,7 +458,9 @@ if __name__ == "__main__":
         m.fit(x, y)
         print(m)
         print()
-        m2.fit(x, y, normalize_x=False, normalize_y=False)
+        # m2.fit(x, y, normalize_x=False, normalize_y=False)
+        # exit()
+
         # Add the data and the surface of the model to the plot.
         p = Plot()
         p.add("Data", *x.T, y)
@@ -417,7 +502,7 @@ if __name__ == "__main__":
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
-        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, mne=2, seed=0, steps=1000, num_threads=2)
+        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
@@ -430,8 +515,8 @@ if __name__ == "__main__":
         p = Plot()
         p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
         p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        p.add_func("xi=1", lambda x: m(x, np.ones(len(x), dtype="int32").reshape((1,-1))), [0,1], [0,1], color=3, mode="markers", shade=True)
-        p.add_func("xi=2", lambda x: m(x, 2*np.ones(len(x), dtype="int32").reshape((1,-1))), [0,1], [0,1], color=2, mode="markers", shade=True)
+        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
+        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
 
         # Generate the visual.
         print("Generating surface plot..")
@@ -446,96 +531,52 @@ if __name__ == "__main__":
         print("", "done.", flush=True)
 
 
-    if TEST_SPECTRUM:
-        n = 1000
-        d_in = 3
-        d_out = 5
-        # Control array print options for readability.
-        np.set_printoptions(edgeitems=50, linewidth=100000, 
-            formatter=dict(float=lambda v: f"{v:.2f}"))
+    if TEST_APOSITIONAL:
+        print("Building model..")
+        x = well_spaced_box(100, 2)
+        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
+        y = f(x)
+        # Initialize a new model.
+        m = APOS(adi=1, ane=2, mne=2, mdi=0, mdo=1, seed=seed, steps=steps, num_threads=num_threads)
+        all_x = np.concatenate((x, x), axis=0)
+        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
+        all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
+        ax = all_x.reshape((-1,1)).copy()
+        axi = (np.ones(all_x.shape, dtype="int32") * (np.arange(all_x.shape[1])+1)).reshape(-1,1)
+        sizes = np.ones(all_x.shape[0], dtype="int32") * 2
+        temp_x = np.zeros((all_x.shape[0],0), dtype="float32")
+        m.fit(x=temp_x, y=all_y, xi=all_xi, ax=ax, axi=axi, sizes=sizes)
 
-        # Plot the values (project onto 3D if there are more).
-        visualize = False
-        def plot_vals(x, name="", d=3, show=False):
-            if (not visualize): return
-            if (x.shape[1] > d):
-                vecs, mags = pca(x, num_components=d)
-                x = np.matmul(x, vecs.T)
-            # Create the plot.
-            p = Plot(name)
-            p.add("", *x.T, color=1, marker_size=4, marker_line_width=1)
-            p.plot(show=show, append=True, show_legend=False)
-        # Initialize a model and data.
-        m = APOS(mdi=d_in, mds=layer_dim, mns=num_layers, mdo=d_out, initial_shift_range=2.0)
-        x = well_spaced_ball(n, d_in)
-        y = np.vstack([
-            np.cos(2*np.pi*(i+1)*np.linalg.norm(x,axis=1))
-            for i in range(d_out)]).T
-        # Show the input points.
-        plot_vals(x, "Input")
-        # Generate embeddings for all points.
-        m(x, embeddings=True)
-        for l in range(num_layers):
-            emb = m.embeddings[:,:,l]
-            print(l)
-            print("  min", emb.min().round(2))#, emb.min(axis=0))
-            print("  max", emb.max().round(2))#, emb.max(axis=0))
-            print("  point spectrum:", pca(emb)[1])
-            print("  basis spectrum:", pca(emb.T)[1])
-            print()
-            plot_vals(emb, f"Layer {l+1}", show=(l==num_layers-1))
-        # Fit the model, then look at the new spectrum.
-        print('-'*70)
-        m.fit(x, y, steps=2000)
-        m(x, embeddings=True)
-        print('-'*70)
-        #Show the spectrum.
-        for l in range(num_layers):
-            emb = m.embeddings[:,:,l]
-            print(l)
-            print("  min", emb.min().round(2))#, emb.min(axis=0))
-            print("  max", emb.max().round(2))#, emb.max(axis=0))
-            print("  point spectrum:", pca(emb)[1])
-            print("  basis spectrum:", pca(emb.T)[1])
-            print()
-            plot_vals(emb, f"Fit Layer {l+1}", show=(l==num_layers-1))
-
-
-    if VISUALIZE_EMBEDDINGS:
-        # Create a blank-slate model, to see what it looks like.
-        n = APOS(di=2, ds=layer_dim, ns=num_layers, do=1, seed=0, num_threads=2)
-        from util.random import latin
-        nx = latin(2000, 2)
-        #   visialize the initial model at all layers.
-        n(nx, embeddings=True, positions=True)
-        embeddings = n.embeddings
-        for i in range(num_layers):
-            p = type(p)(f"Layer {i+1} initializations")
-            p.add("Data", *x.T, y / 4, shade=True)
-            for j in range(layer_dim):
-                vals = embeddings[:,j,i]
-                vals -= vals.min()
-                if (vals.max() > 0):
-                    vals /= vals.max()
-                else:
-                    vals -= .1
-                p.add(f"Component {j+1}", *nx.T, vals, marker_size=3, use_gradient=True)
-            p.show(append=(i>0), show=(i in {0, num_layers-1}))
-
-        #   visualize the trained model at all layers
-        n.fit(x, y)
-        n(nx, embeddings=True, positions=True)
-        embeddings = n.embeddings
-        for i in range(num_layers):
-            p = type(p)(f"Layer {i+1} final form")
-            p.add("Data", *x.T, y / 4, shade=True)
-            for j in range(layer_dim):
-                vals = embeddings[:,j,i]
-                vals -= vals.min()
-                if (vals.max() > 0):
-                    vals /= vals.max()
-                else:
-                    vals -= .1
-                p.add(f"Component {j+1}", *nx.T, vals, marker_size=3, use_gradient=True)
-            p.show(append=(i>0), show=(i in {0, num_layers-1}))
+        # Create an evaluation set that evaluates the model that was built over two differnt functions.
+        xi1 = np.ones((len(x),1),dtype="int32")
+        ax = x.reshape((-1,1)).copy()
+        axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
+        sizes = np.ones(x.shape[0], dtype="int32") * 2
+        temp_x = np.zeros((x.shape[0],0), dtype="float32")
+        y1 = m(x=temp_x, xi=xi1, ax=ax, axi=axi, sizes=sizes)
+        y2 = m(x=temp_x, xi=2*xi1, ax=ax, axi=axi, sizes=sizes)
+        print("Adding to plot..")
+        p = Plot()
+        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
+        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
+        def f(x, i=1):
+            xi = i * np.ones((len(x),1),dtype="int32")
+            ax = x.reshape((-1,1)).copy()
+            axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
+            sizes = np.ones(x.shape[0], dtype="int32") * 2
+            temp_x = np.zeros((x.shape[0],0), dtype="float32")
+            return m(x=temp_x, xi=xi, ax=ax, axi=axi, sizes=sizes)
+        p.add_func("xi=1", lambda x: f(x, 1), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
+        p.add_func("xi=2", lambda x: f(x, 2), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
+        # Generate the visual.
+        print("Generating surface plot..")
+        p.show(show=False)
+        print("Generating loss plot..")
+        p = type(p)("Mean squared error")
+        # Rescale the columns of the record for visualization.
+        record = m.record
+        p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
+        p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.show(append=True, show=True)
+        print("", "done.", flush=True)
 
