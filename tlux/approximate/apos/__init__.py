@@ -1,11 +1,10 @@
 import os
 import numpy as np
-from tlux.approximate.base import Approximator
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _source_code = os.path.join(_this_dir, "apos.f90")
 
-class APOS(Approximator):
+class APOS:
     # Make the string function return the unpacked model.
     def __str__(self): return str(self.model_unpacked())
 
@@ -16,6 +15,7 @@ class APOS(Approximator):
         # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
         apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
                               verbose=False, output_dir=_this_dir)
+                              # f_compiler_args=f_compiler_args)
         # Store the Fortran module as an attribute.
         self.APOS = apos.apos
         # Set defaults for standard internal parameters.
@@ -145,8 +145,8 @@ class APOS(Approximator):
 
 
     # Fit this model.
-    def _fit(self, x=None, y=None, xi=None, ax=None, axi=None, sizes=None,
-             normalize_x=True, normalize_y=True, new_model=False, **kwargs):
+    def fit(self, x=None, y=None, xi=None, ax=None, axi=None,
+            sizes=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
         assert (y is not None), "APOS.fit requires 'y' values, but not provided (use keyword argument 'y=<values>')."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -155,10 +155,8 @@ class APOS(Approximator):
         # Make sure that all inputs are numpy arrays.
         if (y is not None): y = np.asarray(y, dtype="float32", order="C")
         mn = y.shape[0]
-        mdo = y.shape[1]
         if (x is not None): x = np.asarray(x, dtype="float32", order="C")
         else:               x = np.zeros((mn,0), dtype="float32", order="C")
-        mdi = x.shape[1]
         if (xi is not None): xi = np.asarray(xi)
         else:                xi = np.zeros((mn,0), dtype="int32", order="C")
         if (sizes is not None): sizes = np.asarray(sizes, dtype="int32")
@@ -170,15 +168,17 @@ class APOS(Approximator):
         if (axi is not None): axi = np.asarray(axi)
         else:                 axi = np.zeros((an,0), dtype="int32", order="C")
         # Make sure that all inputs have the expected shape.
-        assert (len(x.shape) in {1,2})
-        assert (len(y.shape) in {1,2})
-        assert (len(xi.shape) in {1,2})
-        assert (len(ax.shape) in {1,2})
-        assert (len(axi.shape) in {1,2})
-        assert (len(sizes.shape) == 1)
+        assert (len(y.shape) in {1,2}), f"Bad y shape {y.shape}, should be 1D or 2D matrix."
+        assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
+        assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
+        assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
+        assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
+        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
         # Reshape inputs to all be two dimensional (except sizes).
-        if (len(x.shape) == 1): x = x.reshape((-1,1))
         if (len(y.shape) == 1): y = y.reshape((-1,1))
+        mdo = y.shape[1]
+        if (len(x.shape) == 1): x = x.reshape((-1,1))
+        mdi = x.shape[1]
         if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
         if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
         if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
@@ -244,8 +244,13 @@ class APOS(Approximator):
         assert (result[-1] == 0), f"APOS.minimize_mse returned nonzero exit code {result[-1]}."
 
 
+    # Calling this model is an alias for 'APOS.predict'.
+    def __call__(self, *args, **kwargs):
+        return self.predict(*args, **kwargs)
+
+
     # Make predictions for new data.
-    def _predict(self, x=None, xi=None, ax=None, axi=None, sizes=None, **kwargs):
+    def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None, **kwargs):
         # Evaluate the model at all data.
         assert ((x is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x' or 'sizes' to not be None."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -339,8 +344,9 @@ class APOS(Approximator):
         info = self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
         assert (info == 0), f"APOS.predict encountered nonzero exit code {info} when calling APOS.check_shape."
         self.APOS.embed(self.config, self.model, x.T, xi.T, ax.T, axi.T, xxi.T, axxi.T)
-        self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
-                           sizes, m_states, a_states, ay, **kwargs)
+        result = self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
+                                    sizes, m_states, a_states, ay, info, **kwargs)
+        assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
         # Denormalize the output values and return them.
         return y
 
@@ -397,31 +403,24 @@ if __name__ == "__main__":
     from tlux.plot import Plot
     from tlux.random import well_spaced_ball, well_spaced_box
 
-    # Define a wrapper convenience function for computing principal components.
-    from sklearn.decomposition import PCA        
-    def pca(x, num_components=None):
-        pca = PCA(n_components=num_components)
-        if (num_components is None): num_components = min(*x.shape)
-        else: num_components = min(num_components, *x.shape)
-        pca.fit(x)
-        return pca.components_, pca.singular_values_
-
     # A function for testing approximation algorithms.
     def f(x):
         x = x.reshape((-1,2))
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
-
-    seed = 0
+    seed = 1
     layer_dim = 32
     num_layers = 8
-    steps = 100
+    steps = 1000
     num_threads = None
     np.random.seed(seed)
 
-    TEST_SAVE_LOAD = True
-    TEST_INT_INPUT = True
-    TEST_APOSITIONAL = True
+
+    TEST_SAVE_LOAD = False
+    TEST_INT_INPUT = False
+    TEST_APOSITIONAL = False
+    TEST_VARIED_SIZE = True
+
 
     if TEST_SAVE_LOAD:
         # Try saving an untrained model.
@@ -435,15 +434,8 @@ if __name__ == "__main__":
         m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, seed=seed,
                  num_threads=num_threads, steps=steps, 
                  ) # discontinuity=-1000.0) # initial_step=0.01)
-        m2 = PLRM(di=2, ds=layer_dim, ns=num_layers, do=1, seed=seed, num_threads=num_threads, steps=steps)
-        m2.model_unpacked().input_vecs[:,:] = m.model_unpacked().m_input_vecs[:,:]
-        m2.model_unpacked().input_shift[:] = m.model_unpacked().m_input_shift[:]
-        m2.model_unpacked().state_vecs[:,:] = m.model_unpacked().m_state_vecs[:,:]
-        m2.model_unpacked().state_shift[:] = m.model_unpacked().m_state_shift[:]
-        m2.model_unpacked().output_vecs[:,:] = m.model_unpacked().m_output_vecs[:,:]
-
+        print("Initialized model:")
         print(m)
-        print(m2)
         print()
         # Create the test plot.
         x = well_spaced_box(100, 2)
@@ -456,11 +448,6 @@ if __name__ == "__main__":
         y /= y.var(axis=0)
         # Fit the model.
         m.fit(x, y)
-        print(m)
-        print()
-        # m2.fit(x, y, normalize_x=False, normalize_y=False)
-        # exit()
-
         # Add the data and the surface of the model to the plot.
         p = Plot()
         p.add("Data", *x.T, y)
@@ -468,7 +455,6 @@ if __name__ == "__main__":
         # Try saving the trained model and applying it after loading.
         print("Saving model:")
         print(m)
-        # print(str(m)[:str(m).index("\n\n")])
         print()
         m.save("testing_real_save.json")
         m.load("testing_real_save.json")
@@ -579,4 +565,24 @@ if __name__ == "__main__":
         p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
         p.show(append=True, show=True)
         print("", "done.", flush=True)
+
+
+    if TEST_VARIED_SIZE:
+        print("Creating data..")
+        for test in range(100):
+            print("sizes test: ", test, end="\r")
+            sizes = np.random.randint(5,20,size=(10))
+            an = sizes.sum()
+            mn = sizes.size
+            ax = np.random.random(size=(an,2))
+            x = well_spaced_box(mn, 2)
+            y = f(x)
+            start = 0
+            for i in range(len(sizes)):
+                end = start + sizes[i]
+                y[i] += ax[start:end].max()
+                start = end
+            # Fit a model.
+            m = APOS(seed=seed, num_threads=num_threads, steps=1)
+            m.fit(x=x, y=y, ax=ax, sizes=sizes)
 

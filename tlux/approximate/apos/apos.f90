@@ -495,30 +495,58 @@ CONTAINS
 
   ! Given a number of batches, compute the batch start and ends for
   !  the apositional and positional inputs. Store in (2,_) arrays.
-  SUBROUTINE COMPUTE_BATCHES(NUM_BATCHES, X, AX, SIZES, BATCHA, BATCHM)
+  SUBROUTINE COMPUTE_BATCHES(NUM_BATCHES, X, AX, SIZES, BATCHA, BATCHM, INFO)
     INTEGER,       INTENT(IN) :: NUM_BATCHES
     REAL(KIND=RT), INTENT(IN),  DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(IN),  DIMENSION(:,:) :: AX
     INTEGER,       INTENT(IN),  DIMENSION(:)   :: SIZES
     INTEGER,       INTENT(OUT), DIMENSION(:,:) :: BATCHA, BATCHM
+    INTEGER,       INTENT(INOUT) :: INFO
     ! Local variables.
-    INTEGER :: BATCH, BE, BN, BS, I
-    ! Compute batch starts and ends.
-    IF (SIZE(AX,1) .GT. 0) THEN
-       IF ((NUM_BATCHES .EQ. 1) .OR. (SIZE(SIZES) .EQ. 0)) THEN ! TODO: Size check shouldn't be necessary.
+    INTEGER :: BATCH, BE, BN, BS, I, MN, AN
+    ! Compute sizes of inputs.
+    IF ((SIZE(SIZES) .GT. 0) .OR. (SIZE(AX,2) .GT. 0)) THEN
+       MN = SIZE(SIZES)
+    ELSE
+       MN = SIZE(X,2)
+    END IF
+    AN = SUM(SIZES(:))
+    ! Check for errors.
+    IF (SIZE(X,2) .NE. MN) THEN
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Sizes of X and SIZES do not match.', SIZE(X,2), SIZE(SIZES)
+       INFO = -1
+    ELSE IF (SIZE(AX,2) .NE. AN) THEN
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Size of AX and sum of SIZES do not match.', SIZE(AX,2), AN
+       INFO = -2
+    ELSE IF (NUM_BATCHES .GT. MN) THEN
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Requested number of batches is too large.', NUM_BATCHES, MN, AN
+       INFO = -3
+    ELSE IF (NUM_BATCHES .NE. SIZE(BATCHA,2)) THEN
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches does not match BATCHA.', NUM_BATCHES, SIZE(BATCHA,2)
+       INFO = -4
+    ELSE IF (NUM_BATCHES .NE. SIZE(BATCHM,2)) THEN
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches does not match BATCHM.', NUM_BATCHES, SIZE(BATCHM,2)
+       INFO = -5
+    END IF
+    IF (INFO .NE. 0) RETURN
+    ! Construct batches for data sets with apositional inputs.
+    IF (AN .GT. 0) THEN
+       IF (NUM_BATCHES .EQ. 1) THEN
           BATCHA(1,1) = 1
-          BATCHA(2,1) = SIZE(AX,2)
+          BATCHA(2,1) = AN
           BATCHM(1,1) = 1
-          BATCHM(2,1) = SIZE(X,2)
+          BATCHM(2,1) = MN
        ELSE
-          BN = (SIZE(AX,2) + NUM_BATCHES - 1) / NUM_BATCHES
+          BN = (AN + NUM_BATCHES - 1) / NUM_BATCHES ! = CEIL(AN / NUM_BATCHES)
           ! Compute how many X points are associated with each Y.
           BS = 1
           BE = SIZES(1)
           BATCH = 1
           BATCHM(1,BATCH) = 1
-          DO I = 2, SIZE(SIZES)
-             IF ((BE-BS+1 .GE. BN) .AND. (BATCH .LT. SIZE(BATCHA,2))) THEN ! TODO: BATCH check shouldn't be necessary.
+          DO I = 2, MN
+             ! If a fair share of the points have been aggregated, OR
+             !   there are only as many sets left as there are batches.
+             IF ((BE-BS .GT. BN) .OR. (1+MN-I .LE. (NUM_BATCHES-BATCH))) THEN
                 BATCHM(2,BATCH) = I-1
                 BATCHA(1,BATCH) = BS
                 BATCHA(2,BATCH) = BE
@@ -529,16 +557,16 @@ CONTAINS
              END IF
              BE = BE + SIZES(I)
           END DO
-          BATCHM(2,BATCH) = SIZE(SIZES)
+          BATCHM(2,BATCH) = MN
           BATCHA(1,BATCH) = BS
           BATCHA(2,BATCH) = BE
        END IF
+    ! Construct batches for data sets that only have positional inputs.
     ELSE
-       BN = (SIZE(X,2) + NUM_BATCHES - 1) / NUM_BATCHES
-       ! Evenly distribute the batches among threads for model-only input.
+       BN = (MN + NUM_BATCHES - 1) / NUM_BATCHES ! = CEIL(MN / NUM_BATCHES)
        DO BATCH = 1, NUM_BATCHES
           BATCHM(1,BATCH) = BN*(BATCH-1) + 1
-          BATCHM(2,BATCH) = MIN(SIZE(X,2), BN*BATCH)
+          BATCHM(2,BATCH) = MIN(MN, BN*BATCH)
        END DO
        BATCHA(1,:) = 0
        BATCHA(2,:) = -1
@@ -547,7 +575,8 @@ CONTAINS
 
 
   ! Evaluate the piecewise linear regression model, assume already-embedded inputs.
-  SUBROUTINE EVALUATE(CONFIG, MODEL, Y, X, AX, SIZES, M_STATES, A_STATES, AY, SHIFT)
+  SUBROUTINE EVALUATE(CONFIG, MODEL, Y, X, AX, SIZES, M_STATES, &
+       A_STATES, AY, INFO, SHIFT, THREADS)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(IN),  DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(OUT),   DIMENSION(:,:) :: Y
@@ -557,22 +586,32 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT),   DIMENSION(:,:,:) :: M_STATES ! SIZE(X, 2), MDS, (MNS|2)
     REAL(KIND=RT), INTENT(OUT),   DIMENSION(:,:,:) :: A_STATES ! SIZE(AX,2), ADS, (ANS|2)
     REAL(KIND=RT), INTENT(OUT),   DIMENSION(:,:) :: AY ! SIZE(AX,2), ADO
+    INTEGER, INTENT(INOUT) :: INFO
     LOGICAL, INTENT(IN), OPTIONAL :: SHIFT
+    INTEGER, INTENT(IN), OPTIONAL :: THREADS
     ! Internal values.
     LOGICAL :: APPLY_SHIFT
-    INTEGER :: I, BATCH, NB, BN, BS, BE, BT, GS, GE
-    INTEGER, DIMENSION(2,CONFIG%NUM_THREADS) :: BATCHA, BATCHM
+    INTEGER :: I, BATCH, NB, BN, BS, BE, BT, GS, GE, NT
+    INTEGER, DIMENSION(:,:), ALLOCATABLE :: BATCHA, BATCHM
     ! Set default for shifting data.
     IF (PRESENT(SHIFT)) THEN
        APPLY_SHIFT = SHIFT
     ELSE
        APPLY_SHIFT = .TRUE.
     END IF
+    ! Set default for the number of threads.
+    IF (PRESENT(THREADS)) THEN
+       NT = THREADS
+    ELSE
+       NT = CONFIG%NUM_THREADS
+    END IF
+    ALLOCATE(BATCHA(2,NT), BATCHM(2,NT))
     ! Set up batching for parallelization.
-    NB = MIN(SIZE(Y,2), CONFIG%NUM_THREADS)
+    NB = MIN(SIZE(Y,2), NT)
     ! Compute the batch start and end indices.
-    CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM)
-    !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(I, BS, BE, BT) IF(NB > 1)
+    CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM, INFO)
+    IF (INFO .NE. 0) RETURN
+    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NB > 1)
     batch_evaluation : DO BATCH = 1, NB
        ! If there is an apositional model, apply it.
        IF (CONFIG%ADI .GT. 0) THEN
@@ -641,6 +680,7 @@ CONTAINS
        END IF
     END DO batch_evaluation
     !$OMP END PARALLEL DO
+    DEALLOCATE(BATCHA, BATCHM)
 
   CONTAINS
 
@@ -921,7 +961,7 @@ CONTAINS
   ! Compute the gradient of the sum of squared error of this regression
   ! model with respect to its variables given input and output pairs.
   SUBROUTINE MODEL_GRADIENT(CONFIG, MODEL, Y, X, XI, AX, AXI, SIZES, &
-       SUM_SQUARED_GRADIENT, MODEL_GRAD, ERROR_GRADIENT, SHIFT)
+       SUM_SQUARED_GRADIENT, MODEL_GRAD, ERROR_GRADIENT, INFO, SHIFT, THREADS)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
@@ -942,8 +982,9 @@ CONTAINS
          REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: OUTPUTS
        END SUBROUTINE ERROR_GRADIENT
     END INTERFACE
-    ! Apply shift.
+    INTEGER, INTENT(INOUT) :: INFO
     LOGICAL, INTENT(IN), OPTIONAL :: SHIFT
+    INTEGER, INTENT(IN), OPTIONAL :: THREADS
     ! Local allocations for computing gradient.
     REAL(KIND=RT), DIMENSION(CONFIG%MDI,SIZE(X,2)) :: XXI
     REAL(KIND=RT), DIMENSION(CONFIG%ADI,SIZE(AX,2)) :: AXXI
@@ -955,7 +996,7 @@ CONTAINS
     CALL EMBED(CONFIG, MODEL, X, XI, AX, AXI, XXI, AXXI)
     ! Evaluate the model, storing internal states (for gradient calculation).
     CALL EVALUATE(CONFIG, MODEL, Y_GRADIENT, XXI, AXXI, SIZES, &
-         M_STATES, A_STATES, AY, SHIFT=SHIFT)
+         M_STATES, A_STATES, AY, INFO, SHIFT=SHIFT, THREADS=THREADS)
     ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
     CALL ERROR_GRADIENT(Y, Y_GRADIENT)
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SUM(Y_GRADIENT(:,:)**2)
@@ -1032,12 +1073,9 @@ CONTAINS
          STEP_CURV_CHANGE, STEP_CURV_REMAIN
     REAL :: LAST_PRINT_TIME, CURRENT_TIME, WAIT_TIME
     ! Check for a valid data shape given the model.
+    INFO = 0
     CALL CHECK_SHAPE(CONFIG, MODEL, Y, X, XI, AX, AXI, SIZES, INFO)
-    IF (INFO .NE. 0) THEN
-       SUM_SQUARED_ERROR = 0.0_RT
-       IF (PRESENT(RECORD)) RECORD(:,:) = 0.0_RT
-       RETURN
-    END IF
+    IF (INFO .NE. 0) RETURN
     ! Number of points.
     NY = SIZE(Y,2)
     RNY = REAL(NY, RT)
@@ -1048,7 +1086,11 @@ CONTAINS
     ! Set the batch N (BN) and num batches (NB) and num threads (NT).
     NB = MIN(CONFIG%NUM_THREADS, NY)
     BN = (NY + NB - 1) / NB
-    CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM)
+    CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM, INFO)
+    IF (INFO .NE. 0) THEN
+       Y(:,:) = 0.0_RT
+       RETURN
+    END IF
     NT = CONFIG%NUM_THREADS
     ! Only "revert" to the best model seen if some steps are taken.
     REVERT_TO_BEST = REVERT_TO_BEST .AND. (STEPS .GT. 0)
@@ -1137,10 +1179,10 @@ CONTAINS
                AX(:,BATCHA(1,BATCH):BATCHA(2,BATCH)), &
                AXI(:,BATCHA(1,BATCH):BATCHA(2,BATCH)), &
                SIZES(SS:SE), SUM_SQUARED_ERROR, MODEL_GRAD(:), &
-               SQUARED_ERROR_GRADIENT, SHIFT=.FALSE.)
+               SQUARED_ERROR_GRADIENT, INFO, SHIFT=.FALSE., THREADS=1)
        END DO
        !$OMP END PARALLEL DO
-
+       IF (INFO .NE. 0) RETURN
        ! Convert the sum of squared errors into the mean squared error.
        MSE = SUM_SQUARED_ERROR / RNY
        ! Update the step factor based on model improvement.
