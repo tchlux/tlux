@@ -164,7 +164,6 @@ class APOS:
         an = sizes.sum()
         if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
         else:                ax = np.zeros((an,0), dtype="float32", order="C")
-        adi = ax.shape[1]
         if (axi is not None): axi = np.asarray(axi)
         else:                 axi = np.zeros((an,0), dtype="int32", order="C")
         # Make sure that all inputs have the expected shape.
@@ -181,13 +180,20 @@ class APOS:
         mdi = x.shape[1]
         if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
         if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
+        adi = ax.shape[1]
         if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
+        # TODO: Extract all of the code above ^^^ into a separate
+        #       "_to_arrays" function. Find overlap with 'predict'.
+        # TODO: Add support for 'yi', add y components for unique values
+        #       and modify .predict to output the predicted unique value.
+        # TODO: Extract below to "_unique_aggregation" function, remove
+        #       redundancy between xi and axi.
         # Transform cetegorical inputs into expected format for model.
         if (xi.shape[1] > 0):
             self.m_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
             self.m_sizes = [len(u) for u in self.m_map]
             self.m_starts = (np.cumsum(self.m_sizes) - self.m_sizes[0] + 1).tolist()
-            mne = self.m_starts[-1] - 1
+            mne = sum(self.m_sizes)
             _xi = np.zeros((mn, xi.shape[1]), dtype="int32", order="C")
             for i in range(xi.shape[1]):
                 start_index = self.m_starts[i]
@@ -202,8 +208,8 @@ class APOS:
         if (axi.shape[1] > 0):
             self.a_map = [np.unique(axi[:,i]) for i in range(axi.shape[1])]
             self.a_sizes = [len(u) for u in self.a_map]
-            self.a_starts = np.cumsum(self.a_sizes) - self.a_sizes[0] + 1
-            ane = self.a_starts[-1] - 1
+            self.a_starts = (np.cumsum(self.a_sizes) - self.a_sizes[0] + 1).tolist()
+            ane = sum(self.a_sizes)
             _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
             for i in range(axi.shape[1]):
                 start_index = self.a_starts[i]
@@ -219,6 +225,20 @@ class APOS:
         # If the shape of the model does not match the data, reinitialize.
         check_shape = lambda: self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
         if (new_model or (self.config is None) or (check_shape() != 0)):
+            # Store any existing configurations.
+            if (self.config is not None):
+                kwargs.update({
+                    "mne": kwargs.get("mne",self.config.mne),
+                    "mns": kwargs.get("mns",self.config.mns),
+                    "mds": kwargs.get("mds",self.config.mds),
+                    "ane": kwargs.get("ane",self.config.ane),
+                    "ans": kwargs.get("ans",self.config.ans),
+                    "ads": kwargs.get("ads",self.config.ads),
+                    "ado": kwargs.get("ado",self.config.ado),
+                })
+                import warnings
+                warnings.warn(f"Creating new model config because 'check_shape' failed. Only keeping sizes, dropping all other custom configurations.")
+            # Ensure that the config is compatible with the data.
             kwargs.update({
                 "mdi":mdi,
                 "mdo":mdo,
@@ -250,7 +270,8 @@ class APOS:
 
 
     # Make predictions for new data.
-    def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None, **kwargs):
+    def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
+                save_states=False, **kwargs):
         # Evaluate the model at all data.
         assert ((x is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x' or 'sizes' to not be None."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -265,13 +286,11 @@ class APOS:
             mn = sizes.shape[0]
         if (x is None):     x = np.zeros((mn,0), dtype="float32", order="C")
         if (sizes is None): sizes = np.zeros(0, dtype="int32")
-        mdi = x.shape[1]
         an = sizes.sum()
         if (xi is not None): xi = np.asarray(xi)
         else:                xi = np.zeros((mn,0), dtype="int32", order="C")
         if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
         else:                ax = np.zeros((an,0), dtype="float32", order="C")
-        adi = ax.shape[1]
         if (axi is not None): axi = np.asarray(axi)
         else:                 axi = np.zeros((an,0), dtype="int32", order="C")
         # Make sure that all inputs have the expected shape.
@@ -282,8 +301,10 @@ class APOS:
         assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
         # Reshape inputs to all be two dimensional (except sizes).
         if (len(x.shape) == 1): x = x.reshape((-1,1))
+        mdi = x.shape[1]
         if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
         if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
+        adi = ax.shape[1]
         if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
         # Make sure the categorical inputs have the expected shape.
         assert (xi.shape[1] == len(self.m_map)), f"Bad xi shape {xi.shape}, expected {len(self.m_map)} columns."
@@ -307,12 +328,12 @@ class APOS:
             xi = _xi
         else: mne = 0
         if (axi.shape[1] > 0):
-            ane = self.m_starts[-1] - 1
+            ane = self.a_starts[-1] - 1
             _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
             for i in range(axi.shape[1]):
-                start_index = self.m_starts[i]
-                num_unique = self.m_sizes[i]
-                unique_vals = self.m_map[i]
+                start_index = self.a_starts[i]
+                num_unique = self.a_sizes[i]
+                unique_vals = self.a_map[i]
                 eq_val = axi[:,i].reshape(-1,1) == unique_vals
                 # Add a column to the front that is the default if none match.
                 eq_val = np.concatenate((
@@ -337,8 +358,14 @@ class APOS:
         y = np.zeros((mn, mdo), dtype="float32", order="C")
         xxi = np.zeros((mn, mdi), dtype="float32", order="C")
         axxi = np.zeros((an, adi), dtype="float32", order="C")
-        m_states = np.zeros((mn, mds, 2), dtype="float32", order="F")
-        a_states = np.zeros((an, ads, 2), dtype="float32", order="F")
+        if (save_states):
+            mns = self.config.mns
+            m_states = np.zeros((mn, mds, mns), dtype="float32", order="F")
+            ans = self.config.ans
+            a_states = np.zeros((an, ads, ans), dtype="float32", order="F")
+        else:
+            m_states = np.zeros((mn, mds, 2), dtype="float32", order="F")
+            a_states = np.zeros((an, ads, 2), dtype="float32", order="F")
         ay = np.zeros((an, ado), dtype="float32", order="F")
         # Call the unerlying library.
         info = self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
@@ -347,7 +374,9 @@ class APOS:
         result = self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
                                     sizes, m_states, a_states, ay, info, **kwargs)
         assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
-        # Denormalize the output values and return them.
+        if (save_states):
+            self.m_states = m_states
+            self.a_states = a_states
         return y
 
 
@@ -402,6 +431,11 @@ if __name__ == "__main__":
 
     from tlux.plot import Plot
     from tlux.random import well_spaced_ball, well_spaced_box
+
+    # TODO: test saving and loading with unique value maps
+    # TODO: design concise test function that has meaningful signal
+    #       in each of "ax", "axi", "x", "xi", test all combinations
+    # TODO: make visualization optional for all of the tests
 
     # A function for testing approximation algorithms.
     def f(x):

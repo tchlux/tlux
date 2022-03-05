@@ -605,9 +605,9 @@ CONTAINS
     ELSE
        NT = CONFIG%NUM_THREADS
     END IF
-    ALLOCATE(BATCHA(2,NT), BATCHM(2,NT))
     ! Set up batching for parallelization.
     NB = MIN(SIZE(Y,2), NT)
+    ALLOCATE(BATCHA(2,NB), BATCHM(2,NB))
     ! Compute the batch start and end indices.
     CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM, INFO)
     IF (INFO .NE. 0) RETURN
@@ -1184,7 +1184,7 @@ CONTAINS
        !$OMP END PARALLEL DO
        IF (INFO .NE. 0) RETURN
        ! Convert the sum of squared errors into the mean squared error.
-       MSE = SUM_SQUARED_ERROR / RNY
+       MSE = SUM_SQUARED_ERROR / REAL(SIZE(Y),RT) ! RNY * SIZE(Y,1)
        ! Update the step factor based on model improvement.
        IF (MSE .LE. PREV_MSE) THEN
           STEP_FACTOR = STEP_FACTOR * CONFIG%FASTER_RATE
