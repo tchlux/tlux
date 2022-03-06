@@ -12,10 +12,10 @@ class APOS:
     # Initialize a new APOS model.
     def __init__(self, **kwargs):
         import fmodpy
-        # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
+        f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
         apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
-                              verbose=False, output_dir=_this_dir)
-                              # f_compiler_args=f_compiler_args)
+                              verbose=False, output_dir=_this_dir,
+                              f_compiler_args=f_compiler_args)
         # Store the Fortran module as an attribute.
         self.APOS = apos.apos
         # Set defaults for standard internal parameters.
@@ -257,7 +257,7 @@ class APOS:
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Minimize the mean squared error.
-        self.record = np.zeros((steps,2), dtype="float32", order="C")
+        self.record = np.zeros((steps,3), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model,
                                         y.T, x.T, xi.T, ax.T, axi.T, sizes,
                                         steps=steps, record=self.record.T)
@@ -443,17 +443,17 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
     seed = 1
-    layer_dim = 32
-    num_layers = 8
+    layer_dim = 128
+    num_layers = 16
     steps = 1000
     num_threads = None
     np.random.seed(seed)
 
 
     TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = False
+    TEST_INT_INPUT = True
     TEST_APOSITIONAL = False
-    TEST_VARIED_SIZE = True
+    TEST_VARIED_SIZE = False
 
 
     if TEST_SAVE_LOAD:
@@ -506,6 +506,7 @@ if __name__ == "__main__":
             record = m.record
             p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
             p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+            p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
             p.show(append=True, show=True)
             print("", "done.", flush=True)
         # Remove the save files.
@@ -547,6 +548,7 @@ if __name__ == "__main__":
         record = m.record
         p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
         p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
         p.show(append=True, show=True)
         print("", "done.", flush=True)
 
@@ -597,6 +599,7 @@ if __name__ == "__main__":
         record = m.record
         p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
         p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
         p.show(append=True, show=True)
         print("", "done.", flush=True)
 

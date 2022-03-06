@@ -1052,7 +1052,7 @@ CONTAINS
     INTEGER,       INTENT(IN), DIMENSION(:) :: SIZES
     INTEGER,       INTENT(IN) :: STEPS
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(2,STEPS), OPTIONAL :: RECORD
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(3,STEPS), OPTIONAL :: RECORD
     INTEGER,       INTENT(OUT) :: INFO
     !  Local variables.
     !    gradient step arrays, 4 copies of model + (num threads - 1)
@@ -1067,7 +1067,8 @@ CONTAINS
     CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),25)
     !    singletons
     LOGICAL :: REVERT_TO_BEST, DID_PRINT
-    INTEGER :: BN, I, NB, NS, NT, NY, BATCH, SS, SE
+    INTEGER :: BN, I, NB, NS, NY, BATCH, SS, SE, GS, GE, GN
+    INTEGER :: UPDATE_INDICES(CONFIG%NUM_VARS), NUM_TO_UPDATE
     REAL(KIND=RT) :: RNY, BATCHES, PREV_MSE, MSE, BEST_MSE
     REAL(KIND=RT) :: STEP_FACTOR, STEP_MEAN_CHANGE, STEP_MEAN_REMAIN, &
          STEP_CURV_CHANGE, STEP_CURV_REMAIN
@@ -1083,7 +1084,7 @@ CONTAINS
     STEP_FACTOR = CONFIG%INITIAL_STEP
     ! Set the initial "number of steps taken since best" counter.
     NS = 0
-    ! Set the batch N (BN) and num batches (NB) and num threads (NT).
+    ! Set the batch N (BN) and num batches (NB).
     NB = MIN(CONFIG%NUM_THREADS, NY)
     BN = (NY + NB - 1) / NB
     CALL COMPUTE_BATCHES(NB, X, AX, SIZES, BATCHA, BATCHM, INFO)
@@ -1091,14 +1092,15 @@ CONTAINS
        Y(:,:) = 0.0_RT
        RETURN
     END IF
-    NT = CONFIG%NUM_THREADS
     ! Only "revert" to the best model seen if some steps are taken.
     REVERT_TO_BEST = REVERT_TO_BEST .AND. (STEPS .GT. 0)
     ! Store the start time of this routine (to make sure updates can
     !    be shown to the user at a reasonable frequency).
     CALL CPU_TIME(LAST_PRINT_TIME)
     DID_PRINT = .FALSE.
-    WAIT_TIME = 2.0 * NT ! 2 seconds (times number of threads)
+    WAIT_TIME = 2.0 * NB ! 2 seconds (times number of threads)
+    ! Set the initial number of variables to update at the whole model.
+    NUM_TO_UPDATE = CONFIG%NUM_VARS
     ! Initial rates of change of mean and variance values.
     STEP_MEAN_CHANGE = CONFIG%INITIAL_STEP_MEAN_CHANGE
     STEP_MEAN_REMAIN = 1.0_RT - STEP_MEAN_CHANGE
@@ -1163,7 +1165,7 @@ CONTAINS
        SUM_SQUARED_ERROR = 0.0_RT
        ! Set gradients to zero initially.
        MODEL_GRAD(:) = 0.0_RT
-       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(BATCH) &
+       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH) SCHEDULE(STATIC) &
        !$OMP& REDUCTION(+: SUM_SQUARED_ERROR, MODEL_GRAD)
        DO BATCH = 1, NB
           ! Set the size start and end.
@@ -1192,12 +1194,15 @@ CONTAINS
           STEP_MEAN_REMAIN = 1.0_RT - STEP_MEAN_CHANGE
           STEP_CURV_CHANGE = STEP_CURV_CHANGE * CONFIG%SLOWER_RATE
           STEP_CURV_REMAIN = 1.0_RT - STEP_CURV_CHANGE
+          NUM_TO_UPDATE = MIN(CONFIG%NUM_VARS, &
+               NUM_TO_UPDATE + (CONFIG%NUM_VARS - NUM_TO_UPDATE) / 2)
        ELSE
           STEP_FACTOR = STEP_FACTOR * CONFIG%SLOWER_RATE
           STEP_MEAN_CHANGE = STEP_MEAN_CHANGE * CONFIG%FASTER_RATE
           STEP_MEAN_REMAIN = 1.0_RT - STEP_MEAN_CHANGE
           STEP_CURV_CHANGE = STEP_CURV_CHANGE * CONFIG%FASTER_RATE
           STEP_CURV_REMAIN = 1.0_RT - STEP_CURV_CHANGE
+          NUM_TO_UPDATE = MAX(1, NUM_TO_UPDATE / 2)
        END IF
        ! Store the previous error for tracking the best-so-far.
        PREV_MSE = MSE
@@ -1217,23 +1222,42 @@ CONTAINS
           EXIT fit_loop
        END IF
 
-       ! Convert the summed gradients to average gradients.
-       MODEL_GRAD(:) = MODEL_GRAD(:) / REAL(NB,RT)
-
        ! Update sliding window mean and variance calculations.
-       MODEL_GRAD_MEAN(:) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(:) &
-            + STEP_MEAN_CHANGE * MODEL_GRAD(:)
-       MODEL_GRAD_CURV(:) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(:) &
-            + STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(:) - MODEL_GRAD(:))**2
-       MODEL_GRAD_CURV(:) = MAX(MODEL_GRAD_CURV(:), EPSILON(STEP_FACTOR))
-       ! Set the step as the mean direction (over the past few steps).
-       MODEL_GRAD(:) = MODEL_GRAD_MEAN(:)
-       ! Start scaling by step magnitude by curvature once enough data is collected.
-       IF (I .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
-          MODEL_GRAD(:) = MODEL_GRAD(:) / SQRT(MODEL_GRAD_CURV(:))
-       END IF
-       ! Take the gradient steps (based on the computed "step" above).
-       MODEL(1:CONFIG%NUM_VARS) = MODEL(1:CONFIG%NUM_VARS) - MODEL_GRAD(:) * STEP_FACTOR
+       GN = MAX(1, CONFIG%NUM_VARS / NB)
+       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH, GS, GE) SCHEDULE(STATIC)
+       DO BATCH = 1, NB
+          GS = (BATCH-1)*GN + 1
+          GE = MIN(CONFIG%NUM_VARS, BATCH * GN)
+          IF (GE .LT. GS) CYCLE
+          ! Convert the summed gradients to average gradients.
+          MODEL_GRAD(GS:GE) = MODEL_GRAD(GS:GE) / REAL(NB,RT)
+          MODEL_GRAD_MEAN(GS:GE) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(GS:GE) &
+               + STEP_MEAN_CHANGE * MODEL_GRAD(GS:GE)
+          MODEL_GRAD_CURV(GS:GE) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(GS:GE) &
+               + STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(GS:GE) - MODEL_GRAD(GS:GE))**2
+          MODEL_GRAD_CURV(GS:GE) = MAX(MODEL_GRAD_CURV(GS:GE), EPSILON(STEP_FACTOR))
+          ! Set the step as the mean direction (over the past few steps).
+          MODEL_GRAD(GS:GE) = MODEL_GRAD_MEAN(GS:GE)
+          ! Start scaling by step magnitude by curvature once enough data is collected.
+          IF (I .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
+             MODEL_GRAD(GS:GE) = MODEL_GRAD(GS:GE) / SQRT(MODEL_GRAD_CURV(GS:GE))
+          END IF
+       END DO
+       !$OMP END PARALLEL DO
+       ! Identify the subset of components that will be updapted this step.
+       CALL ARGSELECT(-ABS(MODEL_GRAD(:)), NUM_TO_UPDATE, UPDATE_INDICES(:))
+       ! Take the step for only those most important parameters.
+       GN = MAX(1, NUM_TO_UPDATE / NB)
+       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH, GS, GE) SCHEDULE(STATIC)
+       DO BATCH = 1, NB
+          GS = (BATCH-1) * GN + 1
+          GE = MIN(NUM_TO_UPDATE, BATCH * GN)
+          IF (GE .LT. GS) CYCLE
+          ! Take the gradient steps (based on the computed "step" above).
+          MODEL(UPDATE_INDICES(GS:GE)) = MODEL(UPDATE_INDICES(GS:GE)) &
+               - MODEL_GRAD(UPDATE_INDICES(GS:GE)) * STEP_FACTOR
+       END DO
+       !$OMP END PARALLEL DO
 
        ! Record the 2-norm of the step that was taken (the GRAD variables were updated).
        IF (PRESENT(RECORD)) THEN
@@ -1241,6 +1265,8 @@ CONTAINS
           RECORD(1,I) = MSE
           ! Store the norm of the step that was taken.
           RECORD(2,I) = SQRT(MAX(EPSILON(0.0_RT), SUM(MODEL_GRAD(:)**2)))
+          ! Store the percentage of parameters updated in this step.
+          RECORD(3,I) = REAL(NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
        END IF
 
        ! TODO: Replace with a more general "condition_model" routine that takes
@@ -1303,10 +1329,12 @@ CONTAINS
       INTEGER :: L
       SCALAR = SQRT(MAXVAL(SUM(INPUT_VECS(:,:)**2, 1)))
       INPUT_VECS(:,:) = INPUT_VECS(:,:) / SCALAR
+      !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(L, SCALAR) SCHEDULE(STATIC)
       DO L = 1, SIZE(STATE_VECS,3)
          SCALAR = SQRT(MAXVAL(SUM(STATE_VECS(:,:,L)**2, 1)))
          STATE_VECS(:,:,L) = STATE_VECS(:,:,L) / SCALAR
       END DO
+      !$OMP END PARALLEL DO
     END SUBROUTINE UNIT_MAX_NORM
 
     ! Scale a set of basis functions by "weights".
@@ -1330,6 +1358,128 @@ CONTAINS
          END DO
       END IF
     END SUBROUTINE SCALE_BASIS
+
+    
+    ! ------------------------------------------------------------------
+    !                       FastSelect method
+    ! 
+    ! Given VALUES list of numbers, rearrange the elements of INDICES
+    ! such that the element of VALUES at INDICES(K) has rank K (holds
+    ! its same location as if all of VALUES were sorted in INDICES).
+    ! All elements of VALUES at INDICES(:K-1) are less than or equal,
+    ! while all elements of VALUES at INDICES(K+1:) are greater or equal.
+    ! 
+    ! This algorithm uses a recursive approach to exponentially shrink
+    ! the number of indices that have to be considered to find the
+    ! element of desired rank, while simultaneously pivoting values
+    ! that are less than the target rank left and larger right.
+    ! 
+    ! Arguments:
+    ! 
+    !   VALUES   --  A 1D array of real numbers. Will not be modified.
+    !   K        --  A positive integer for the rank index about which
+    !                VALUES should be rearranged.
+    ! Optional:
+    ! 
+    !   DIVISOR  --  A positive integer >= 2 that represents the
+    !                division factor used for large VALUES arrays.
+    !   MAX_SIZE --  An integer >= DIVISOR that represents the largest
+    !                sized VALUES for which the worst-case pivot value
+    !                selection is tolerable. A worst-case pivot causes
+    !                O( SIZE(VALUES)^2 ) runtime. This value should be
+    !                determined heuristically based on compute hardware.
+    ! Output:
+    ! 
+    !   INDICES  --  A 1D array of original indices for elements of VALUES.
+    ! 
+    !   The elements of the array INDICES are rearranged such that the
+    !   element at position VALUES(INDICES(K)) is in the same location 
+    !   it would be if all of VALUES were referenced in sorted order in
+    !   INDICES. Also known as, VALUES(INDICES(K)) has rank K.
+    ! 
+    RECURSIVE SUBROUTINE ARGSELECT(VALUES, K, INDICES, DIVISOR, MAX_SIZE, RECURSING)
+      USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+      IMPLICIT NONE
+      ! Arguments
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: VALUES
+      INTEGER, INTENT(IN) :: K
+      INTEGER, INTENT(INOUT), DIMENSION(:) :: INDICES
+      INTEGER, INTENT(IN), OPTIONAL :: DIVISOR, MAX_SIZE
+      LOGICAL, INTENT(IN), OPTIONAL :: RECURSING
+      ! Locals
+      INTEGER :: LEFT, RIGHT, L, R, MS, D, I
+      REAL(KIND=RT) :: P
+      ! Initialize the divisor (for making subsets).
+      IF (PRESENT(DIVISOR)) THEN ; D = DIVISOR
+      ELSE IF (SIZE(INDICES) .GE. 8388608) THEN ; D = 32 ! 2**5 ! 2**23
+      ELSE IF (SIZE(INDICES) .GE. 1048576) THEN ; D = 8  ! 2**3 ! 2**20
+      ELSE                                      ; D = 4  ! 2**2
+      END IF
+      ! Initialize the max size (before subsets are created).
+      IF (PRESENT(MAX_SIZE)) THEN ; MS = MAX_SIZE
+      ELSE                        ; MS = 1024 ! 2**10
+      END IF
+      ! When not recursing, set the INDICES to default values.
+      IF (.NOT. PRESENT(RECURSING)) THEN
+         FORALL(I=1:SIZE(INDICES)) INDICES(I) = I
+      END IF
+      ! Initialize LEFT and RIGHT to be the entire array.
+      LEFT = 1
+      RIGHT = SIZE(INDICES)
+      ! Loop until done finding the K-th element.
+      DO WHILE (LEFT .LT. RIGHT)
+         ! Use SELECT recursively to improve the quality of the
+         ! selected pivot value for large arrays.
+         IF (RIGHT - LEFT .GT. MS) THEN
+            ! Compute how many elements should be left and right of K
+            ! to maintain the same percentile in a subset.
+            L = K - K / D
+            R = L + (SIZE(INDICES) / D)
+            ! Perform fast select on an array a fraction of the size about K.
+            CALL ARGSELECT(VALUES(:), K - L + 1, INDICES(L:R), &
+                 DIVISOR=D, MAX_SIZE=MS, RECURSING=.TRUE.)
+         END IF
+         ! Pick a partition element at position K.
+         P = VALUES(INDICES(K))
+         L = LEFT
+         R = RIGHT
+         ! Move the partition element to the front of the list.
+         CALL SWAP_INT(INDICES(LEFT), INDICES(K))
+         ! Pre-swap the left and right elements (temporarily putting a
+         ! larger element on the left) before starting the partition loop.
+         IF (VALUES(INDICES(RIGHT)) .GT. P) THEN
+            CALL SWAP_INT(INDICES(LEFT), INDICES(RIGHT))
+         END IF
+         ! Now partition the elements about the pivot value "P".
+         DO WHILE (L .LT. R)
+            CALL SWAP_INT(INDICES(L), INDICES(R))
+            L = L + 1
+            R = R - 1
+            DO WHILE (VALUES(INDICES(L)) .LT. P) ; L = L + 1 ; END DO
+            DO WHILE (VALUES(INDICES(R)) .GT. P) ; R = R - 1 ; END DO
+         END DO
+         ! Place the pivot element back into its appropriate place.
+         IF (VALUES(INDICES(LEFT)) .EQ. P) THEN
+            CALL SWAP_INT(INDICES(LEFT), INDICES(R))
+         ELSE
+            R = R + 1
+            CALL SWAP_INT(INDICES(R), INDICES(RIGHT))
+         END IF
+         ! adjust left and right towards the boundaries of the subset
+         ! containing the (k - left + 1)th smallest element
+         IF (R .LE. K) LEFT = R + 1
+         IF (K .LE. R) RIGHT = R - 1
+      END DO
+    END SUBROUTINE ARGSELECT
+
+    SUBROUTINE SWAP_INT(V1, V2)
+      IMPLICIT NONE
+      INTEGER, INTENT(INOUT) :: V1, V2
+      INTEGER :: TEMP
+      TEMP = V1
+      V1 = V2
+      V2 = TEMP
+    END SUBROUTINE SWAP_INT
 
 
   END SUBROUTINE MINIMIZE_MSE
