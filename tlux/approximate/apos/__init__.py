@@ -12,7 +12,8 @@ class APOS:
     # Initialize a new APOS model.
     def __init__(self, **kwargs):
         import fmodpy
-        f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
+        f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp"
+        # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
         apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
                               verbose=False, output_dir=_this_dir,
                               f_compiler_args=f_compiler_args)
@@ -443,17 +444,17 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
     seed = 1
-    layer_dim = 128
-    num_layers = 16
+    layer_dim = 32
+    num_layers = 8
     steps = 1000
     num_threads = None
     np.random.seed(seed)
 
 
-    TEST_SAVE_LOAD = False
+    TEST_SAVE_LOAD = True
     TEST_INT_INPUT = True
-    TEST_APOSITIONAL = False
-    TEST_VARIED_SIZE = False
+    TEST_APOSITIONAL = True
+    TEST_VARIED_SIZE = True
 
 
     if TEST_SAVE_LOAD:
@@ -527,7 +528,7 @@ if __name__ == "__main__":
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        m.fit(all_x, all_y, xi=all_xi)
+        m.fit(x=all_x, y=all_y, xi=all_xi)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         y1 = m(x, xi=xi1)
@@ -567,7 +568,7 @@ if __name__ == "__main__":
         axi = (np.ones(all_x.shape, dtype="int32") * (np.arange(all_x.shape[1])+1)).reshape(-1,1)
         sizes = np.ones(all_x.shape[0], dtype="int32") * 2
         temp_x = np.zeros((all_x.shape[0],0), dtype="float32")
-        m.fit(x=temp_x, y=all_y, xi=all_xi, ax=ax, axi=axi, sizes=sizes)
+        m.fit(x=temp_x, y=all_y, xi=all_xi, ax=ax, axi=axi, sizes=sizes, steps=1000)
 
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
@@ -581,15 +582,15 @@ if __name__ == "__main__":
         p = Plot()
         p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
         p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        def f(x, i=1):
+        def fhat(x, i=1):
             xi = i * np.ones((len(x),1),dtype="int32")
             ax = x.reshape((-1,1)).copy()
             axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
             sizes = np.ones(x.shape[0], dtype="int32") * 2
             temp_x = np.zeros((x.shape[0],0), dtype="float32")
             return m(x=temp_x, xi=xi, ax=ax, axi=axi, sizes=sizes)
-        p.add_func("xi=1", lambda x: f(x, 1), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
-        p.add_func("xi=2", lambda x: f(x, 2), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
+        p.add_func("xi=1", lambda x: fhat(x, 1), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
+        p.add_func("xi=2", lambda x: fhat(x, 2), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
         # Generate the visual.
         print("Generating surface plot..")
         p.show(show=False)

@@ -1067,7 +1067,7 @@ CONTAINS
     CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),25)
     !    singletons
     LOGICAL :: REVERT_TO_BEST, DID_PRINT
-    INTEGER :: BN, I, NB, NS, NY, BATCH, SS, SE, GS, GE, GN
+    INTEGER :: BN, I, NB, NS, NY, BATCH, SS, SE
     INTEGER :: UPDATE_INDICES(CONFIG%NUM_VARS), NUM_TO_UPDATE
     REAL(KIND=RT) :: RNY, BATCHES, PREV_MSE, MSE, BEST_MSE
     REAL(KIND=RT) :: STEP_FACTOR, STEP_MEAN_CHANGE, STEP_MEAN_REMAIN, &
@@ -1093,7 +1093,7 @@ CONTAINS
        RETURN
     END IF
     ! Only "revert" to the best model seen if some steps are taken.
-    REVERT_TO_BEST = REVERT_TO_BEST .AND. (STEPS .GT. 0)
+    REVERT_TO_BEST = CONFIG%KEEP_BEST .AND. (STEPS .GT. 0)
     ! Store the start time of this routine (to make sure updates can
     !    be shown to the user at a reasonable frequency).
     CALL CPU_TIME(LAST_PRINT_TIME)
@@ -1165,7 +1165,7 @@ CONTAINS
        SUM_SQUARED_ERROR = 0.0_RT
        ! Set gradients to zero initially.
        MODEL_GRAD(:) = 0.0_RT
-       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH) SCHEDULE(STATIC) &
+       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH) FIRSTPRIVATE(SS, SE) &
        !$OMP& REDUCTION(+: SUM_SQUARED_ERROR, MODEL_GRAD)
        DO BATCH = 1, NB
           ! Set the size start and end.
@@ -1222,42 +1222,30 @@ CONTAINS
           EXIT fit_loop
        END IF
 
-       ! Update sliding window mean and variance calculations.
-       GN = MAX(1, CONFIG%NUM_VARS / NB)
-       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH, GS, GE) SCHEDULE(STATIC)
-       DO BATCH = 1, NB
-          GS = (BATCH-1)*GN + 1
-          GE = MIN(CONFIG%NUM_VARS, BATCH * GN)
-          IF (GE .LT. GS) CYCLE
-          ! Convert the summed gradients to average gradients.
-          MODEL_GRAD(GS:GE) = MODEL_GRAD(GS:GE) / REAL(NB,RT)
-          MODEL_GRAD_MEAN(GS:GE) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(GS:GE) &
-               + STEP_MEAN_CHANGE * MODEL_GRAD(GS:GE)
-          MODEL_GRAD_CURV(GS:GE) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(GS:GE) &
-               + STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(GS:GE) - MODEL_GRAD(GS:GE))**2
-          MODEL_GRAD_CURV(GS:GE) = MAX(MODEL_GRAD_CURV(GS:GE), EPSILON(STEP_FACTOR))
-          ! Set the step as the mean direction (over the past few steps).
-          MODEL_GRAD(GS:GE) = MODEL_GRAD_MEAN(GS:GE)
-          ! Start scaling by step magnitude by curvature once enough data is collected.
-          IF (I .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
-             MODEL_GRAD(GS:GE) = MODEL_GRAD(GS:GE) / SQRT(MODEL_GRAD_CURV(GS:GE))
-          END IF
-       END DO
-       !$OMP END PARALLEL DO
-       ! Identify the subset of components that will be updapted this step.
-       CALL ARGSELECT(-ABS(MODEL_GRAD(:)), NUM_TO_UPDATE, UPDATE_INDICES(:))
-       ! Take the step for only those most important parameters.
-       GN = MAX(1, NUM_TO_UPDATE / NB)
-       !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(BATCH, GS, GE) SCHEDULE(STATIC)
-       DO BATCH = 1, NB
-          GS = (BATCH-1) * GN + 1
-          GE = MIN(NUM_TO_UPDATE, BATCH * GN)
-          IF (GE .LT. GS) CYCLE
+       ! Convert the summed gradients to average gradients.
+       MODEL_GRAD(:) = MODEL_GRAD(:) / REAL(NB,RT)
+       MODEL_GRAD_MEAN(:) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(:) &
+            + STEP_MEAN_CHANGE * MODEL_GRAD(:)
+       MODEL_GRAD_CURV(:) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(:) &
+            + STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(:) - MODEL_GRAD(:))**2
+       MODEL_GRAD_CURV(:) = MAX(MODEL_GRAD_CURV(:), EPSILON(STEP_FACTOR))
+       ! Set the step as the mean direction (over the past few steps).
+       MODEL_GRAD(:) = MODEL_GRAD_MEAN(:)
+       ! Start scaling by step magnitude by curvature once enough data is collected.
+       IF (I .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
+          MODEL_GRAD(:) = MODEL_GRAD(:) / SQRT(MODEL_GRAD_CURV(:))
+       END IF
+       ! Update as many parameters as it seems safe to update (and still converge).
+       IF (NUM_TO_UPDATE .LT. CONFIG%NUM_VARS) THEN
+          ! Identify the subset of components that will be updapted this step.
+          CALL ARGSELECT(-ABS(MODEL_GRAD(:)), NUM_TO_UPDATE, UPDATE_INDICES(:))
           ! Take the gradient steps (based on the computed "step" above).
-          MODEL(UPDATE_INDICES(GS:GE)) = MODEL(UPDATE_INDICES(GS:GE)) &
-               - MODEL_GRAD(UPDATE_INDICES(GS:GE)) * STEP_FACTOR
-       END DO
-       !$OMP END PARALLEL DO
+          MODEL(UPDATE_INDICES(1:NUM_TO_UPDATE)) = MODEL(UPDATE_INDICES(1:NUM_TO_UPDATE)) &
+               - MODEL_GRAD(UPDATE_INDICES(1:NUM_TO_UPDATE)) * STEP_FACTOR
+       ELSE
+          ! Take the gradient steps (based on the computed "step" above).
+          MODEL(1:CONFIG%NUM_VARS) = MODEL(1:CONFIG%NUM_VARS) - MODEL_GRAD(:) * STEP_FACTOR
+       END IF
 
        ! Record the 2-norm of the step that was taken (the GRAD variables were updated).
        IF (PRESENT(RECORD)) THEN
@@ -1305,7 +1293,7 @@ CONTAINS
        MODEL(1:CONFIG%NUM_VARS) = BEST_MODEL(:)
     END IF
 
-    ! Apply the normalizing scaling factors to the weight matrices.
+    ! Apply the data normalizing scaling factors to the weight matrices.
     IF (SIZE(X,1) .GT. 0) &
          CALL SCALE_BASIS(CONFIG%MDI, CONFIG%MDS, &
          MODEL(CONFIG%MSIV:CONFIG%MEIV), 1.0_RT / X_SCALE(:))
@@ -1329,7 +1317,7 @@ CONTAINS
       INTEGER :: L
       SCALAR = SQRT(MAXVAL(SUM(INPUT_VECS(:,:)**2, 1)))
       INPUT_VECS(:,:) = INPUT_VECS(:,:) / SCALAR
-      !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(L, SCALAR) SCHEDULE(STATIC)
+      !$OMP PARALLEL DO NUM_THREADS(NB) PRIVATE(L, SCALAR)
       DO L = 1, SIZE(STATE_VECS,3)
          SCALAR = SQRT(MAXVAL(SUM(STATE_VECS(:,:,L)**2, 1)))
          STATE_VECS(:,:,L) = STATE_VECS(:,:,L) / SCALAR
