@@ -272,7 +272,7 @@ class APOS:
 
     # Make predictions for new data.
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
-                save_states=False, **kwargs):
+                embedding=False, save_states=False, **kwargs):
         # Evaluate the model at all data.
         assert ((x is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x' or 'sizes' to not be None."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -378,7 +378,10 @@ class APOS:
         if (save_states):
             self.m_states = m_states
             self.a_states = a_states
-        return y
+        if (embedding):
+            return m_states[:,:,0]
+        else:
+            return y
 
 
     # Save this model to a path.
@@ -446,15 +449,15 @@ if __name__ == "__main__":
     seed = 1
     layer_dim = 32
     num_layers = 8
-    steps = 1000
+    steps = 10000
     num_threads = None
     np.random.seed(seed)
 
 
-    TEST_SAVE_LOAD = True
+    TEST_SAVE_LOAD = False
     TEST_INT_INPUT = True
-    TEST_APOSITIONAL = True
-    TEST_VARIED_SIZE = True
+    TEST_APOSITIONAL = False
+    TEST_VARIED_SIZE = False
 
 
     if TEST_SAVE_LOAD:
@@ -537,8 +540,8 @@ if __name__ == "__main__":
         p = Plot()
         p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
         p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
-        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
+        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, shade=True)
+        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, shade=True)
 
         # Generate the visual.
         print("Generating surface plot..")
