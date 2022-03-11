@@ -1,4 +1,8 @@
 import os
+from tlux.math.fraction import Fraction
+from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
+from tlux.math.polynomial import fit as fit_spline
+from tlux.math.polynomial import polynomial as fit_polynomial
 
 # Try using fmodpy to construct a Fortran wrapper over the `fmath.f90` library.
 try:

@@ -258,7 +258,7 @@ class APOS:
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Minimize the mean squared error.
-        self.record = np.zeros((steps,3), dtype="float32", order="C")
+        self.record = np.zeros((steps,4), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model,
                                         y.T, x.T, xi.T, ax.T, axi.T, sizes,
                                         steps=steps, record=self.record.T)
@@ -509,8 +509,9 @@ if __name__ == "__main__":
             # Rescale the columns of the record for visualization.
             record = m.record
             p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-            p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-            p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+            p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+            p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+            p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
             p.show(append=True, show=True)
             print("", "done.", flush=True)
         # Remove the save files.
@@ -551,8 +552,9 @@ if __name__ == "__main__":
         # Rescale the columns of the record for visualization.
         record = m.record
         p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-        p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-        p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
         p.show(append=True, show=True)
         print("", "done.", flush=True)
 
@@ -602,8 +604,9 @@ if __name__ == "__main__":
         # Rescale the columns of the record for visualization.
         record = m.record
         p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-        p.add("Step sizes", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-        p.add("Update ratio", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
         p.show(append=True, show=True)
         print("", "done.", flush=True)
 

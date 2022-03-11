@@ -1052,7 +1052,7 @@ CONTAINS
     INTEGER,       INTENT(IN), DIMENSION(:) :: SIZES
     INTEGER,       INTENT(IN) :: STEPS
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(3,STEPS), OPTIONAL :: RECORD
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(4,STEPS), OPTIONAL :: RECORD
     INTEGER,       INTENT(OUT) :: INFO
     !  Local variables.
     !    gradient step arrays, 4 copies of model + (num threads - 1)
@@ -1251,10 +1251,12 @@ CONTAINS
        IF (PRESENT(RECORD)) THEN
           ! Store the mean squared error at this iteration.
           RECORD(1,I) = MSE
+          ! Store the current multiplier on the step.
+          RECORD(2,I) = STEP_FACTOR
           ! Store the norm of the step that was taken.
-          RECORD(2,I) = SQRT(MAX(EPSILON(0.0_RT), SUM(MODEL_GRAD(:)**2)))
+          RECORD(3,I) = SQRT(MAX(EPSILON(0.0_RT), SUM(MODEL_GRAD(:)**2)))
           ! Store the percentage of parameters updated in this step.
-          RECORD(3,I) = REAL(NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
+          RECORD(4,I) = REAL(NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
        END IF
 
        ! TODO: Replace with a more general "condition_model" routine that takes
