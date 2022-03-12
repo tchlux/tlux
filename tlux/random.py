@@ -21,7 +21,8 @@ def sphere(num_points, dimension, radius=1.0):
 
 # Random points within a [0,1] box.
 def box(num_points, dimension):
-    return np.random.random(size=(num_points, dimension))
+    from numpy.random import uniform
+    return uniform(size=(num_points, dimension))
 
 # Generate random points that are well spaced in the [0,1] box.
 def well_spaced_box(num_points, dimension):
