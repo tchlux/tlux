@@ -8,17 +8,22 @@ class APOS:
     # Make the string function return the unpacked model.
     def __str__(self): return str(self.model_unpacked())
 
-
     # Initialize a new APOS model.
     def __init__(self, **kwargs):
-        import fmodpy
-        f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp"
-        # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
-        apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
-                              verbose=False, output_dir=_this_dir,
-                              f_compiler_args=f_compiler_args)
-        # Store the Fortran module as an attribute.
-        self.APOS = apos.apos
+        try:
+            import fmodpy
+            f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp"
+            # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
+            apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
+                                  verbose=False, output_dir=_this_dir,
+                                  f_compiler_args=f_compiler_args)
+            # Store the Fortran module as an attribute.
+            self.APOS = apos.apos
+        except:
+            # TODO:
+            #  - python fallback that supports the basic evaluation of
+            #    a model (but no support for training new models).
+            raise(NotImplementedError("The Fortran source was not loaded successfully."))
         # Set defaults for standard internal parameters.
         self.steps = 1000
         self.seed = None
@@ -138,12 +143,12 @@ class APOS:
                    (f"  embedding dimension  {self.config.mde}\n"+
                     f"  number of embeddings {self.config.mne}\n"
                      if self.config.mne > 0 else "")+
-                    f"  embeddings   {self.x_embeddings.shape}  "+to_str(self.x_embeddings)+
-                    f"  input vecs   {self.x_input_vecs.shape}  "+to_str(self.x_input_vecs)+
-                    f"  input shift  {self.x_input_shift.shape} "+to_str(self.x_input_shift)+
-                    f"  state vecs   {self.x_state_vecs.shape}  "+to_str(self.x_state_vecs)+
-                    f"  state shift  {self.x_state_shift.shape} "+to_str(self.x_state_shift)+
-                    f"  output vecs  {self.x_output_vecs.shape} "+to_str(self.x_output_vecs)
+                    f"  embeddings   {self.m_embeddings.shape}  "+to_str(self.m_embeddings)+
+                    f"  input vecs   {self.m_input_vecs.shape}  "+to_str(self.m_input_vecs)+
+                    f"  input shift  {self.m_input_shift.shape} "+to_str(self.m_input_shift)+
+                    f"  state vecs   {self.m_state_vecs.shape}  "+to_str(self.m_state_vecs)+
+                    f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
+                    f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
                 )
         return ModelUnpacked()
 
@@ -384,7 +389,7 @@ class APOS:
                 )
             y = np.asarray(_y).T
         if (save_states):
-            self.x_states = m_states
+            self.m_states = m_states
             self.a_states = a_states
         if (embedding):
             return m_states[:,:,0]
@@ -465,8 +470,8 @@ if __name__ == "__main__":
     np.random.seed(seed)
 
 
-    TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = True
+    TEST_SAVE_LOAD = True
+    TEST_INT_INPUT = False
     TEST_APOSITIONAL = False
     TEST_VARIED_SIZE = False
 
@@ -543,7 +548,44 @@ if __name__ == "__main__":
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        m.fit(x=all_x, yi=all_y.round(1), xi=all_xi)
+        m.fit(x=all_x, y=all_y, xi=all_xi)
+        # Create an evaluation set that evaluates the model that was built over two differnt functions.
+        xi1 = np.ones((len(x),1),dtype="int32")
+        y1 = m(x, xi=xi1)
+        y2 = m(x, xi=2*xi1)
+        print("Adding to plot..")
+        p = Plot()
+        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
+        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
+        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, shade=True)
+        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, shade=True)
+
+        # Generate the visual.
+        print("Generating surface plot..")
+        p.show(show=False)
+        print("Generating loss plot..")
+        p = type(p)("Mean squared error")
+        # Rescale the columns of the record for visualization.
+        record = m.record
+        p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
+        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
+        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
+        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
+        p.show(append=True, show=True)
+        print("", "done.", flush=True)
+
+        
+    if TEST_INT_INPUT:
+        print("Building model..")
+        x = well_spaced_box(100, 2)
+        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
+        y = f(x)
+        # Initialize a new model.
+        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
+        all_x = np.concatenate((x, x), axis=0)
+        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
+        all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
+        m.fit(x=all_x, y=all_y, xi=all_xi)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         y1 = m(x, xi=xi1)
