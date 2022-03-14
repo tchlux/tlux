@@ -377,8 +377,12 @@ class APOS:
         result = self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
                                     sizes, m_states, a_states, ay, info, **kwargs)
         assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
+        # Save the states if that's 
+        if (save_states):
+            self.m_states = m_states
+            self.a_states = a_states
         # If there are embedded y values in the output, return them to the format at training time.
-        if (len(self.yi_map) > 0):
+        if (len(self.yi_map) > 0) and (not embedding):
             yne = sum(self.yi_sizes)
             _y = [y[:,i] for i in range(y.shape[1]-yne)]
             for i in range(len(self.yi_map)):
@@ -388,13 +392,9 @@ class APOS:
                     self.yi_map[i][np.argmax(y[:,start:start+size], axis=1)]
                 )
             y = np.asarray(_y).T
-        if (save_states):
-            self.m_states = m_states
-            self.a_states = a_states
-        if (embedding):
-            return m_states[:,:,0]
-        else:
-            return y
+        elif (embedding and (len(self.yi_map) == 0)):
+            return m_states[:,:,0]            
+        return y
 
 
     # Save this model to a path.
