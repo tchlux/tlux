@@ -26,12 +26,15 @@ class APOS:
         self.model = np.zeros(0, dtype="float32")
         self.record = np.zeros(0, dtype="float32")
         # Default descriptors for categorical inputs.
-        self.m_map = []
-        self.m_sizes = []
-        self.m_starts = []
-        self.a_map = []
-        self.a_sizes = []
-        self.a_starts = []
+        self.xi_map = []
+        self.xi_sizes = []
+        self.xi_starts = []
+        self.axi_map = []
+        self.axi_sizes = []
+        self.axi_starts = []
+        self.yi_map = []
+        self.yi_sizes = []
+        self.yi_starts = []
         # Initialize the attributes of the model that can be initialized.
         self._init_model(**kwargs)
 
@@ -135,27 +138,64 @@ class APOS:
                    (f"  embedding dimension  {self.config.mde}\n"+
                     f"  number of embeddings {self.config.mne}\n"
                      if self.config.mne > 0 else "")+
-                    f"  embeddings   {self.m_embeddings.shape}  "+to_str(self.m_embeddings)+
-                    f"  input vecs   {self.m_input_vecs.shape}  "+to_str(self.m_input_vecs)+
-                    f"  input shift  {self.m_input_shift.shape} "+to_str(self.m_input_shift)+
-                    f"  state vecs   {self.m_state_vecs.shape}  "+to_str(self.m_state_vecs)+
-                    f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
-                    f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
+                    f"  embeddings   {self.x_embeddings.shape}  "+to_str(self.x_embeddings)+
+                    f"  input vecs   {self.x_input_vecs.shape}  "+to_str(self.x_input_vecs)+
+                    f"  input shift  {self.x_input_shift.shape} "+to_str(self.x_input_shift)+
+                    f"  state vecs   {self.x_state_vecs.shape}  "+to_str(self.x_state_vecs)+
+                    f"  state shift  {self.x_state_shift.shape} "+to_str(self.x_state_shift)+
+                    f"  output vecs  {self.x_output_vecs.shape} "+to_str(self.x_output_vecs)
                 )
         return ModelUnpacked()
 
 
-    # Fit this model.
-    def fit(self, x=None, y=None, xi=None, ax=None, axi=None,
-            sizes=None, new_model=False, **kwargs):
-        # Ensure that 'y' values were provided.
-        assert (y is not None), "APOS.fit requires 'y' values, but not provided (use keyword argument 'y=<values>')."
-        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
-        if ((ax is not None) or (axi is not None)):
-            assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
+    # Given a categorical input array, construct a dictionary for
+    #  mapping the unique values in the columns of the array to integers.
+    def _i_map(self, xi):
+        if (len(xi.dtype) > 0):
+            xi_map = [np.unique(xi[n]) for n in xi.dtype.names]
+        else:
+            xi_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
+        xi_sizes = [len(u) for u in xi_map]
+        xi_starts = (np.cumsum(xi_sizes) - xi_sizes[0] + 1).tolist()
+        return xi_map, xi_sizes, xi_starts
+
+
+    # Given a categorical input array (either 2D or struct), map this
+    #  array to an integer encoding matrix with the same number of
+    #  columns, but unique integers assigned to each unique value.
+    def _i_encode(self, xi, xi_map, xi_sizes, xi_starts):
+        xi_rows = xi.shape[0]
+        xi_cols = len(xi.dtype) or xi.shape[1]
+        _xi = np.zeros((xi_rows, xi_cols), dtype="int32", order="C")
+        for i in range(xi_cols):
+            start_index = xi_starts[i]
+            num_unique = xi_sizes[i]
+            unique_vals = xi_map[i]
+            vals = (xi[:,i:i+1] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
+            eq_val = vals == unique_vals
+            # Add a column to the front that is the default if none match.
+            eq_val = np.concatenate((
+                np.logical_not(eq_val.max(axis=1)).reshape(xi_rows,1),
+                eq_val), axis=1)
+            val_indices = np.ones((xi_rows,num_unique+1), dtype="int32") * np.arange(num_unique+1)
+            val_indices[:,1:] += start_index-1
+            _xi[:,i] = val_indices[eq_val]
+        return _xi
+
+
+    # Convert all inputs to the APOS model into the expected numpy format.
+    def _to_array(self, y, yi, x, xi, ax, axi, sizes):
+        # Get the number of inputs.
+        if   (y  is not None): mn = len(y)
+        elif (yi is not None): mn = len(yi)
+        elif (x  is not None): mn = len(x)
+        elif (xi is not None): mn = len(xi)
+        elif (sizes is not None): mn = len(sizes)
         # Make sure that all inputs are numpy arrays.
-        if (y is not None): y = np.asarray(y, dtype="float32", order="C")
-        mn = y.shape[0]
+        if (y is not None):  y = np.asarray(y, dtype="float32", order="C")
+        else:                y = np.zeros((mn,0), dtype="float32", order="C") 
+        if (yi is not None): yi = np.asarray(yi)
+        else:                yi = np.zeros((mn,0), dtype="int32", order="C")
         if (x is not None): x = np.asarray(x, dtype="float32", order="C")
         else:               x = np.zeros((mn,0), dtype="float32", order="C")
         if (xi is not None): xi = np.asarray(xi)
@@ -169,6 +209,7 @@ class APOS:
         else:                 axi = np.zeros((an,0), dtype="int32", order="C")
         # Make sure that all inputs have the expected shape.
         assert (len(y.shape) in {1,2}), f"Bad y shape {y.shape}, should be 1D or 2D matrix."
+        assert (len(yi.shape) in {1,2}), f"Bad yi shape {yi.shape}, should be 1D or 2D matrix."
         assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
         assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
         assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
@@ -176,52 +217,71 @@ class APOS:
         assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
         # Reshape inputs to all be two dimensional (except sizes).
         if (len(y.shape) == 1): y = y.reshape((-1,1))
-        mdo = y.shape[1]
+        if (len(yi.shape) == 1) and (len(yi.dtype) == 0): yi = yi.reshape((-1,1))
         if (len(x.shape) == 1): x = x.reshape((-1,1))
-        mdi = x.shape[1]
-        if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
+        if (len(xi.shape) == 1) and (len(xi.dtype) == 0): xi = xi.reshape((-1,1))
         if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
+        if ((len(axi.shape) == 1) and (len(axi.dtype) == 0)): axi = axi.reshape((-1,1))
+        mdo = y.shape[1]
+        mdi = x.shape[1]
         adi = ax.shape[1]
-        if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
-        # TODO: Extract all of the code above ^^^ into a separate
-        #       "_to_arrays" function. Find overlap with 'predict'.
-        # TODO: Add support for 'yi', add y components for unique values
-        #       and modify .predict to output the predicted unique value.
-        # TODO: Extract below to "_unique_aggregation" function, remove
-        #       redundancy between xi and axi.
-        # Transform cetegorical inputs into expected format for model.
-        if (xi.shape[1] > 0):
-            self.m_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
-            self.m_sizes = [len(u) for u in self.m_map]
-            self.m_starts = (np.cumsum(self.m_sizes) - self.m_sizes[0] + 1).tolist()
-            mne = sum(self.m_sizes)
-            _xi = np.zeros((mn, xi.shape[1]), dtype="int32", order="C")
-            for i in range(xi.shape[1]):
-                start_index = self.m_starts[i]
-                num_unique = self.m_sizes[i]
-                unique_vals = self.m_map[i]
-                eq_val = xi[:,i].reshape(-1,1) == unique_vals
-                val_indices = np.ones((mn,num_unique), dtype="int32") * (
-                    start_index + np.arange(num_unique))
-                _xi[:,i] = val_indices[eq_val]
-            xi = _xi
+        # Handle mapping "xi" into integer encodings.
+        xi_cols = len(xi.dtype) or xi.shape[1]
+        if (xi_cols > 0):
+            if (len(self.xi_map) == 0):
+                self.xi_map, self.xi_sizes, self.xi_starts = self._i_map(xi)
+            else:
+                assert (xi_cols == len(self.xi_map)), f"Bad number of columns in 'xi', {xi_cols}, expected {len(self.xi_map)} columns."
+            xi = self._i_encode(xi, self.xi_map, self.xi_sizes, self.xi_starts)
+            mne = sum(self.xi_sizes)
         else: mne = 0
-        if (axi.shape[1] > 0):
-            self.a_map = [np.unique(axi[:,i]) for i in range(axi.shape[1])]
-            self.a_sizes = [len(u) for u in self.a_map]
-            self.a_starts = (np.cumsum(self.a_sizes) - self.a_sizes[0] + 1).tolist()
-            ane = sum(self.a_sizes)
-            _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
-            for i in range(axi.shape[1]):
-                start_index = self.a_starts[i]
-                num_unique = self.a_sizes[i]
-                unique_vals = self.a_map[i]
-                eq_val = axi[:,i].reshape(-1,1) == unique_vals
-                val_indices = np.ones((an,num_unique), dtype="int32") * (
-                    start_index + np.arange(num_unique))
-                _axi[:,i] = val_indices[eq_val]
-            axi = _axi
+        # Handle mapping "axi" into integer encodings.
+        axi_cols = len(axi.dtype) or axi.shape[1]
+        if (axi_cols > 0):
+            if (len(self.axi_map) == 0):
+                self.axi_map, self.axi_sizes, self.axi_starts = self._i_map(axi)
+            else:
+                assert (axi_cols == len(self.axi_map)), f"Bad number of columns in 'axi', {axi_cols}, expected {len(self.axi_map)} columns."
+            axi = self._i_encode(axi, self.axi_map, self.axi_sizes, self.axi_starts)
+            ane = sum(self.axi_sizes)
         else: ane = 0
+        # Handle mapping "yi" into integer encodings.
+        yi_cols = len(yi.dtype) or yi.shape[1]
+        if (yi_cols > 0):
+            if (len(self.yi_map) == 0):
+                self.yi_map, self.yi_sizes, self.yi_starts = self._i_map(yi)
+            else:
+                assert (yi_cols == len(self.yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(self.yi_map)} columns."
+            yi = self._i_encode(yi, self.yi_map, self.yi_sizes, self.yi_starts)
+            yne = sum(self.yi_sizes)
+        else: yne = 0
+        # Handle mapping integer encoded "yi" into a single real valued y.
+        if (yne > 0):
+            embedded = np.concatenate((
+                np.zeros((1,yne), dtype="float32"),
+                np.identity(yne, dtype="float32")), axis=0)
+            _y = np.zeros((mn, mdo+yne), dtype="float32")
+            _y[:,:mdo] = y[:,:]
+            for i in range(yi.shape[1]):
+                _y[:,mdo:] += embedded[yi[:,i]]
+            y = _y
+            mdo += yne
+        # Return all the shapes and numpy formatted inputs.
+        return mn, an, mdi, mne, mdo, adi, ane, yne, y, x, xi, ax, axi, sizes
+
+
+    # Fit this model.
+    def fit(self, x=None, y=None, yi=None, xi=None, ax=None, axi=None,
+            sizes=None, new_model=False, **kwargs):
+        # Ensure that 'y' values were provided.
+        assert ((y is not None) or (yi is not None)), "APOS.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
+        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        if ((ax is not None) or (axi is not None)):
+            assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
+        # Get all inputs as arrays.
+        mn, an, mdi, mne, mdo, adi, ane, yne, y, x, xi, ax, axi, sizes = (
+            self._to_array(y, yi, x, xi, ax, axi, sizes)
+        )
         # ------------------------------------------------------------
         # If the shape of the model does not match the data, reinitialize.
         check_shape = lambda: self.APOS.check_shape(self.config, self.model, y.T, x.T, xi.T, ax.T, axi.T, sizes)
@@ -238,7 +298,7 @@ class APOS:
                     "ado": kwargs.get("ado",self.config.ado),
                 })
                 import warnings
-                warnings.warn(f"Creating new model config because 'check_shape' failed. Only keeping sizes, dropping all other custom configurations.")
+                warnings.warn(f"Creating new model config because 'check_shape' failed. Only keeping sizes, dropping all custom configurations.")
             # Ensure that the config is compatible with the data.
             kwargs.update({
                 "mdi":mdi,
@@ -249,7 +309,7 @@ class APOS:
             })
             self._init_model(**kwargs)
         # If a random seed is provided, then only 2 threads can be used
-        #  because nondeterministic behavior is exhibited otherwise.
+        #  because nondeterministic behavior comes from reordered addition.
         if (self.seed is not None):
             if (self.config.num_threads > 2):
                 import warnings
@@ -274,78 +334,15 @@ class APOS:
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, **kwargs):
         # Evaluate the model at all data.
-        assert ((x is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x' or 'sizes' to not be None."
+        assert ((x is not None) or (xi is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
-        if (x is not None):
-            x = np.asarray(x, dtype="float32", order="C")
-            mn = x.shape[0]
-        if (sizes is not None):
-            sizes = np.asarray(sizes, dtype="int32")
-            mn = sizes.shape[0]
-        if (x is None):     x = np.zeros((mn,0), dtype="float32", order="C")
-        if (sizes is None): sizes = np.zeros(0, dtype="int32")
-        an = sizes.sum()
-        if (xi is not None): xi = np.asarray(xi)
-        else:                xi = np.zeros((mn,0), dtype="int32", order="C")
-        if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
-        else:                ax = np.zeros((an,0), dtype="float32", order="C")
-        if (axi is not None): axi = np.asarray(axi)
-        else:                 axi = np.zeros((an,0), dtype="int32", order="C")
-        # Make sure that all inputs have the expected shape.
-        assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
-        assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
-        assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
-        assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
-        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
-        # Reshape inputs to all be two dimensional (except sizes).
-        if (len(x.shape) == 1): x = x.reshape((-1,1))
-        mdi = x.shape[1]
-        if (len(xi.shape) == 1): xi = xi.reshape((-1,1))
-        if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
-        adi = ax.shape[1]
-        if (len(axi.shape) == 1): axi = axi.reshape((-1,1))
-        # Make sure the categorical inputs have the expected shape.
-        assert (xi.shape[1] == len(self.m_map)), f"Bad xi shape {xi.shape}, expected {len(self.m_map)} columns."
-        assert (axi.shape[1] == len(self.a_map)), f"Bad axi shape {axi.shape}, expected {len(self.a_map)} columns."
-        # Transform cetegorical inputs into expected format for model.
-        if (xi.shape[1] > 0):
-            mne = self.m_starts[-1] - 1
-            _xi = np.zeros((mn, xi.shape[1]), dtype="int32", order="C")
-            for i in range(xi.shape[1]):
-                start_index = self.m_starts[i]
-                num_unique = self.m_sizes[i]
-                unique_vals = self.m_map[i]
-                eq_val = xi[:,i].reshape(-1,1) == unique_vals
-                # Add a column to the front that is the default if none match.
-                eq_val = np.concatenate((
-                    np.logical_not(eq_val.max(axis=1)).reshape(mn,1),
-                    eq_val), axis=1)
-                val_indices = np.ones((mn,num_unique+1), dtype="int32") * np.arange(num_unique+1)
-                val_indices[:,1:] += start_index-1
-                _xi[:,i] = val_indices[eq_val]
-            xi = _xi
-        else: mne = 0
-        if (axi.shape[1] > 0):
-            ane = self.a_starts[-1] - 1
-            _axi = np.zeros((an, axi.shape[1]), dtype="int32", order="C")
-            for i in range(axi.shape[1]):
-                start_index = self.a_starts[i]
-                num_unique = self.a_sizes[i]
-                unique_vals = self.a_map[i]
-                eq_val = axi[:,i].reshape(-1,1) == unique_vals
-                # Add a column to the front that is the default if none match.
-                eq_val = np.concatenate((
-                    np.logical_not(eq_val.max(axis=1)).reshape(an,1),
-                    eq_val), axis=1)
-                val_indices = np.ones((an,num_unique+1), dtype="int32") * np.arange(num_unique+1)
-                val_indices[:,1:] += start_index-1
-                _axi[:,i] = val_indices[eq_val]
-            axi = _axi
-        else: ane = 0
-        # Embed the inpputs into the purely positional form.
+        mn, an, mdi, mne, mdo, adi, ane, yne, _, x, xi, ax, axi, sizes = (
+            self._to_array(None, None, x, xi, ax, axi, sizes)
+        )
+        # Embed the inputs into the purely positional form.
         ade = self.config.ade
         ads = self.config.ads
         ado = self.config.ado
@@ -375,8 +372,19 @@ class APOS:
         result = self.APOS.evaluate(self.config, self.model, y.T, xxi.T, axxi.T,
                                     sizes, m_states, a_states, ay, info, **kwargs)
         assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
+        # If there are embedded y values in the output, return them to the format at training time.
+        if (len(self.yi_map) > 0):
+            yne = sum(self.yi_sizes)
+            _y = [y[:,i] for i in range(y.shape[1]-yne)]
+            for i in range(len(self.yi_map)):
+                start = self.yi_starts[i]
+                size = self.yi_sizes[i]
+                _y.append(
+                    self.yi_map[i][np.argmax(y[:,start:start+size], axis=1)]
+                )
+            y = np.asarray(_y).T
         if (save_states):
-            self.m_states = m_states
+            self.x_states = m_states
             self.a_states = a_states
         if (embedding):
             return m_states[:,:,0]
@@ -397,12 +405,15 @@ class APOS:
                 "config" : config,
                 "model"  : self.model.tolist(),
                 "record" : self.record.tolist(),
-                "m_map"    : [l.tolist() for l in self.m_map],
-                "m_sizes"  : self.m_sizes,
-                "m_starts" : self.m_starts,
-                "a_map"    : [l.tolist() for l in self.a_map],
-                "a_sizes"  : self.a_sizes,
-                "a_starts" : self.a_starts,
+                "xi_map"    : [l.tolist() for l in self.xi_map],
+                "xi_sizes"  : self.xi_sizes,
+                "xi_starts" : self.xi_starts,
+                "axi_map"    : [l.tolist() for l in self.axi_map],
+                "axi_sizes"  : self.axi_sizes,
+                "axi_starts" : self.axi_starts,
+                "yi_map"    : [l.tolist() for l in self.yi_map],
+                "yi_sizes"  : self.yi_sizes,
+                "yi_starts" : self.yi_starts,
             }))
 
 
@@ -417,7 +428,7 @@ class APOS:
             value = attrs[key]
             if (key[-4:] == "_map"):
                 value = [np.asarray(l) for l in value]
-            elif (key[:2] in {"m_","a_"}):
+            elif (key[:2] in {"xi_","axi_","yi_"}):
                 pass
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
@@ -532,7 +543,7 @@ if __name__ == "__main__":
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        m.fit(x=all_x, y=all_y, xi=all_xi)
+        m.fit(x=all_x, yi=all_y.round(1), xi=all_xi)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         y1 = m(x, xi=xi1)

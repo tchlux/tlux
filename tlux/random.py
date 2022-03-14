@@ -1,3 +1,8 @@
+# Random points within a [0,1] box.
+def box(num_points, dimension):
+    from numpy.random import uniform
+    return uniform(size=(num_points, dimension))
+
 
 # Generate "num_points" random points in "dimension" that have uniform
 # probability density over the unit ball scaled by "radius" (length of
@@ -19,10 +24,6 @@ def ball(num_points, dimension, inside=True, radius=1.0):
 def sphere(num_points, dimension, radius=1.0):
     return ball(num_points, dimension, inside=False, radius=radius)
 
-# Random points within a [0,1] box.
-def box(num_points, dimension):
-    from numpy.random import uniform
-    return uniform(size=(num_points, dimension))
 
 # Generate random points that are well spaced in the [0,1] box.
 def well_spaced_box(num_points, dimension):
@@ -95,3 +96,8 @@ def well_spaced_ball(num_points, dimension, inside=True):
         points *= radii
     # Switch points to row vectors and return.
     return points.T
+
+
+# Wrapper for well_spaced_ball routine.
+def well_spaced_sphere(num_points, dimension):
+    return well_spaced_ball(num_points, dimension, inside=False)

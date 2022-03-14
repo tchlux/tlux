@@ -1,10 +1,13 @@
 ! TODO:
 ! 
-! - Center and fit inputs and outputs to spherical points (unit length).
+! - Unify memory allocation so that threads don't have to allocate their
+!   own temporary space.
 ! 
 ! - Enable a model that has no internal states (for linear regression).
 ! 
 ! - Enable a apositional without a following model.
+! 
+! - Center and fit inputs and outputs to spherical points (unit length).
 ! 
 ! - Change initialization of shift terms to be based on the assumption
 !   that input data has spherical shape. Internal shift terms use
@@ -757,9 +760,9 @@ CONTAINS
   END SUBROUTINE EVALUATE
 
 
-  ! Given the values at all internal states in the model and an output gradient,
-  !  propogate the output gradient through the model and return the gradient
-  !  of all paprameters.
+  ! Given the values at all internal states in the model and an output
+  !  gradient, propogate the output gradient through the model and
+  !  return the gradient of all basis functions.
   SUBROUTINE BASIS_GRADIENT(CONFIG, MODEL, Y, X, AX, SIZES, &
        M_STATES, A_STATES, AY, GRAD)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
