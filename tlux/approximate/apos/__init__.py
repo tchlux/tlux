@@ -12,11 +12,12 @@ class APOS:
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp"
-            # f_compiler_args = "-fPIC -shared -O3 -lblas -fopenmp -fcheck=bounds"
-            apos = fmodpy.fimport(_source_code, blas=True, omp=True, wrap=True,
+            # f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
+            apos = fmodpy.fimport(_source_code, blas=True,
+                                  lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  f_compiler_args=f_compiler_args)
+                                  # f_compiler_args=f_compiler_args)
+            )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
         except:
@@ -465,13 +466,13 @@ if __name__ == "__main__":
     seed = 1
     layer_dim = 32
     num_layers = 8
-    steps = 10000
+    steps = 100
     num_threads = None
     np.random.seed(seed)
 
 
-    TEST_SAVE_LOAD = True
-    TEST_INT_INPUT = False
+    TEST_SAVE_LOAD = False
+    TEST_INT_INPUT = True
     TEST_APOSITIONAL = False
     TEST_VARIED_SIZE = False
 
