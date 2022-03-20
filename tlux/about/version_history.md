@@ -11,3 +11,4 @@
 | 0.0.5<br>March 2022 | APOS model added to library. |
 | 0.0.6<br>March 2022 | Added math library utilities, included update ratio <br> in APOS model training record. |
 | 0.0.7<br>March 2022 | Added missing import to random box function. |
+| 0.0.8<br>March 2022 | Updating setup script to attempt Fortran compilation <br> early. |
