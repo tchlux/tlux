@@ -1,4 +1,3 @@
-import os
 from tlux.math.fraction import Fraction
 from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
 from tlux.math.polynomial import fit as fit_spline
@@ -6,17 +5,7 @@ from tlux.math.polynomial import polynomial as fit_polynomial
 
 # Try using fmodpy to construct a Fortran wrapper over the `fmath.f90` library.
 try:
-    import fmodpy
-
-    # Import the Fortran math library.
-    _here = os.path.dirname(os.path.abspath(__file__))
-    _fmath_path = os.path.join(_here, "fmath.f90")
-    _fmath = fmodpy.fimport(_fmath_path, lapack=True, verbose=False, output_dir=_here)
-
-    # Create local names for the internal functions.
-    orthogonalize = _fmath.fmath.orthogonalize
-    svd = _fmath.fmath.svd
-
+    from .fmath import orthgonolize, svd
 # If anything above fails, fall back to Python implementations.
 except ImportError:
     import numpy as np

@@ -5,7 +5,7 @@ MODULE FMATH
 
 CONTAINS
 
-  ! Orthogonalize and normalize column vectors of A in order.
+  ! Orthogonalize and normalize column vectors of A with pivoting.
   SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
     REAL(KIND=RT), INTENT(OUT), DIMENSION(SIZE(A,2)) :: LENGTHS
