@@ -12,11 +12,11 @@ class APOS:
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            # f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
+            f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  # f_compiler_args=f_compiler_args)
+                                  f_compiler_args=f_compiler_args,
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
@@ -86,21 +86,21 @@ class APOS:
         if (self.config is None) or (self.model is None):
             return None
         # Build a class that contains pointers to the model internals.
-        class ModelUnpacked:
+        class AposModel:
             config = self.config
             model  = self.model
-            m_embeddings   = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
-            m_input_vecs   = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
-            m_input_shift  = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
-            m_state_vecs   = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
-            m_state_shift  = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, self.config.mns-1, order="F")
-            m_output_vecs  = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mds, self.config.mdo, order="F")
-            a_embeddings   = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
-            a_input_vecs   = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
-            a_input_shift  = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
-            a_state_vecs   = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
-            a_state_shift  = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
-            a_output_vecs  = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.ads, self.config.ado, order="F")
+            m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
+            m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
+            m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
+            m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
+            m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, self.config.mns-1, order="F")
+            m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mds, self.config.mdo, order="F")
+            a_embeddings  = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
+            a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
+            a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
+            a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
+            a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
+            a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.ads, self.config.ado, order="F")
 
             def __getitem__(self, *args, **kwargs):
                 return getattr(self, *args, **kwargs)
@@ -122,7 +122,7 @@ class APOS:
                 return (
                     f"APOS model ({self.config.total_size} parameters) [{byte_size}]\n"+
                      " apositional model\n"+
-                    f"  input dimension  {self.config.adi}\n"+
+                    f"  input dimension  {self.config.adi - self.config.ade}\n"+
                     f"  output dimension {self.config.ado}\n"+
                     f"  state dimension  {self.config.ads}\n"+
                     f"  number of states {self.config.ans}\n"+
@@ -137,7 +137,7 @@ class APOS:
                     f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
                      "\n"+
                      " positional model\n"+
-                    f"  input dimension  {self.config.mdi}\n"+
+                    f"  input dimension  {self.config.mdi - self.config.mde - self.config.ado}\n"+
                     f"  output dimension {self.config.mdo}\n"+
                     f"  state dimension  {self.config.mds}\n"+
                     f"  number of states {self.config.mns}\n"+
@@ -151,7 +151,7 @@ class APOS:
                     f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
                     f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
                 )
-        return ModelUnpacked()
+        return AposModel()
 
 
     # Given a categorical input array, construct a dictionary for
@@ -324,7 +324,7 @@ class APOS:
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Minimize the mean squared error.
-        self.record = np.zeros((steps,4), dtype="float32", order="C")
+        self.record = np.zeros((steps,6), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model,
                                         y.T, x.T, xi.T, ax.T, axi.T, sizes,
                                         steps=steps, record=self.record.T)
@@ -459,23 +459,32 @@ if __name__ == "__main__":
     # TODO: make visualization optional for all of the tests
 
     # A function for testing approximation algorithms.
+    
+
     def f(x):
         x = x.reshape((-1,2))
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
-    seed = 1
+
+    n = 100
+    seed = 2
     layer_dim = 32
-    num_layers = 8
-    steps = 100
+    num_layers = 4
+    steps = 1000
     num_threads = None
     np.random.seed(seed)
 
-
     TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = True
-    TEST_APOSITIONAL = False
+    TEST_INT_INPUT = False
+    TEST_APOSITIONAL = True
     TEST_VARIED_SIZE = False
+    SHOW_VISUALS = True
 
+    if (not SHOW_VISUALS):
+        class Plot:
+            def __init__(self, *args, **kwargs): pass
+            def __getattr__(self, *args, **kwargs):
+                return lambda *args, **kwargs: None
 
     if TEST_SAVE_LOAD:
         # Try saving an untrained model.
@@ -493,18 +502,13 @@ if __name__ == "__main__":
         print(m)
         print()
         # Create the test plot.
-        x = well_spaced_box(100, 2)
-        y = f(x)
-        # Normalize the data.
-        x -= x.mean(axis=0)
-        x /= x.var(axis=0)
-        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
-        y -= y.mean(axis=0)
-        y /= y.var(axis=0)
+        x = np.asarray(well_spaced_box(n, 2), dtype="float32", order="C")
+        y = f(x).astype("float32")
         # Fit the model.
-        m.fit(x, y)
+        m.fit(x.copy(), y.copy())
         # Add the data and the surface of the model to the plot.
         p = Plot()
+        x_min_max = np.asarray([x.min(axis=0), x.max(axis=0)]).T
         p.add("Data", *x.T, y)
         p.add_func("Fit", m, *x_min_max, vectorized=True)
         # Try saving the trained model and applying it after loading.
@@ -519,18 +523,6 @@ if __name__ == "__main__":
         print()
         p.add("Loaded values", *x.T, m(x)+0.05, color=1, marker_size=4)
         p.plot(show=(m.record.size == 0))
-        # Add plot showing the training loss.
-        if (m.record.size > 0):
-            print("Generating loss plot..")
-            p = type(p)("Mean squared error")
-            # Rescale the columns of the record for visualization.
-            record = m.record
-            p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-            p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-            p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
-            p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
-            p.show(append=True, show=True)
-            print("", "done.", flush=True)
         # Remove the save files.
         import os
         try: os.remove("testing_empty_save.json")
@@ -541,7 +533,7 @@ if __name__ == "__main__":
 
     if TEST_INT_INPUT:
         print("Building model..")
-        x = well_spaced_box(100, 2)
+        x = well_spaced_box(n, 2)
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
@@ -549,7 +541,8 @@ if __name__ == "__main__":
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        m.fit(x=all_x, y=all_y, xi=all_xi)
+        m.fit(x=all_x.copy(), y=all_y.copy(), xi=all_xi)
+
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         y1 = m(x, xi=xi1)
@@ -558,77 +551,32 @@ if __name__ == "__main__":
         p = Plot()
         p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
         p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, shade=True)
-        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, shade=True)
+        p.add_func("xi=1", lambda x: m(x.copy(), xi=np.ones(len(x), dtype="int32").reshape((-1,1))), *x_min_max, vectorized=True, color=3, shade=True)
+        p.add_func("xi=2", lambda x: m(x.copy(), xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), *x_min_max, vectorized=True, color=2, shade=True)
 
         # Generate the visual.
         print("Generating surface plot..")
         p.show(show=False)
-        print("Generating loss plot..")
-        p = type(p)("Mean squared error")
-        # Rescale the columns of the record for visualization.
-        record = m.record
-        p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
-        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
-        p.show(append=True, show=True)
-        print("", "done.", flush=True)
-
-        
-    if TEST_INT_INPUT:
-        print("Building model..")
-        x = well_spaced_box(100, 2)
-        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
-        y = f(x)
-        # Initialize a new model.
-        m = APOS(mdi=2, mds=layer_dim, mns=num_layers, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
-        all_x = np.concatenate((x, x), axis=0)
-        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
-        all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        m.fit(x=all_x, y=all_y, xi=all_xi)
-        # Create an evaluation set that evaluates the model that was built over two differnt functions.
-        xi1 = np.ones((len(x),1),dtype="int32")
-        y1 = m(x, xi=xi1)
-        y2 = m(x, xi=2*xi1)
-        print("Adding to plot..")
-        p = Plot()
-        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
-        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        p.add_func("xi=1", lambda x: m(x, xi=np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=3, shade=True)
-        p.add_func("xi=2", lambda x: m(x, xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), [0,1], [0,1], vectorized=True, color=2, shade=True)
-
-        # Generate the visual.
-        print("Generating surface plot..")
-        p.show(show=False)
-        print("Generating loss plot..")
-        p = type(p)("Mean squared error")
-        # Rescale the columns of the record for visualization.
-        record = m.record
-        p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
-        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
-        p.show(append=True, show=True)
-        print("", "done.", flush=True)
 
 
     if TEST_APOSITIONAL:
         print("Building model..")
-        x = well_spaced_box(100, 2)
+        x = well_spaced_box(n, 2)
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
-        m = APOS(adi=1, ane=2, mne=2, mdi=0, mdo=1, seed=seed, steps=steps, num_threads=num_threads)
+        m = APOS(ads=layer_dim, ans=num_layers, mds=layer_dim, mns=num_layers,
+                 seed=seed, steps=steps, num_threads=num_threads)
         all_x = np.concatenate((x, x), axis=0)
-        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
         ax = all_x.reshape((-1,1)).copy()
         axi = (np.ones(all_x.shape, dtype="int32") * (np.arange(all_x.shape[1])+1)).reshape(-1,1)
         sizes = np.ones(all_x.shape[0], dtype="int32") * 2
-        temp_x = np.zeros((all_x.shape[0],0), dtype="float32")
-        m.fit(x=temp_x, y=all_y, xi=all_xi, ax=ax, axi=axi, sizes=sizes, steps=1000)
-
+        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
+        m.fit(y=all_y.copy(), xi=all_xi, ax=ax.copy(), axi=axi, sizes=sizes, steps=1000)
+        print()
+        print(m)
+        print()
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
@@ -639,8 +587,8 @@ if __name__ == "__main__":
         y2 = m(x=temp_x, xi=2*xi1, ax=ax, axi=axi, sizes=sizes)
         print("Adding to plot..")
         p = Plot()
-        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
-        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
+        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0, group=0)
+        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1, group=1)
         def fhat(x, i=1):
             xi = i * np.ones((len(x),1),dtype="int32")
             ax = x.reshape((-1,1)).copy()
@@ -648,21 +596,28 @@ if __name__ == "__main__":
             sizes = np.ones(x.shape[0], dtype="int32") * 2
             temp_x = np.zeros((x.shape[0],0), dtype="float32")
             return m(x=temp_x, xi=xi, ax=ax, axi=axi, sizes=sizes)
-        p.add_func("xi=1", lambda x: fhat(x, 1), [0,1], [0,1], vectorized=True, color=3, mode="markers", shade=True)
-        p.add_func("xi=2", lambda x: fhat(x, 2), [0,1], [0,1], vectorized=True, color=2, mode="markers", shade=True)
+        p.add_func("xi=1", lambda x: fhat(x, 1), [0,1], [0,1], vectorized=True, color=3, opacity=0.8, group=0) #, mode="markers", shade=True)
+        p.add_func("xi=2", lambda x: fhat(x, 2), [0,1], [0,1], vectorized=True, color=2, opacity=0.8, group=1) #, mode="markers", shade=True)
         # Generate the visual.
         print("Generating surface plot..")
         p.show(show=False)
+
+    # Generate a visual of the loss function.
+    if (SHOW_VISUALS and (len(getattr(globals().get("m",None), "record", [])) > 0)):
         print("Generating loss plot..")
-        p = type(p)("Mean squared error")
+        p = Plot("Mean squared error")
         # Rescale the columns of the record for visualization.
         record = m.record
-        p.add("MSE", list(range(record.shape[0])), record[:,0], color=1, mode="lines")
-        p.add("Step factors", list(range(record.shape[0])), record[:,1], color=2, mode="lines")
-        p.add("Step sizes", list(range(record.shape[0])), record[:,2], color=3, mode="lines")
-        p.add("Update ratio", list(range(record.shape[0])), record[:,3], color=4, mode="lines")
+        for i in range(0, record.shape[0], max(1,record.shape[0] // 400)):
+            step_indices = list(range(i))
+            p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
+            p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
+            p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines", frame=i)
+            p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
+            p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
+            p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
         p.show(append=True, show=True)
-        print("", "done.", flush=True)
+    print("", "done.", flush=True)
 
 
     if TEST_VARIED_SIZE:
@@ -682,5 +637,4 @@ if __name__ == "__main__":
                 start = end
             # Fit a model.
             m = APOS(seed=seed, num_threads=num_threads, steps=1)
-            m.fit(x=x, y=y, ax=ax, sizes=sizes)
-
+            m.fit(x=x.copy(), y=y.copy(), ax=ax.copy(), sizes=sizes)
