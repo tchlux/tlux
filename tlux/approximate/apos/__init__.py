@@ -12,11 +12,11 @@ class APOS:
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
+            # f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  f_compiler_args=f_compiler_args,
+                                  # f_compiler_args=f_compiler_args,
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
