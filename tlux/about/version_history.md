@@ -13,3 +13,4 @@
 | 0.0.7<br>March 2022 | Added missing import to random box function. |
 | 0.0.8<br>March 2022 | Updating setup script to attempt Fortran compilation <br> early. |
 | 0.0.9<br>March 2022 | Updated memory layout and incorporated SVD into data <br> normalization. Modified adaptive parameter update to <br> use a sliding linear number of parameters instead of <br> the binary search protocol. |
+| 0.0.9<br>March 2022 | Updated memory layout and incorporated SVD into data <br> normalization. Modified adaptive parameter update to <br> use a sliding linear number of parameters instead of <br> the binary search protocol. |
