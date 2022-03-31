@@ -1183,13 +1183,17 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: AX ! ADI, SIZE(AX,2)
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: X  ! MDI, SIZE(X,2)
     ! If there is AXInteger input, unpack it into X.
-    CALL UNPACK_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
-         MODEL(CONFIG%ASEV:CONFIG%AEEV), &
-         AXI(:,:), AX(CONFIG%ADI-CONFIG%ADE+1:,:))
+    IF (CONFIG%ADE .GT. 0) THEN
+       CALL UNPACK_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
+            MODEL(CONFIG%ASEV:CONFIG%AEEV), &
+            AXI(:,:), AX(CONFIG%ADN+1:,:))
+    END IF
     ! If there is XInteger input, unpack it into end of X.
-    CALL UNPACK_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
-         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
-         XI(:,:), X(CONFIG%MDI-CONFIG%MDE-CONFIG%ADO+1:CONFIG%MDI-CONFIG%ADO,:))
+    IF (CONFIG%MDE .GT. 0) THEN
+       CALL UNPACK_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
+            MODEL(CONFIG%MSEV:CONFIG%MEEV), &
+            XI(:,:), X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:))
+    END IF
   CONTAINS
     ! Given integer inputs and embedding vectors, put embeddings in
     !  place of integer inputs inside of a real matrix.
@@ -1822,6 +1826,8 @@ CONTAINS
       ! ----------------------------------------------------------------
       !                 Initialization and preparation
       ! 
+      ! Cap the "number [of variables] to update" at the model size.
+      CONFIG%NUM_TO_UPDATE = MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS)
       ! Set the "total rank", the number of internal state components.
       TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
       ! Compute the minimum number of model parameters to update.
@@ -1952,7 +1958,6 @@ CONTAINS
          ELSE IF (CONFIG%EARLY_STOP .AND. (NS .GT. STEPS - STEP)) THEN
             EXIT fit_loop
          END IF
-
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !              Modify the model parameters (take step).
          ! 
@@ -2079,7 +2084,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE,CONFIG%ADE) :: A_EMB_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE,CONFIG%MNE) :: M_EMB_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS,CONFIG%ADO) :: A_OUT_VECS
-      INTEGER :: D
+      INTEGER :: D, E
       ! Encode embeddings if the are provided.
       IF ((CONFIG%MDE + CONFIG%ADE .GT. 0) .AND. (&
            (.NOT. CONFIG%XI_NORMALIZED) .OR. (.NOT. CONFIG%AXI_NORMALIZED))) THEN
@@ -2088,6 +2093,28 @@ CONTAINS
       ! 
       !$OMP PARALLEL NUM_THREADS(5)
       !$OMP SECTIONS PRIVATE(D)
+      !$OMP SECTION
+      IF ((.NOT. CONFIG%AX_NORMALIZED) .AND. (CONFIG%ADN .GT. 0)) THEN
+         CALL RADIALIZE(AX(:CONFIG%ADN,:), &
+              MODEL(CONFIG%AISS:CONFIG%AISE), AX_RESCALE(:,:))
+         CONFIG%AX_NORMALIZED = .TRUE.
+      ELSE IF (CONFIG%ADN .GT. 0) THEN
+         MODEL(CONFIG%AISS:CONFIG%AISE) = 0.0_RT
+         AX_RESCALE(:,:) = 0.0_RT
+         FORALL (D=1:CONFIG%ADN) AX_RESCALE(D,D) = 1.0_RT
+      END IF
+      !$OMP SECTION
+      IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
+         CALL RADIALIZE(AX(CONFIG%ADN+1:CONFIG%ADN+CONFIG%ADE,:), &
+              AXI_SHIFT(:), AXI_RESCALE(:,:))
+         ! Apply the shift to the source embeddings.
+         DO D = 1, CONFIG%ADE
+            A_EMB_VECS(D,:) = A_EMB_VECS(D,:) + AXI_SHIFT(D)
+         END DO
+         ! Apply the transformation to the source embeddings.
+         A_EMB_VECS(:,:) = MATMUL(TRANSPOSE(AXI_RESCALE(:,:)), A_EMB_VECS(:,:))
+         CONFIG%AXI_NORMALIZED = .TRUE.
+      END IF
       !$OMP SECTION
       IF ((.NOT. CONFIG%X_NORMALIZED) .AND. (CONFIG%MDN .GT. 0)) THEN
          CALL RADIALIZE(X(:CONFIG%MDN,:), MODEL(CONFIG%MISS:CONFIG%MISE), X_RESCALE(:,:))
@@ -2110,28 +2137,6 @@ CONTAINS
          CONFIG%XI_NORMALIZED = .TRUE.
       END IF
       !$OMP SECTION
-      IF ((.NOT. CONFIG%AX_NORMALIZED) .AND. (CONFIG%ADN .GT. 0)) THEN
-         CALL RADIALIZE(AX(:CONFIG%ADN,:), &
-              MODEL(CONFIG%AISS:CONFIG%AISE), AX_RESCALE(:,:))
-         CONFIG%AX_NORMALIZED = .TRUE.
-      ELSE IF (CONFIG%ADN .GT. 0) THEN
-         MODEL(CONFIG%AISS:CONFIG%AISE) = 0.0_RT
-         AX_RESCALE(:,:) = 0.0_RT
-         FORALL (D=1:CONFIG%ADN) AX_RESCALE(D,D) = 1.0_RT
-      END IF
-      !$OMP SECTION
-      IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
-         CALL RADIALIZE(AX(CONFIG%ADN+1:CONFIG%ADN+CONFIG%ADE,:), &
-              XI_SHIFT(:), XI_RESCALE(:,:))
-         ! Apply the shift to the source embeddings.
-         DO D = 1, CONFIG%ADE
-            A_EMB_VECS(D,:) = A_EMB_VECS(D,:) + XI_SHIFT(D)
-         END DO
-         ! Apply the transformation to the source embeddings.
-         A_EMB_VECS(:,:) = MATMUL(TRANSPOSE(XI_RESCALE(:,:)), A_EMB_VECS(:,:))
-         CONFIG%AXI_NORMALIZED = .TRUE.
-      END IF
-      !$OMP SECTION
       IF (.NOT. CONFIG%Y_NORMALIZED) THEN
          CALL RADIALIZE(Y(:,:), MODEL(CONFIG%MOSS:CONFIG%MOSE), &
               Y_RESCALE(:,:), INVERT_RESULT=.TRUE.)
@@ -2148,24 +2153,28 @@ CONTAINS
       IF ((.NOT. CONFIG%AY_NORMALIZED) .AND. (CONFIG%ADO .GT. 0)) THEN
          ! Disable "model" evaluation for this forward pass.
          !   (Reuse "A_STATES" for the "M_STATES" argument, since it will be unused.)
+         MODEL(CONFIG%AOSS:CONFIG%AOSE) = 0.0_RT
          D = CONFIG%MDI ; CONFIG%MDI = 0
          CALL EVALUATE(CONFIG, MODEL, AX, AY, SIZES, X, Y, A_STATES, A_STATES, INFO)
          CONFIG%MDI = D
-         ! Compute AY shift as the mean, apply it.
-         MODEL(CONFIG%AOSS:CONFIG%AOSE) = -SUM(AY(:,:),1) / REAL(SIZE(AY,1),RT)
-         DO D = 1, CONFIG%ADO
-            AY(:,D) = AY(:,D) + MODEL(CONFIG%AOSS + D-1)
+         ! Compute AY shift as the mean of mean-outputs, apply it.
+         E = CONFIG%MDN + CONFIG%MDE + 1
+         MODEL(CONFIG%AOSS:CONFIG%AOSE) = -SUM(X(E:,:),2) / REAL(SIZE(X,2),RT)
+         DO D = 0, CONFIG%ADO-1
+            X(E+D,:) = X(E+D,:) + MODEL(CONFIG%AOSS + D)
          END DO
-         ! Compute the AY scale as the standard deviation.
-         AY(1,:) = SUM(AY(:,:)**2,1)
-         WHERE (AY(1,:) .GT. 0.0_RT)
-            AY(1,:) = SQRT(AY(1,:))
+         ! Compute the AY scale as the standard deviation of mean-outputs.
+         X(E:,1) = SUM(X(E:,:)**2,2) / REAL(SIZE(X,2),RT)
+         WHERE (X(E:,1) .GT. 0.0_RT)
+            X(E:,1) = SQRT(X(E:,1))
          ELSEWHERE
-            AY(1,:) = 1.0_RT
+            X(E:,1) = 1.0_RT
          END WHERE
-         ! Apply the factor to the output vectors.
+         ! Apply the factor to the output vectors (and the shift values).
+         X(E:,1) = X(E:,1)
          DO D = 1, CONFIG%ADO
-            A_OUT_VECS(:,D) = A_OUT_VECS(:,D) / AY(1,D)
+            A_OUT_VECS(:,D) = A_OUT_VECS(:,D) / X(E+D-1,1)
+            MODEL(CONFIG%AOSS+D-1) = MODEL(CONFIG%AOSS+D-1) / X(E+D-1,1)
          END DO
          CONFIG%AY_NORMALIZED = .TRUE.
       END IF
@@ -2194,13 +2203,11 @@ CONTAINS
               MODEL(CONFIG%ASIV:CONFIG%AEIV), &
               MODEL(CONFIG%ASSV:CONFIG%AESV))
       END IF
-
       ! Update the apositional model output shift to 
       !  produce componentwise mean-zero values (prevent divergence).
       IF (CONFIG%ADO .GT. 0) THEN
          MODEL(CONFIG%AOSS:CONFIG%AOSE) = -SUM(AY(:,:),1) / REAL(SIZE(AY,1),RT)
       END IF
-
       ! -------------------------------------------------------------
       ! TODO:
       !  - Using the computed rank of values and gradients, delete the
@@ -2218,7 +2225,8 @@ CONTAINS
          ! Check the rank of all internal apositional states.
          J = CONFIG%ANS+1
          !$OMP PARALLEL DO PRIVATE(A_ORDER,A_STATE_TEMP,A_LENGTHS,R) &
-         !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+         !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK) &
+         !$OMP& NUM_THREADS(CONFIG%NUM_THREADS)
          DO I = 1, CONFIG%ANS-1
             ! Compute model state rank.
             A_STATE_TEMP(:,:) = A_STATES(:,:,I)
@@ -2234,7 +2242,8 @@ CONTAINS
          ! Check the rank of all internal model states.
          J = CONFIG%MNS+1
          !$OMP PARALLEL DO PRIVATE(M_ORDER,M_STATE_TEMP,M_LENGTHS,R) &
-         !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+         !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK) &
+         !$OMP& NUM_THREADS(CONFIG%NUM_THREADS)
          DO I = 1, CONFIG%MNS-1
             ! Compute model state rank.
             M_STATE_TEMP(:,:) = M_STATES(:,:,I)
@@ -2247,7 +2256,6 @@ CONTAINS
          END DO
          !$OMP END PARALLEL DO
       END IF
-
     END SUBROUTINE CONDITION_MODEL
 
 
