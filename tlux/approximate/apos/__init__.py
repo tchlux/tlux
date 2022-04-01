@@ -12,11 +12,11 @@ class APOS:
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            # f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
+            f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  # f_compiler_args=f_compiler_args,
+                                  f_compiler_args=f_compiler_args,
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
@@ -501,35 +501,47 @@ if __name__ == "__main__":
 
     # TODO: Model fails when there are 10000 points.
     # TODO: Code seg-faults when the number of threads is large (>8).
-    n = 1000
+    n = 10000
     seed = 2
-    layer_dim = 32
-    num_layers = 4
+    state_dim = 64
+    num_states = 8
     steps = 1000
     num_threads = None
     np.random.seed(seed)
 
+    TEST_FIT_SIZE = False
     TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = False
+    TEST_INT_INPUT = True
     TEST_APOSITIONAL = False
     TEST_VARIED_SIZE = False
-    SHOW_VISUALS = False
-    TEST_FIT_SIZE = True
+    SHOW_VISUALS = True
 
 
     if TEST_FIT_SIZE:
-        dim_numeric = 8
-        dim_embedding = 32
-        num_embeddings = 32
+        # Apositional model settings.
+        dim_a_numeric = 4
+        dim_a_embedding = 32
+        num_a_embeddings = 32
+        dim_a_state = 128
+        num_a_states = 1
         dim_a_out = 64
+        # Model settings.
+        dim_m_numeric = 8
+        dim_m_embedding = 0
+        num_m_embeddings = 0
+        dim_m_state = 64
+        num_m_states = 8
         dim_m_out = 1
-        na = 1000000000
-        nm = 1000000
+        # Number of points going into each model.
+        na = 10000000
+        nm = 100000
+        num_threads = 100
+        # Initialize the model and its fit configuration.
         m = APOS(
-            adn=dim_numeric, ade=dim_embedding, ane=num_embeddings,
-            ads=layer_dim, ans=num_layers, ado=dim_a_out,
-            mdn=dim_numeric, mde=dim_embedding, mne=num_embeddings,
-            mds=layer_dim, mns=num_layers, mdo=dim_m_out,
+            adn=dim_a_numeric, ade=dim_a_embedding, ane=num_a_embeddings,
+            ads=dim_a_state, ans=num_a_states, ado=dim_a_out,
+            mdn=dim_m_numeric, mde=dim_m_embedding, mne=num_m_embeddings,
+            mds=dim_m_state, mns=num_m_states, mdo=dim_m_out,
             num_threads=num_threads, seed=seed,
         )
         m.APOS.new_fit_config(nm, na, m.config)
@@ -552,7 +564,7 @@ if __name__ == "__main__":
         m.save("testing_empty_save.json")
         m.load("testing_empty_save.json")
         from util.approximate import PLRM
-        m = APOS(mdn=2, mds=layer_dim, mns=num_layers, mdo=1, seed=seed,
+        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
                  num_threads=num_threads, steps=steps, 
                  ) # discontinuity=-1000.0) # initial_step=0.01)
         print("Initialized model:")
@@ -596,7 +608,7 @@ if __name__ == "__main__":
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
-        m = APOS(mdn=2, mds=layer_dim, mns=num_layers, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
+        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
@@ -634,7 +646,7 @@ if __name__ == "__main__":
         all_y = all_y.reshape((all_y.shape[0],-1))
         # Initialize a new model.
         m = APOS(mdn=0, adn=ax.shape[1], mdo=all_y.shape[1],
-                 ads=layer_dim, ans=num_layers, mds=layer_dim, mns=num_layers,
+                 ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
                  ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
                  num_threads=num_threads, seed=seed)
         print("Fitting model..")
