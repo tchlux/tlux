@@ -16,3 +16,4 @@
 | 0.0.9<br>March 2022 | Updated memory layout and incorporated SVD into data <br> normalization. Modified adaptive parameter update to <br> use a sliding linear number of parameters instead of <br> the binary search protocol. |
 | 0.0.10<br>March 2022 | Removing APOS compiler overrides. |
 | 0.0.11<br>March 2022 | Made initial apositional model output normalized <br> correctly to zero mean and unit variance. |
+| 0.0.12<br>April 2022 | Updated work size to int64 type. |
