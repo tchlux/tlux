@@ -126,10 +126,13 @@ class APOS:
                         byte_size = f"{byte_size//2**10:.1f}KB"
                     elif (byte_size < 2**30):
                         byte_size = f"{byte_size//2**20:.1f}MB"
-                    else:
+                    elif (byte_size < 2**40):
                         byte_size = f"{byte_size//2**30:.1f}GB"
+                    else:
+                        byte_size = f"{byte_size//2**40:.1f}TB"
                     return byte_size
                 # Calculate the byte size of this model (excluding python descriptors).
+                # TODO: Not all configs are 4 bytes, do more expensive sum over actual sizes?
                 byte_size = len(self.config._fields_)*4 + self.model.dtype.itemsize*self.model.size
                 byte_size = _byte_str(byte_size)
                 if (self.config.rwork_size+self.config.iwork_size > 0):
@@ -496,6 +499,8 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
 
+    # TODO: Model fails when there are 10000 points.
+    # TODO: Code seg-faults when the number of threads is large (>8).
     n = 1000
     seed = 2
     layer_dim = 32
@@ -506,9 +511,31 @@ if __name__ == "__main__":
 
     TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = True
+    TEST_APOSITIONAL = False
     TEST_VARIED_SIZE = False
-    SHOW_VISUALS = True
+    SHOW_VISUALS = False
+    TEST_FIT_SIZE = True
+
+
+    if TEST_FIT_SIZE:
+        dim_numeric = 8
+        dim_embedding = 32
+        num_embeddings = 32
+        dim_a_out = 64
+        dim_m_out = 1
+        na = 1000000000
+        nm = 1000000
+        m = APOS(
+            adn=dim_numeric, ade=dim_embedding, ane=num_embeddings,
+            ads=layer_dim, ans=num_layers, ado=dim_a_out,
+            mdn=dim_numeric, mde=dim_embedding, mne=num_embeddings,
+            mds=layer_dim, mns=num_layers, mdo=dim_m_out,
+            num_threads=num_threads, seed=seed,
+        )
+        m.APOS.new_fit_config(nm, na, m.config)
+        print()
+        print(m)
+
 
     if (not SHOW_VISUALS):
         class Plot:
@@ -638,8 +665,6 @@ if __name__ == "__main__":
         print("Generating surface plot..")
         p.show(show=False)
 
-    print("Final model:")
-    print(m)
 
     # Generate a visual of the loss function.
     if (SHOW_VISUALS and (len(getattr(globals().get("m",None), "record", [])) > 0)):
