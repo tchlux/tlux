@@ -320,14 +320,14 @@ class APOS:
             })
             self._init_model(**kwargs)
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
-        if (self.config.mde > 0) or (self.config.ado > 0):
-            _x = np.zeros((x.shape[0],self.config.mdi), dtype="float32", order="C")
-            _x[:,:x.shape[1]] = x
-            x, _x = _x, x
         if (self.config.ade > 0):
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
             _ax[:,:ax.shape[1]] = ax
             ax, _ax = _ax, ax
+        if (self.config.mde > 0) or (self.config.ado > 0):
+            _x = np.zeros((x.shape[0],self.config.mdi), dtype="float32", order="C")
+            _x[:,:x.shape[1]] = x
+            x, _x = _x, x
         # ------------------------------------------------------------
         # If a random seed is provided, then only 2 threads can be used
         #  because nondeterministic behavior comes from reordered addition.
@@ -391,8 +391,8 @@ class APOS:
             _ax[:,:ax.shape[1]] = ax
             ax = _ax
         ay = np.zeros((na, ado), dtype="float32", order="F")
-        if (self.config.mde > 0):
-            _x = np.zeros((x.shape[0],x.shape[1]+self.config.mde+self.config.ado), dtype="float32", order="C")
+        if (self.config.mde > 0) or (self.config.ado > 0):
+            _x = np.zeros((x.shape[0],self.config.mdi), dtype="float32", order="C")
             _x[:,:x.shape[1]] = x
             x = _x
         y = np.zeros((nm, mdo), dtype="float32", order="C")
@@ -496,7 +496,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return 3*x + np.cos(8*x)/2 + np.sin(5*y)
 
-    n = 100
+    n = 1000
     seed = 2
     layer_dim = 32
     num_layers = 4
