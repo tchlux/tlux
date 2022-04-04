@@ -19,3 +19,4 @@
 | 0.0.12<br>April 2022 | Updated work size to int64 type. |
 | 0.0.13<br>April 2022 | Preventing negative array sizes and numbers of <br> threads. |
 | 0.0.14<br>April 2022 | Cleaned APOS memory usage, disabled compiled fmath, <br> added testing codes for least squares fits. |
+| 0.0.15<br>April 2022 | Added large format testing for APOS and parallelized <br> the evaluation of internal state rank. |
