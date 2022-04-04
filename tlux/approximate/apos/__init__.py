@@ -529,17 +529,18 @@ if __name__ == "__main__":
 
     n = 100
     seed = 2
-    state_dim = 16
+    state_dim = 20
     num_states = 4
     steps = 1000
-    num_threads = None
+    num_threads = 1
     np.random.seed(seed)
 
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = True
+    TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = False
+    TEST_APOSITIONAL = True
     TEST_VARIED_SIZE = False
+    TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
 
@@ -702,6 +703,44 @@ if __name__ == "__main__":
         # Generate the visual.
         print("Generating surface plot..")
         p.show(show=False)
+
+
+    if (TEST_LARGE_MODEL):
+        # Data size.
+        nm = 10000
+        na = 1000000
+        adn = 10
+        ane = 10
+        mdn = 10
+        mne = 10
+        mdo = 10
+        # Data to fit.
+        ax = np.random.random(size=(na,adn)).astype("float32")
+        axi = np.random.randint(0,ane,size=(na,1)).astype("float32")
+        x = np.random.random(size=(nm,mdn)).astype("float32")
+        xi = np.random.randint(0,mne,size=(nm,1)).astype("float32")
+        y = np.random.random(size=(nm,mdo)).astype("float32")
+        # Generate random starting indices for all the sizes and
+        #   convert those starting indices into sizes of batches.
+        sizes = np.arange(na, dtype="int32")
+        np.random.shuffle(sizes)
+        sizes = sizes[:nm]
+        sizes[0] = 0
+        sizes.sort()
+        sizes[:-1] = sizes[1:] - sizes[:-1]
+        sizes[-1] = na - sizes[-1]
+        # Model settings.
+        ans = 4
+        ads = 32
+        mns = 8
+        mds = 64
+        steps = 101
+        num_threads = None
+        # Fit model.
+        m = APOS(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
+                 ans=ans, ads=ads, mns=mns, mds=mds)
+        m.fit(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, y=y,
+              steps=steps, num_threads=num_threads)
 
 
     # Generate a visual of the loss function.

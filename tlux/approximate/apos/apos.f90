@@ -691,18 +691,18 @@ MODULE APOS
      INTEGER(KIND=INT64) :: SMXIS, EMXIS ! XI_SHIFT(MDE)
      INTEGER(KIND=INT64) :: SMXIR, EMXIR ! XI_RESCALE(MDE,MDE)
      INTEGER(KIND=INT64) :: SYR, EYR ! Y_RESCALE(MDO,MDO)
-     INTEGER(KIND=INT64) :: SAL, EAL ! A_LENGTHS(ADS,MIN(ANS,NUM_THREADS))
-     INTEGER(KIND=INT64) :: SML, EML ! M_LENGTHS(MDS,MIN(MNS,NUM_THREADS))
-     INTEGER(KIND=INT64) :: SAST, EAST ! A_STATE_TEMP(NA,ADS,MIN(ANS,NUM_THREADS))
-     INTEGER(KIND=INT64) :: SMST, EMST ! M_STATE_TEMP(NM,MDS,MIN(MNS,NUM_THREADS))
+     INTEGER(KIND=INT64) :: SAL, EAL ! A_LENGTHS(ADS,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SML, EML ! M_LENGTHS(MDS,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SAST, EAST ! A_STATE_TEMP(NA,ADS)
+     INTEGER(KIND=INT64) :: SMST, EMST ! M_STATE_TEMP(NM,MDS)
      ! Integer workspace (for optimization).
      INTEGER(KIND=INT64) :: SUI, EUI ! UPDATE_INDICES(NUM_VARS)
      INTEGER(KIND=INT64) :: SBAS, EBAS ! BATCHA_STARTS(NUM_THREADS)
      INTEGER(KIND=INT64) :: SBAE, EBAE ! BATCHA_ENDS(NUM_THREADS)
      INTEGER(KIND=INT64) :: SBMS, EBMS ! BATCHM_STARTS(NUM_THREADS)
      INTEGER(KIND=INT64) :: SBME, EBME ! BATCHM_ENDS(NUM_THREADS)
-     INTEGER(KIND=INT64) :: SAO, EAO ! A_ORDER(ADS,MIN(ANS,NUM_THREADS))
-     INTEGER(KIND=INT64) :: SMO, EMO ! M_ORDER(MDS,MIN(MNS,NUM_THREADS))
+     INTEGER(KIND=INT64) :: SAO, EAO ! A_ORDER(ADS,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SMO, EMO ! M_ORDER(MDS,NUM_THREADS)
   END TYPE MODEL_CONFIG
 
   ! Function that is defined by OpenMP.
@@ -992,19 +992,19 @@ CONTAINS
     CONFIG%RWORK_SIZE = CONFIG%EYR
     ! A lengths (lengths of state values after orthogonalization)
     CONFIG%SAL = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EAL = CONFIG%SAL-1 + CONFIG%ADS * MIN(CONFIG%ANS,CONFIG%NUM_THREADS)
+    CONFIG%EAL = CONFIG%SAL-1 + CONFIG%ADS * CONFIG%NUM_THREADS
     CONFIG%RWORK_SIZE = CONFIG%EAL
     ! M lengths (lengths of state values after orthogonalization)
     CONFIG%SML = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EML = CONFIG%SML-1 + CONFIG%MDS * MIN(CONFIG%MNS,CONFIG%NUM_THREADS)
+    CONFIG%EML = CONFIG%SML-1 + CONFIG%MDS * CONFIG%NUM_THREADS
     CONFIG%RWORK_SIZE = CONFIG%EML
     ! A state temp holder (for orthogonality computation)
     CONFIG%SAST = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EAST = CONFIG%SAST-1 + CONFIG%NA * CONFIG%ADS * MIN(CONFIG%ANS,CONFIG%NUM_THREADS)
+    CONFIG%EAST = CONFIG%SAST-1 + CONFIG%NA * CONFIG%ADS
     CONFIG%RWORK_SIZE = CONFIG%EAST
     ! M state temp holder (for orthogonality computation)
     CONFIG%SMST = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EMST = CONFIG%SMST-1 + CONFIG%NM * CONFIG%MDS * MIN(CONFIG%MNS,CONFIG%NUM_THREADS)
+    CONFIG%EMST = CONFIG%SMST-1 + CONFIG%NM * CONFIG%MDS
     CONFIG%RWORK_SIZE = CONFIG%EMST
     ! ------------------------------------------------------------
     ! Set up the integer valued work array.
@@ -1031,11 +1031,11 @@ CONTAINS
     CONFIG%IWORK_SIZE = CONFIG%EBME
     ! A order (for orthogonalization)
     CONFIG%SAO = 1 + CONFIG%IWORK_SIZE
-    CONFIG%EAO = CONFIG%SAO-1 + CONFIG%ADS * MIN(CONFIG%ANS,CONFIG%NUM_THREADS)
+    CONFIG%EAO = CONFIG%SAO-1 + CONFIG%ADS * CONFIG%NUM_THREADS
     CONFIG%IWORK_SIZE = CONFIG%EAO
     ! M order (for orthogonalization)
     CONFIG%SMO = 1 + CONFIG%IWORK_SIZE
-    CONFIG%EMO = CONFIG%SMO-1 + CONFIG%MDS * MIN(CONFIG%MNS,CONFIG%NUM_THREADS)
+    CONFIG%EMO = CONFIG%SMO-1 + CONFIG%MDS * CONFIG%NUM_THREADS
     CONFIG%IWORK_SIZE = CONFIG%EMO
   END SUBROUTINE NEW_FIT_CONFIG
 
@@ -1910,8 +1910,9 @@ CONTAINS
   !  (ensure that mean squared error is effectively reduced).
   SUBROUTINE CONDITION_MODEL(CONFIG, MODEL, NUM_THREADS, FIT_STEP, AY, &
        A_STATES, M_STATES, A_GRADS, M_GRADS, &
-       A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, &
-       A_ORDER, M_ORDER, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+       A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, A_ORDER, M_ORDER, &
+       NB, BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS, &
+       TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), DIMENSION(:) :: MODEL
     INTEGER, INTENT(IN) :: NUM_THREADS, FIT_STEP
@@ -1919,11 +1920,14 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(:,:,:) :: A_STATES, M_STATES
     REAL(KIND=RT), DIMENSION(:,:,:) :: A_GRADS, M_GRADS
     REAL(KIND=RT), DIMENSION(:,:) :: A_LENGTHS, M_LENGTHS
-    REAL(KIND=RT), DIMENSION(:,:,:) :: A_STATE_TEMP, M_STATE_TEMP
+    REAL(KIND=RT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
     INTEGER, DIMENSION(:,:) :: A_ORDER, M_ORDER
+    INTEGER, INTENT(IN) :: NB
+    INTEGER, INTENT(IN), DIMENSION(CONFIG%NUM_THREADS) :: &
+         BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     ! Local variables.
-    INTEGER :: I, VS, VE, J, R, NT, T
+    INTEGER :: I, VS, VE, J, R, NT, N, BS, BE, BN, BATCH, TER, TGR
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
     CALL UNIT_MAX_NORM(CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
          MODEL(CONFIG%MSIV:CONFIG%MEIV), &
@@ -1942,6 +1946,10 @@ CONTAINS
     END IF
     ! -------------------------------------------------------------
     ! TODO:
+    !  - Parallelize orthogonalization by same batches as training, 
+    !    find those nodes that are agreeaby deleted, the total rank
+    !    is the layer size less those agreeably deleted.
+    ! 
     !  - Using the computed rank of values and gradients, delete the
     !    redundant basis functions and initialize with a combination
     !    of uncaptured previous layer values with gradients (first nonzero
@@ -1956,41 +1964,50 @@ CONTAINS
        TOTAL_GRAD_RANK = 0
        ! Check the rank of all internal apositional states.
        J = CONFIG%ANS+1
-       NT = MIN(NUM_THREADS, CONFIG%ANS)
-       !$OMP PARALLEL DO PRIVATE(R,T) NUM_THREADS(NT) &
-       !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+       ! Batch computation formula.
+       N = SIZE(A_STATE_TEMP,1)
+       BN = (N + NUM_THREADS - 1) / NUM_THREADS ! = CEIL(NM / NUM_BATCHES)
        DO I = 1, CONFIG%ANS
-          T = OMP_GET_THREAD_NUM()+1
-          ! Compute model state rank.
-          A_STATE_TEMP(:,:,T) = A_STATES(:,:,I)
-          CALL ORTHOGONALIZE(A_STATE_TEMP(:,:,T), A_LENGTHS(:,T), R, A_ORDER(:,T))
-          TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + R
-          ! Compute grad state rank.
-          A_STATE_TEMP(:,:,T) = A_GRADS(:,:,I)
-          CALL ORTHOGONALIZE(A_STATE_TEMP(:,:,T), A_LENGTHS(:,T), R, A_ORDER(:,T))
-          TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + R
+          TER = 0; TGR = 0;
+          !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NUM_THREADS) &
+          !$OMP& REDUCTION(MAX: TER, TGR)
+          DO BATCH = 1, NUM_THREADS
+             BS = BN*(BATCH-1) + 1
+             BE = MIN(N, BN*BATCH)
+             ! Compute model state rank.
+             A_STATE_TEMP(BS:BE,:) = A_STATES(BS:BE,:,I)
+             CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TER, A_ORDER(:,BATCH))
+             ! Compute grad state rank.
+             A_STATE_TEMP(BS:BE,:) = A_GRADS(BS:BE,:,I)
+             CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TGR, A_ORDER(:,BATCH))
+          END DO
+          !$OMP END PARALLEL DO
+          TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
+          TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + TGR
        END DO
-       !$OMP END PARALLEL DO
        ! 
        ! Check the rank of all internal model states.
-       J = CONFIG%MNS+1
-       NT = MIN(NUM_THREADS, CONFIG%MNS)
-       !$OMP PARALLEL DO PRIVATE(R,T) NUM_THREADS(NT) &
-       !$OMP& REDUCTION(+: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+       N = SIZE(M_STATE_TEMP,1)
+       BN = (N + NUM_THREADS - 1) / NUM_THREADS ! = CEIL(NM / NUM_BATCHES)
        DO I = 1, CONFIG%MNS
-          T = OMP_GET_THREAD_NUM()+1
-          ! Compute model state rank.
-          M_STATE_TEMP(:,:,T) = M_STATES(:,:,I)
-          CALL ORTHOGONALIZE(M_STATE_TEMP(:,:,T), M_LENGTHS(:,T), R, M_ORDER(:,T))
-          TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + R
-          ! Compute grad state rank.
-          M_STATE_TEMP(:,:,T) = M_GRADS(:,:,I)
-          CALL ORTHOGONALIZE(M_STATE_TEMP(:,:,T), M_LENGTHS(:,T), R, M_ORDER(:,T))
-          TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + R
+          TER = 0; TGR = 0;
+          !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NUM_THREADS) &
+          !$OMP& REDUCTION(MAX: TER, TGR)
+          DO BATCH = 1, NUM_THREADS
+             BS = BN*(BATCH-1) + 1
+             BE= MIN(N, BN*BATCH)
+             ! Compute model state rank.
+             M_STATE_TEMP(BS:BE,:) = M_STATES(BS:BE,:,I)
+             CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TER, M_ORDER(:,BATCH))
+             ! Compute grad state rank.
+             M_STATE_TEMP(BS:BE,:) = M_GRADS(BS:BE,:,I)
+             CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TGR, M_ORDER(:,BATCH))
+          END DO
+          !$OMP END PARALLEL DO
+          TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
+          TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + TGR
        END DO
-       !$OMP END PARALLEL DO
     END IF
-
   CONTAINS
 
     ! Set the input vectors and the state vectors to 
@@ -2138,10 +2155,10 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%MDE) :: XI_SHIFT
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MDE) :: XI_RESCALE
       REAL(KIND=RT), DIMENSION(SIZE(Y,1), SIZE(Y,1)) :: Y_RESCALE
-      REAL(KIND=RT), DIMENSION(CONFIG%ADS, MIN(CONFIG%ANS,CONFIG%NUM_THREADS)) :: A_LENGTHS
-      REAL(KIND=RT), DIMENSION(CONFIG%MDS, MIN(CONFIG%MNS,CONFIG%NUM_THREADS)) :: M_LENGTHS
-      REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADS, MIN(CONFIG%ANS,CONFIG%NUM_THREADS)) :: A_STATE_TEMP
-      REAL(KIND=RT), DIMENSION(CONFIG%NM, CONFIG%MDS, MIN(CONFIG%MNS,CONFIG%NUM_THREADS)) :: M_STATE_TEMP
+      REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_LENGTHS
+      REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_LENGTHS
+      REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADS) :: A_STATE_TEMP
+      REAL(KIND=RT), DIMENSION(CONFIG%NM, CONFIG%MDS) :: M_STATE_TEMP
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_IN_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_IN_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUT_VECS
@@ -2149,8 +2166,8 @@ CONTAINS
       INTEGER, DIMENSION(CONFIG%NUM_VARS) :: UPDATE_INDICES
       INTEGER, DIMENSION(CONFIG%NUM_THREADS) :: &
            BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS
-      INTEGER, DIMENSION(CONFIG%ADS, MIN(CONFIG%ANS,CONFIG%NUM_THREADS)) :: A_ORDER
-      INTEGER, DIMENSION(CONFIG%MDS, MIN(CONFIG%MNS,CONFIG%NUM_THREADS)) :: M_ORDER
+      INTEGER, DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_ORDER
+      INTEGER, DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_ORDER
       ! 
       ! ----------------------------------------------------------------
       !                 Initialization and preparation
@@ -2322,8 +2339,9 @@ CONTAINS
          ! Center the outputs of the apositional model about the origin.
          CALL CONDITION_MODEL(CONFIG, MODEL, NUM_THREADS, CONFIG%STEPS_TAKEN, AY, &
               A_STATES(:,:,:), M_STATES(:,:,:), A_GRADS(:,:,:), M_GRADS(:,:,:), &
-              A_LENGTHS(:,:), M_LENGTHS(:,:), A_STATE_TEMP(:,:,:), M_STATE_TEMP(:,:,:), &
-              A_ORDER(:,:), M_ORDER(:,:), TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+              A_LENGTHS(:,:), M_LENGTHS(:,:), A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), &
+              A_ORDER(:,:), M_ORDER(:,:), NB, BATCHA_STARTS(:), BATCHA_ENDS(:), &
+              BATCHM_STARTS(:), BATCHM_ENDS(:), TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          ! Record various statistics that are currently of interest (for research).
          IF (PRESENT(RECORD)) THEN
