@@ -4,19 +4,109 @@ import numpy as np
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _source_code = os.path.join(_this_dir, "apos.f90")
 
+# Build a class that contains pointers to the model internals, allowing
+#  python attribute access to all of the different components of the models.
+class AposModel:
+    def __init__(self, config, model):
+        self.config = config
+        self.model = model
+        self.a_embeddings  = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
+        self.a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
+        self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
+        self.a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
+        self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
+        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, order="F")
+        self.m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
+        self.m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
+        self.m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
+        self.m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
+        self.m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, max(0,self.config.mns-1), order="F")
+        self.m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
+        self.ax_shift = self.model[self.config.aiss-1:self.config.aise]
+        self.ay_shift = self.model[self.config.aoss-1:self.config.aose]
+        self.x_shift = self.model[self.config.miss-1:self.config.mise]
+        self.y_shift = self.model[self.config.moss-1:self.config.mose]
+
+    # Allow square brackets to access attributes of this model and its configuration.
+    def __getitem__(self, attr):
+        if hasattr(self, attr):
+            return getattr(self, attr)
+        elif hasattr(self.config, attr):
+            return getattr(self.config, attr)
+
+    # Create a summary string for this model.
+    def __str__(self, vecs=False):
+        # A function for creating a byte-size string from an integer.
+        def _byte_str(byte_size):
+            if (byte_size < 2**10):
+                byte_size = f"{byte_size} bytes"
+            elif (byte_size < 2**20):
+                byte_size = f"{byte_size//2**10:.1f}KB"
+            elif (byte_size < 2**30):
+                byte_size = f"{byte_size//2**20:.1f}MB"
+            elif (byte_size < 2**40):
+                byte_size = f"{byte_size//2**30:.1f}GB"
+            else:
+                byte_size = f"{byte_size//2**40:.1f}TB"
+            return byte_size
+        # Calculate the byte size of this model (excluding python descriptors).
+        # TODO: Not all configs are 4 bytes, do more expensive sum over actual sizes?
+        byte_size = len(self.config._fields_)*4 + self.model.dtype.itemsize*self.model.size
+        byte_size = _byte_str(byte_size)
+        if (self.config.rwork_size+self.config.iwork_size > 0):
+            work_size = self.config.rwork_size*4 + self.config.iwork_size*4
+            byte_size += " + "+_byte_str(work_size)+" work space"
+        # Create a function that prints the actual contents of the arrays.
+        if vecs: to_str = lambda arr: "\n    " + "\n    ".join(str(arr).split("\n")) + "\n"
+        else:    to_str = lambda arr: "\n"
+        # Provide details (and some values where possible).
+        return (
+            f"APOS model ({self.config.total_size} parameters) [{byte_size}]\n"+
+            (" apositional\n"+
+            f"  input dimension  {self.config.adn}\n"+
+            f"  output dimension {self.config.ado}\n"+
+            f"  state dimension  {self.config.ads}\n"+
+            f"  number of states {self.config.ans}\n"+
+           (f"  embedding dimension  {self.config.ade}\n"+
+            f"  number of embeddings {self.config.ane}\n"
+             if self.config.ane > 0 else "")+
+            f"  embeddings   {self.a_embeddings.shape}  "+to_str(self.a_embeddings)+
+            f"  input vecs   {self.a_input_vecs.shape}  "+to_str(self.a_input_vecs)+
+            f"  input shift  {self.a_input_shift.shape} "+to_str(self.a_input_shift)+
+            f"  state vecs   {self.a_state_vecs.shape}  "+to_str(self.a_state_vecs)+
+            f"  state shift  {self.a_state_shift.shape} "+to_str(self.a_state_shift)+
+            f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
+             "\n" if (self.a_output_vecs.size > 0) else "") +
+            (" positional\n"+
+            f"  input dimension  {self.config.mdn}\n"+
+            f"  output dimension {self.config.mdo}\n"+
+            f"  state dimension  {self.config.mds}\n"+
+            f"  number of states {self.config.mns}\n"+
+           (f"  embedding dimension  {self.config.mde}\n"+
+            f"  number of embeddings {self.config.mne}\n"
+             if self.config.mne > 0 else "")+
+            f"  embeddings   {self.m_embeddings.shape}  "+to_str(self.m_embeddings)+
+            f"  input vecs   {self.m_input_vecs.shape}  "+to_str(self.m_input_vecs)+
+            f"  input shift  {self.m_input_shift.shape} "+to_str(self.m_input_shift)+
+            f"  state vecs   {self.m_state_vecs.shape}  "+to_str(self.m_state_vecs)+
+            f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
+            f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
+             if (self.m_output_vecs.size > 0) else "")
+        )
+
+
+# Class for calling the underlying APOS model code.
 class APOS:
     # Make the string function return the unpacked model.
-    def __str__(self): return str(self.model_unpacked())
+    def __str__(self): return str(self.unpack())
 
     # Initialize a new APOS model.
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            f_compiler_args = "-fPIC -shared -O3 -lblas -llapack -fopenmp -fcheck=bounds"
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  f_compiler_args=f_compiler_args,
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
@@ -94,87 +184,11 @@ class APOS:
 
 
     # Unpack the model (which is in one array) into it's constituent parts.
-    def model_unpacked(self):
+    def unpack(self):
         # If there is no model or configuration, return None.
         if (self.config is None) or (self.model is None):
             return None
-        # Build a class that contains pointers to the model internals.
-        class AposModel:
-            config = self.config
-            model  = self.model
-            a_embeddings  = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
-            a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
-            a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
-            a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
-            a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
-            a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.ads, self.config.ado, order="F")
-            m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
-            m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
-            m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
-            m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
-            m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, self.config.mns-1, order="F")
-            m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mds, self.config.mdo, order="F")
-
-            def __getitem__(self, *args, **kwargs):
-                return getattr(self, *args, **kwargs)
-            def __str__(self, vecs=False):
-                # A function for creating a byte-size string from an integer.
-                def _byte_str(byte_size):
-                    if (byte_size < 2**10):
-                        byte_size = f"{byte_size} bytes"
-                    elif (byte_size < 2**20):
-                        byte_size = f"{byte_size//2**10:.1f}KB"
-                    elif (byte_size < 2**30):
-                        byte_size = f"{byte_size//2**20:.1f}MB"
-                    elif (byte_size < 2**40):
-                        byte_size = f"{byte_size//2**30:.1f}GB"
-                    else:
-                        byte_size = f"{byte_size//2**40:.1f}TB"
-                    return byte_size
-                # Calculate the byte size of this model (excluding python descriptors).
-                # TODO: Not all configs are 4 bytes, do more expensive sum over actual sizes?
-                byte_size = len(self.config._fields_)*4 + self.model.dtype.itemsize*self.model.size
-                byte_size = _byte_str(byte_size)
-                if (self.config.rwork_size+self.config.iwork_size > 0):
-                    work_size = self.config.rwork_size*4 + self.config.iwork_size*4
-                    byte_size += " + "+_byte_str(work_size)+" work space"
-                # Create a function that prints the actual contents of the arrays.
-                if vecs: to_str = lambda arr: "\n    " + "\n    ".join(str(arr).split("\n")) + "\n"
-                else:    to_str = lambda arr: "\n"
-                # Provide details (and some values where possible).
-                return (
-                    f"APOS model ({self.config.total_size} parameters) [{byte_size}]\n"+
-                     " apositional model\n"+
-                    f"  input dimension  {self.config.adn}\n"+
-                    f"  output dimension {self.config.ado}\n"+
-                    f"  state dimension  {self.config.ads}\n"+
-                    f"  number of states {self.config.ans}\n"+
-                   (f"  embedding dimension  {self.config.ade}\n"+
-                    f"  number of embeddings {self.config.ane}\n"
-                     if self.config.ane > 0 else "")+
-                    f"  embeddings   {self.a_embeddings.shape}  "+to_str(self.a_embeddings)+
-                    f"  input vecs   {self.a_input_vecs.shape}  "+to_str(self.a_input_vecs)+
-                    f"  input shift  {self.a_input_shift.shape} "+to_str(self.a_input_shift)+
-                    f"  state vecs   {self.a_state_vecs.shape}  "+to_str(self.a_state_vecs)+
-                    f"  state shift  {self.a_state_shift.shape} "+to_str(self.a_state_shift)+
-                    f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
-                     "\n"+
-                     " positional model\n"+
-                    f"  input dimension  {self.config.mdn}\n"+
-                    f"  output dimension {self.config.mdo}\n"+
-                    f"  state dimension  {self.config.mds}\n"+
-                    f"  number of states {self.config.mns}\n"+
-                   (f"  embedding dimension  {self.config.mde}\n"+
-                    f"  number of embeddings {self.config.mne}\n"
-                     if self.config.mne > 0 else "")+
-                    f"  embeddings   {self.m_embeddings.shape}  "+to_str(self.m_embeddings)+
-                    f"  input vecs   {self.m_input_vecs.shape}  "+to_str(self.m_input_vecs)+
-                    f"  input shift  {self.m_input_shift.shape} "+to_str(self.m_input_shift)+
-                    f"  state vecs   {self.m_state_vecs.shape}  "+to_str(self.m_state_vecs)+
-                    f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
-                    f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
-                )
-        return AposModel()
+        return AposModel(self.config, self.model)
 
 
     # Given a categorical input array, construct a dictionary for
@@ -321,6 +335,10 @@ class APOS:
                 "mne":max(mne, kwargs.get("mne",0)),
                 "mdo":mdo,
             })
+            if (max(kwargs["mdn"], kwargs["mne"]) == 0):
+                kwargs["ado"] = kwargs["mdo"]
+                kwargs["mdo"] = 0
+                kwargs["mns"] = 0
             self._init_model(**kwargs)
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
         if (self.config.ade > 0):
@@ -381,7 +399,10 @@ class APOS:
         ado = self.config.ado
         mde = self.config.mde
         mds = self.config.mds
-        mdo = self.config.mdo
+        if (self.config.mdo != 0):
+            mdo = self.config.mdo
+        else:
+            mdo = self.config.ado
         # Compute the true real-vector input dimensions given embeddings.
         adn += ade
         mdn += mde + ado
@@ -486,6 +507,13 @@ if __name__ == "__main__":
     print("_"*70)
     print(" TESTING APOS MODULE")
 
+    # ----------------------------------------------------------------
+    #  Enable debugging option "-fcheck=bounds".
+    import fmodpy
+    fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+    # fmodpy.config.link_omp = ""
+    # ----------------------------------------------------------------
+
     from tlux.plot import Plot
     from tlux.random import well_spaced_ball, well_spaced_box
 
@@ -497,21 +525,19 @@ if __name__ == "__main__":
     def f(x):
         x = x.reshape((-1,2))
         x, y = x[:,0], x[:,1]
-        return 3*x + np.cos(8*x)/2 + np.sin(5*y)
+        return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
-    # TODO: Model fails when there are 10000 points.
-    # TODO: Code seg-faults when the number of threads is large (>8).
-    n = 10000
+    n = 100
     seed = 2
-    state_dim = 64
-    num_states = 8
+    state_dim = 16
+    num_states = 4
     steps = 1000
     num_threads = None
     np.random.seed(seed)
 
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = True
+    TEST_SAVE_LOAD = True
+    TEST_INT_INPUT = False
     TEST_APOSITIONAL = False
     TEST_VARIED_SIZE = False
     SHOW_VISUALS = True
@@ -608,7 +634,7 @@ if __name__ == "__main__":
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
-        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, mne=2, seed=seed, steps=steps, num_threads=num_threads)
+        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, seed=seed, steps=steps, num_threads=num_threads)
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
@@ -645,13 +671,13 @@ if __name__ == "__main__":
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_y = all_y.reshape((all_y.shape[0],-1))
         # Initialize a new model.
-        m = APOS(mdn=0, adn=ax.shape[1], mdo=all_y.shape[1],
+        print("Fitting model..")
+        m = APOS(mdn=0, adn=ax.shape[1], ado=2, mdo=all_y.shape[1], 
                  ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
                  ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
                  num_threads=num_threads, seed=seed)
-        print("Fitting model..")
         m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), 
-              steps=1000, num_threads=num_threads, seed=seed)
+              steps=steps, num_threads=num_threads, seed=seed)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
@@ -685,7 +711,7 @@ if __name__ == "__main__":
         p = Plot("Mean squared error")
         # Rescale the columns of the record for visualization.
         record = m.record
-        for i in range(0, record.shape[0], max(1,record.shape[0] // 400)):
+        for i in range(0, record.shape[0], max(1,record.shape[0] // 100)):
             step_indices = list(range(i))
             p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
             p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
@@ -693,7 +719,7 @@ if __name__ == "__main__":
             p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
             p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
             p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
-        p.show(append=True, show=True)
+        p.show(append=True, show=True, y_range=[-.2, 1.2])
     print("", "done.", flush=True)
 
 
@@ -715,3 +741,67 @@ if __name__ == "__main__":
             # Fit a model.
             m = APOS(seed=seed, num_threads=num_threads, steps=1)
             m.fit(x=x.copy(), y=y.copy(), ax=ax.copy(), sizes=sizes)
+
+
+# 2022-04-03 15:03:09
+# 
+        #########################################################################
+        # # Generate visual of the embeddings.                                  #
+        # _ = m.unpack()                                                        #
+        # embeddings = _.m_embeddings.T                                         #
+        # output_vecs = _.m_output_vecs.T                                       #
+        # print()                                                               #
+        # print("Embeddings:")                                                  #
+        # print(embeddings)                                                     #
+        # print()                                                               #
+        # print("Output vecs:")                                                 #
+        # print(output_vecs)                                                    #
+        # print()                                                               #
+        #                                                                       #
+        # p = Plot("Embeddings")                                                #
+        # # Reduce the dimension to 3 if it is higher (using singular vectors). #
+        # if (embeddings.shape[1] > 3):                                         #
+        #     from tlux.math import svd                                         #
+        #     _, projection = svd(embeddings.copy())                            #
+        #     embeddings = np.matmul(embeddings, projection[:3].T)              #
+        # # Raise the dimension from 1 to 2.                                    #
+        # elif (embeddings.shape[1] == 1):                                      #
+        #     embeddings = np.asarray([[v,0] for v in embeddings.flatten()])    #
+        # # Add the embedding vectors to the plot.                              #
+        # for vec in embeddings:                                                #
+        #     p.add(str(vec), *[[0,v] for v in vec], mode="lines")              #
+        # p.show(append=True, show=False)                                       #
+        #########################################################################
+
+
+# 2022-04-03 19:43:37
+# 
+        ###########################################################################################
+        # if False:                                                                               #
+        #     m = APOS(mdn=0, adn=ax.shape[1], ado=2, mdo=0, #all_y.shape[1],                     #
+        #              ads=state_dim, ans=num_states, # mds=state_dim, mns=num_states,            #
+        #              ane=len(np.unique(axi.flatten())), # mne=len(np.unique(all_xi.flatten())), #
+        #              num_threads=num_threads, seed=seed)                                        #
+        #     fit_ax = np.array(ax, dtype="float32", order="C")                                   #
+        #     fit_y = np.array(all_x, dtype="float32", order="C")                                 #
+        #     print("fit_y.mean(axis=0): ", fit_y.mean(axis=0))                                   #
+        #     print()                                                                             #
+        #     print(m.config_str())                                                               #
+        #     print()                                                                             #
+        #     m.fit(ax=fit_ax, axi=axi, sizes=sizes, y=fit_y,                                     #
+        #           steps=1000, num_threads=num_threads, seed=seed)                               #
+        #     fx = m(ax=ax.copy(), axi=axi, sizes=sizes)                                          #
+        #     print("fit_y.mean(axis=0): ", fit_y.mean(axis=0))                                   #
+        #     print("m.unpack().ay_shift: ", m.unpack().ay_shift)                                 #
+        #     print(" m.unpack().y_shift: ", m.unpack().y_shift)                                  #
+        #     print()                                                                             #
+        #     print("all_x: ")                                                                    #
+        #     print(all_x)                                                                        #
+        #     print()                                                                             #
+        #     print("fx: ")                                                                       #
+        #     print(fx)                                                                           #
+        #     print()                                                                             #
+        #     print("all_x - fx: ")                                                               #
+        #     print(all_x - fx)                                                                   #
+        # else:                                                                                   #
+        ###########################################################################################
