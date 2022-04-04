@@ -18,3 +18,4 @@
 | 0.0.11<br>March 2022 | Made initial apositional model output normalized <br> correctly to zero mean and unit variance. |
 | 0.0.12<br>April 2022 | Updated work size to int64 type. |
 | 0.0.13<br>April 2022 | Preventing negative array sizes and numbers of <br> threads. |
+| 0.0.14<br>April 2022 | Cleaned APOS memory usage, disabled compiled fmath, <br> added testing codes for least squares fits. |
