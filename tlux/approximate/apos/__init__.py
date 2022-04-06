@@ -153,7 +153,9 @@ class APOS:
         mde = kwargs.pop("mde", None)
         mne = kwargs.pop("mne", None)
         # Number of threads.
+        print("'num_threads' in kwargs: ", 'num_threads' in kwargs)
         self.num_threads = kwargs.pop("num_threads", self.num_threads)
+        print("self.num_threads: ", self.num_threads)
         self.seed = kwargs.pop("seed", self.seed)
         self.steps = kwargs.pop("steps", self.steps)
         # Initialize if enough arguments were provided.
@@ -340,6 +342,11 @@ class APOS:
                 kwargs["mdo"] = 0
                 kwargs["mns"] = 0
             self._init_model(**kwargs)
+        else:
+            # Set any configuration keyword arguments.
+            for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
+                setattr(self.config, n, kwargs[n])
+            
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
         if (self.config.ade > 0):
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
@@ -363,6 +370,7 @@ class APOS:
         self.APOS.new_fit_config(nm, na, self.config)
         rwork = np.zeros(self.config.rwork_size, dtype="float32")
         iwork = np.zeros(self.config.iwork_size, dtype="int32")
+        print(self)
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model, rwork, iwork,
@@ -536,10 +544,9 @@ if __name__ == "__main__":
     np.random.seed(seed)
 
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = False
+    TEST_SAVE_LOAD = True
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = True
-    TEST_VARIED_SIZE = False
+    TEST_APOSITIONAL = False
     TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
@@ -547,20 +554,20 @@ if __name__ == "__main__":
     if TEST_FIT_SIZE:
         # Apositional model settings.
         dim_a_numeric = 4
-        dim_a_embedding = 32
+        dim_a_embedding = None
         num_a_embeddings = 32
-        dim_a_state = 128
-        num_a_states = 1
-        dim_a_out = 64
+        dim_a_state = 8
+        num_a_states = 2
+        dim_a_out = None
         # Model settings.
         dim_m_numeric = 8
-        dim_m_embedding = 0
-        num_m_embeddings = 0
+        dim_m_embedding = 32
+        num_m_embeddings = 32
         dim_m_state = 64
         num_m_states = 8
         dim_m_out = 1
         # Number of points going into each model.
-        na = 10000000
+        na = 100000000
         nm = 100000
         num_threads = 100
         # Initialize the model and its fit configuration.
@@ -707,8 +714,8 @@ if __name__ == "__main__":
 
     if (TEST_LARGE_MODEL):
         # Data size.
-        nm = 10000
-        na = 1000000
+        nm = 100000
+        na = 6000000
         adn = 10
         ane = 10
         mdn = 10
@@ -731,11 +738,11 @@ if __name__ == "__main__":
         sizes[-1] = na - sizes[-1]
         # Model settings.
         ans = 4
-        ads = 32
+        ads = 64
         mns = 8
         mds = 64
         steps = 101
-        num_threads = None
+        num_threads = 20
         # Fit model.
         m = APOS(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
                  ans=ans, ads=ads, mns=mns, mds=mds)
@@ -760,87 +767,3 @@ if __name__ == "__main__":
             p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
         p.show(append=True, show=True, y_range=[-.2, 1.2])
     print("", "done.", flush=True)
-
-
-    if TEST_VARIED_SIZE:
-        print("Creating data..")
-        for test in range(100):
-            print("sizes test: ", test, end="\r")
-            sizes = np.random.randint(5,20,size=(10))
-            na = sizes.sum()
-            nm = sizes.size
-            ax = np.random.random(size=(na,2))
-            x = well_spaced_box(nm, 2)
-            y = f(x)
-            start = 0
-            for i in range(len(sizes)):
-                end = start + sizes[i]
-                y[i] += ax[start:end].max()
-                start = end
-            # Fit a model.
-            m = APOS(seed=seed, num_threads=num_threads, steps=1)
-            m.fit(x=x.copy(), y=y.copy(), ax=ax.copy(), sizes=sizes)
-
-
-# 2022-04-03 15:03:09
-# 
-        #########################################################################
-        # # Generate visual of the embeddings.                                  #
-        # _ = m.unpack()                                                        #
-        # embeddings = _.m_embeddings.T                                         #
-        # output_vecs = _.m_output_vecs.T                                       #
-        # print()                                                               #
-        # print("Embeddings:")                                                  #
-        # print(embeddings)                                                     #
-        # print()                                                               #
-        # print("Output vecs:")                                                 #
-        # print(output_vecs)                                                    #
-        # print()                                                               #
-        #                                                                       #
-        # p = Plot("Embeddings")                                                #
-        # # Reduce the dimension to 3 if it is higher (using singular vectors). #
-        # if (embeddings.shape[1] > 3):                                         #
-        #     from tlux.math import svd                                         #
-        #     _, projection = svd(embeddings.copy())                            #
-        #     embeddings = np.matmul(embeddings, projection[:3].T)              #
-        # # Raise the dimension from 1 to 2.                                    #
-        # elif (embeddings.shape[1] == 1):                                      #
-        #     embeddings = np.asarray([[v,0] for v in embeddings.flatten()])    #
-        # # Add the embedding vectors to the plot.                              #
-        # for vec in embeddings:                                                #
-        #     p.add(str(vec), *[[0,v] for v in vec], mode="lines")              #
-        # p.show(append=True, show=False)                                       #
-        #########################################################################
-
-
-# 2022-04-03 19:43:37
-# 
-        ###########################################################################################
-        # if False:                                                                               #
-        #     m = APOS(mdn=0, adn=ax.shape[1], ado=2, mdo=0, #all_y.shape[1],                     #
-        #              ads=state_dim, ans=num_states, # mds=state_dim, mns=num_states,            #
-        #              ane=len(np.unique(axi.flatten())), # mne=len(np.unique(all_xi.flatten())), #
-        #              num_threads=num_threads, seed=seed)                                        #
-        #     fit_ax = np.array(ax, dtype="float32", order="C")                                   #
-        #     fit_y = np.array(all_x, dtype="float32", order="C")                                 #
-        #     print("fit_y.mean(axis=0): ", fit_y.mean(axis=0))                                   #
-        #     print()                                                                             #
-        #     print(m.config_str())                                                               #
-        #     print()                                                                             #
-        #     m.fit(ax=fit_ax, axi=axi, sizes=sizes, y=fit_y,                                     #
-        #           steps=1000, num_threads=num_threads, seed=seed)                               #
-        #     fx = m(ax=ax.copy(), axi=axi, sizes=sizes)                                          #
-        #     print("fit_y.mean(axis=0): ", fit_y.mean(axis=0))                                   #
-        #     print("m.unpack().ay_shift: ", m.unpack().ay_shift)                                 #
-        #     print(" m.unpack().y_shift: ", m.unpack().y_shift)                                  #
-        #     print()                                                                             #
-        #     print("all_x: ")                                                                    #
-        #     print(all_x)                                                                        #
-        #     print()                                                                             #
-        #     print("fx: ")                                                                       #
-        #     print(fx)                                                                           #
-        #     print()                                                                             #
-        #     print("all_x - fx: ")                                                               #
-        #     print(all_x - fx)                                                                   #
-        # else:                                                                                   #
-        ###########################################################################################

@@ -1,15 +1,5 @@
 ! TODO:
 ! 
-! - Divide Y by the MAXIMUM magnitude component, do not normalize every
-!   component because then the mean squared error solution is changed.
-! 
-! - Thoroughly test NORMALIZE (make sure data is correctly normalized in all use cases).
-!   Particularly, check that the initialization of the apositional output scale is working.
-! 
-! - Reset convention to be order of processing (AX, AXI, AY, SIZES, X, XI, Y)
-! - Enable a model that has no internal states for linear regression (*NS=0).
-! - Enable a apositional without a following model (MDO=0) (no apositional shifting).
-!
 ! - Update Python testing code to test all combinations of AX, AXI, AY, X, XI, and Y.
 ! - Update Python testing code to attempt different edge-case model sizes
 !    (linear regression, no apositional, no model).
@@ -71,6 +61,7 @@ CONTAINS
   ! Orthogonalize and normalize column vectors of A in order.
   SUBROUTINE ORTHONORMALIZE(A)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
+    ! Local variables.
     REAL(KIND=RT), DIMENSION(SIZE(A,2)) :: MULTIPLIERS
     REAL(KIND=RT) :: LEN
     INTEGER :: I, J
@@ -91,6 +82,7 @@ CONTAINS
   ! Generate randomly distributed vectors on the N-sphere.
   SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: COLUMN_VECTORS
+    ! Local variables.
     REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS
     REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
     INTEGER :: I, J
@@ -117,10 +109,10 @@ CONTAINS
   ! Orthogonalize and normalize column vectors of A with pivoting.
   SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(SIZE(A,2)) :: LENGTHS
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: LENGTHS ! SIZE(A,2)
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
-    INTEGER, INTENT(OUT), DIMENSION(SIZE(A,2)), OPTIONAL :: ORDER
-    REAL(KIND=RT) :: L, VEC(SIZE(A,1)) 
+    INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER ! SIZE(A,2)
+    REAL(KIND=RT) :: L, V
     INTEGER :: I, J, K
     IF (PRESENT(RANK)) RANK = 0
     IF (PRESENT(ORDER)) THEN
@@ -139,9 +131,12 @@ CONTAINS
           L = LENGTHS(I)
           LENGTHS(I) = LENGTHS(J)
           LENGTHS(J) = L
-          VEC(:) = A(:,I)
-          A(:,I) = A(:,J)
-          A(:,J) = VEC(:)
+          ! Perform the pivot.
+          DO K = 1, SIZE(A,1)
+             V = A(K,I)
+             A(K,I) = A(K,J)
+             A(K,J) = V
+          END DO
        END IF
        ! Subtract the first vector from all others.
        IF (LENGTHS(I) .GT. EPSILON(1.0_RT)) THEN
@@ -165,8 +160,8 @@ CONTAINS
   SUBROUTINE SVD(A, S, VT, RANK, STEPS, BIAS)
     IMPLICIT NONE
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(MIN(SIZE(A,1),SIZE(A,2))) :: S
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))) :: VT
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: S ! MIN(SIZE(A,1),SIZE(A,2))
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
@@ -655,6 +650,7 @@ MODULE APOS
      INTEGER :: PRINT_DELAY_SEC = 3
      INTEGER :: STEPS_TAKEN = 0
      INTEGER :: LOGGING_STEP_FREQUENCY = 10
+     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 50
      INTEGER :: NUM_TO_UPDATE = HUGE(0)
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE.
@@ -1741,10 +1737,10 @@ CONTAINS
     ! Gradient of the model parameters.
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: MODEL_GRAD
     ! Work space.
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(SIZE(AX,2),CONFIG%ADO) :: AY_GRAD
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(SIZE(Y,1),SIZE(Y,2)) :: Y_GRADIENT
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(SIZE(X,2),CONFIG%MDS,CONFIG%MNS+1) :: M_STATES, M_GRADS
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(SIZE(AX,2),CONFIG%ADS,CONFIG%ANS+1) :: A_STATES, A_GRADS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY_GRAD
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_GRADIENT
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_STATES, M_GRADS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_STATES, A_GRADS
     ! Output and optional inputs.
     INTEGER, INTENT(INOUT) :: INFO
     INTEGER :: L, D
@@ -1923,7 +1919,7 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
     INTEGER, DIMENSION(:,:) :: A_ORDER, M_ORDER
     INTEGER, INTENT(IN) :: NB
-    INTEGER, INTENT(IN), DIMENSION(CONFIG%NUM_THREADS) :: &
+    INTEGER, INTENT(IN), DIMENSION(:) :: &
          BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     ! Local variables.
@@ -1959,7 +1955,7 @@ CONTAINS
     !   quickly find the "most aligned" shift term (the shift that
     !   maximizes the dot product of the vectors assuming rectification).
     ! 
-    IF (MOD(FIT_STEP-1,CONFIG%LOGGING_STEP_FREQUENCY) .EQ. 0) THEN
+    IF (MOD(FIT_STEP-1,CONFIG%ORTHOGONALIZING_STEP_FREQUENCY) .EQ. 0) THEN
        TOTAL_EVAL_RANK = 0
        TOTAL_GRAD_RANK = 0
        ! Check the rank of all internal apositional states.
@@ -2074,15 +2070,14 @@ CONTAINS
     INTEGER(KIND=INT64) :: CURRENT_TIME, CLOCK_RATE, CLOCK_MAX, LAST_PRINT_TIME, WAIT_TIME
     REAL(KIND=RT) :: MSE, PREV_MSE, BEST_MSE
     REAL(KIND=RT) :: STEP_MEAN_REMAIN, STEP_CURV_REMAIN
-
     ! Check for a valid data shape given the model.
     INFO = 0
     ! Check the shape of all inputs (to make sure they match this model).
     CALL CHECK_SHAPE(CONFIG, MODEL, AX, AXI, SIZES, X, XI, Y, INFO)
     ! Do shape checks on the work space provided.
-    IF (SIZE(RWORK) .LT. CONFIG%RWORK_SIZE) THEN
+    IF (SIZE(RWORK,KIND=INT64) .LT. CONFIG%RWORK_SIZE) THEN
        INFO = 13
-    ELSE IF (SIZE(IWORK) .LT. CONFIG%IWORK_SIZE) THEN
+    ELSE IF (SIZE(IWORK,KIND=INT64) .LT. CONFIG%IWORK_SIZE) THEN
        INFO = 14
     ELSE IF ((CONFIG%ADI .GT. 0) .AND. (CONFIG%NA .LT. 1)) THEN
        INFO = 15
@@ -2240,6 +2235,7 @@ CONTAINS
                SS = BATCHM_STARTS(BATCH)
                SE = BATCHM_ENDS(BATCH)
             END IF
+            ! CALL SLEEP(3)
             ! Sum the gradient over all data batches.
             CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
                  AX(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
