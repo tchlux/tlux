@@ -1,5 +1,15 @@
 ! TODO:
 ! 
+! - Update CONDITION_MODEL to:
+!    sum the number of times a component had no rank across threads
+!    swap weights for the no-rank components to the back
+!    swap no-rank state component values into contiguous memory at back
+!    linearly regress the kept-components onto the next-layer dropped difference
+!    compute the first no-rank principal components of the gradient, store in droped slots
+!    regress previous layer onto the gradient components
+!    fill any remaining nodes (if not enough from gradient) with "uncaptured" principal components
+!    set new shift terms as the best of 5 well spaced values in [-1,1], or random given no order
+! 
 ! - Update Python testing code to test all combinations of AX, AXI, AY, X, XI, and Y.
 ! - Update Python testing code to attempt different edge-case model sizes
 !    (linear regression, no apositional, no model).
@@ -650,7 +660,7 @@ MODULE APOS
      INTEGER :: PRINT_DELAY_SEC = 3
      INTEGER :: STEPS_TAKEN = 0
      INTEGER :: LOGGING_STEP_FREQUENCY = 10
-     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 50
+     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 1
      INTEGER :: NUM_TO_UPDATE = HUGE(0)
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE.
@@ -770,6 +780,8 @@ CONTAINS
         CONFIG%ADO = ADO
      ELSE IF (CONFIG%ADI .EQ. 0) THEN
         CONFIG%ADO = 0
+     ELSE IF (CONFIG%ANS .EQ. 0) THEN
+        CONFIG%ADO = MIN(32, CONFIG%ADI)
      ELSE
         CONFIG%ADO = MIN(32, CONFIG%ADS)
      END IF
@@ -1924,6 +1936,8 @@ CONTAINS
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     ! Local variables.
     INTEGER :: I, VS, VE, J, R, NT, N, BS, BE, BN, BATCH, TER, TGR
+    ! TODO: The following allocations are for DEVELOPMENT, will be moved eventually.
+    INTEGER, DIMENSION(CONFIG%MDS, NUM_THREADS) :: M_STATE_USAGE
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
     CALL UNIT_MAX_NORM(CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
          MODEL(CONFIG%MSIV:CONFIG%MEIV), &
@@ -1940,21 +1954,9 @@ CONTAINS
             CONFIG%STEP_AY_CHANGE * (-SUM(AY(:,:),1) / REAL(SIZE(AY,1),RT)) &
             + (1.0_RT - CONFIG%STEP_AY_CHANGE * MODEL(CONFIG%AOSS:CONFIG%AOSE))
     END IF
+    ! Bound the embeddings.
+
     ! -------------------------------------------------------------
-    ! TODO:
-    !  - Parallelize orthogonalization by same batches as training, 
-    !    find those nodes that are agreeaby deleted, the total rank
-    !    is the layer size less those agreeably deleted.
-    ! 
-    !  - Using the computed rank of values and gradients, delete the
-    !    redundant basis functions and initialize with a combination
-    !    of uncaptured previous layer values with gradients (first nonzero
-    !    gradient components, then remaining nonzero input components).
-    ! 
-    ! - When measuring alignment of two vectors come up with way to
-    !   quickly find the "most aligned" shift term (the shift that
-    !   maximizes the dot product of the vectors assuming rectification).
-    ! 
     IF (MOD(FIT_STEP-1,CONFIG%ORTHOGONALIZING_STEP_FREQUENCY) .EQ. 0) THEN
        TOTAL_EVAL_RANK = 0
        TOTAL_GRAD_RANK = 0
@@ -1986,6 +1988,7 @@ CONTAINS
        N = SIZE(M_STATE_TEMP,1)
        BN = (N + NUM_THREADS - 1) / NUM_THREADS ! = CEIL(NM / NUM_BATCHES)
        DO I = 1, CONFIG%MNS
+          M_STATE_USAGE(:,:) = 0
           TER = 0; TGR = 0;
           !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NUM_THREADS) &
           !$OMP& REDUCTION(MAX: TER, TGR)
@@ -1995,6 +1998,7 @@ CONTAINS
              ! Compute model state rank.
              M_STATE_TEMP(BS:BE,:) = M_STATES(BS:BE,:,I)
              CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TER, M_ORDER(:,BATCH))
+             M_STATE_USAGE(M_ORDER(:TER,BATCH),BATCH) = 1
              ! Compute grad state rank.
              M_STATE_TEMP(BS:BE,:) = M_GRADS(BS:BE,:,I)
              CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TGR, M_ORDER(:,BATCH))
@@ -2002,9 +2006,40 @@ CONTAINS
           !$OMP END PARALLEL DO
           TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
           TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + TGR
+          ! Sum the "usage" of internal nodes to see which are entirely unuseful.
+          M_STATE_USAGE(:,1) = SUM(M_STATE_USAGE(:,:), 2)
+          IF ((I .GT. 1) .AND. (I .LT. CONFIG%MNS-1)) THEN
+             ! TODO:
+             !  - Using the computed rank of values and gradients, delete the
+             !    redundant basis functions and initialize with a combination
+             !    of uncaptured previous layer values with gradients (first nonzero
+             !    gradient components, then remaining nonzero input components).
+             ! 
+             ! - When measuring alignment of two vectors come up with way to
+             !   quickly find the "most aligned" shift term (the shift that
+             !   maximizes the dot product of the vectors assuming rectification).
+             ! 
+             ! PRINT *, 'M layer', I, 'usage:', M_STATE_USAGE(:,1)
+             ! CALL REPLACE_BASIS_FUNCTIONS(M_STATE_USAGE(:,1), &
+             !      M_STATES(:,:,I-1), M_STATES(:,:,I), M_GRADS(:,:,I+1), &
+             !      MODEL(), & ! layer input weights
+             !      MODEL(), & ! layer input shifts
+             !      MODEL(), & ! layer output weights
+             !      )
+          END IF
        END DO
     END IF
+
   CONTAINS
+
+    SUBROUTINE REPLACE_BASIS_FUNCTIONS(USAGE, PREV_STATE, CURR_STATE, &
+         NEXT_GRADS)
+      INTEGER, DIMENSION(:) :: USAGE
+      REAL(KIND=RT), DIMENSION(:,:) :: PREV_STATE
+      REAL(KIND=RT), DIMENSION(:,:) :: CURR_STATE
+      REAL(KIND=RT), DIMENSION(:,:) :: NEXT_GRADS
+
+    END SUBROUTINE REPLACE_BASIS_FUNCTIONS
 
     ! Set the input vectors and the state vectors to 
     SUBROUTINE UNIT_MAX_NORM(MDI, MDS, MNS, INPUT_VECS, STATE_VECS)
@@ -2025,6 +2060,36 @@ CONTAINS
       END DO
       !$OMP END PARALLEL DO
     END SUBROUTINE UNIT_MAX_NORM
+
+    ! Perform least squares with LAPACK.
+    ! 
+    !   A is column vectors (of points) if TRANS='T', and row vectors 
+    !     (of points) if TRANS='N'.
+    !   B must be COLUMN VECTORS of fit output (1 component = 1 point).
+    !   X always has a first dimension that is nonpoint axis size of A,
+    !     and the second dimension is determined by B's columns.
+    SUBROUTINE LEAST_SQUARES(TRANS, A, B, X)
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A, B
+      CHARACTER, INTENT(IN) :: TRANS
+      REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: X ! MIN(SIZE(A,1),SIZE(A,2)),SIZE(B,2)
+      ! Local variables.
+      INTEGER :: M, N, NRHS, LDA, LDB, LWORK, INFO
+      REAL(KIND=RT), DIMENSION(:), ALLOCATABLE :: WORK
+      EXTERNAL :: SGELS
+      ! Set variables for calling least squares routine.
+      M = SIZE(A,1)
+      N = SIZE(A,2)
+      NRHS = SIZE(B,2)
+      LDA = SIZE(A,1)
+      LDB = SIZE(B,1)
+      ! Allocate the work space for the call.
+      LWORK = MAX(1, MIN(M,N) + MAX(MIN(M,N), NRHS))
+      ALLOCATE(WORK(LWORK))
+      ! Make the call to the least squares routine.
+      CALL SGELS( TRANS, M, N, NRHS, A, LDA, B, LDB, WORK, LWORK, INFO )
+      X(:,:) = B(:SIZE(X,1),:SIZE(X,2))
+    END SUBROUTINE LEAST_SQUARES
+
 
   END SUBROUTINE CONDITION_MODEL
 
@@ -2202,7 +2267,7 @@ CONTAINS
       ! Disable the application of SHIFT (since data is / will be normalized).
       APPLY_SHIFT = CONFIG%APPLY_SHIFT
       CONFIG%APPLY_SHIFT = .FALSE.
-      ! Normalize the data.
+      ! Normalize the data (with parallelization enabled for evaluating AY).
       CALL NORMALIZE_DATA(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, &
            AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_RESCALE, X_RESCALE, &
            XI_SHIFT, XI_RESCALE, Y_RESCALE, A_STATES, &
@@ -2235,7 +2300,6 @@ CONTAINS
                SS = BATCHM_STARTS(BATCH)
                SE = BATCHM_ENDS(BATCH)
             END IF
-            ! CALL SLEEP(3)
             ! Sum the gradient over all data batches.
             CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
                  AX(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
@@ -2256,8 +2320,6 @@ CONTAINS
          END DO
          !$OMP END PARALLEL DO
          IF (INFO .NE. 0) RETURN
-         ! Aggregate over computed batches.
-         MODEL_GRAD(:,1) = SUM(MODEL_GRAD(:,:),2)
          ! 
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !           Update the step factors, early stop if appropaite.
@@ -2301,8 +2363,8 @@ CONTAINS
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !              Modify the model parameters (take step).
          ! 
-         ! Convert the summed gradient to average gradient.
-         MODEL_GRAD(:,1) = MODEL_GRAD(:,1) / REAL(NB,RT)
+         ! Aggregate over computed batches and compute average gradient.
+         MODEL_GRAD(:,1) = SUM(MODEL_GRAD(:,:),2) / REAL(NB,RT)
          MODEL_GRAD_MEAN(:) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(:) &
               + CONFIG%STEP_MEAN_CHANGE * MODEL_GRAD(:,1)
          MODEL_GRAD_CURV(:) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(:) &

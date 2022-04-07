@@ -3,8 +3,8 @@
 ! 
 !   A is column vectors (of points) if TRANS='T', and row vectors 
 !     (of points) if TRANS='N'.
-!   B must be COLUMN VECTORS of fit output.
-!   X always has a first dimension that is the smaller of A's sizes,
+!   B must be COLUMN VECTORS of fit output (1 component = 1 point).
+!   X always has a first dimension that is nonpoint axis size of A,
 !     and the second dimension is determined by B's columns.
 SUBROUTINE LEAST_SQUARES(TRANS, A, B, X)
   USE ISO_FORTRAN_ENV, ONLY: RT => REAL32

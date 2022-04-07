@@ -345,7 +345,8 @@ class APOS:
         else:
             # Set any configuration keyword arguments.
             for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
-                setattr(self.config, n, kwargs[n])
+                if (kwargs[n] is not None):
+                    setattr(self.config, n, kwargs[n])
             
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
         if (self.config.ade > 0):
@@ -537,16 +538,16 @@ if __name__ == "__main__":
 
     n = 100
     seed = 2
-    state_dim = 20
-    num_states = 4
+    state_dim = 50
+    num_states = 20
     steps = 1000
-    num_threads = 1
+    num_threads = None
     np.random.seed(seed)
 
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = True
+    TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = False
+    TEST_APOSITIONAL = True
     TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
