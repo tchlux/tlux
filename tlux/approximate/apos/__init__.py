@@ -107,6 +107,7 @@ class APOS:
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
+                                  dependencies=["matrix_operations.f90", "sort_and_select.f90"]
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
@@ -153,9 +154,7 @@ class APOS:
         mde = kwargs.pop("mde", None)
         mne = kwargs.pop("mne", None)
         # Number of threads.
-        print("'num_threads' in kwargs: ", 'num_threads' in kwargs)
         self.num_threads = kwargs.pop("num_threads", self.num_threads)
-        print("self.num_threads: ", self.num_threads)
         self.seed = kwargs.pop("seed", self.seed)
         self.steps = kwargs.pop("steps", self.steps)
         # Initialize if enough arguments were provided.
@@ -371,7 +370,6 @@ class APOS:
         self.APOS.new_fit_config(nm, na, self.config)
         rwork = np.zeros(self.config.rwork_size, dtype="float32")
         iwork = np.zeros(self.config.iwork_size, dtype="int32")
-        print(self)
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model, rwork, iwork,
@@ -536,13 +534,15 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
+
     n = 100
     seed = 2
-    state_dim = 50
-    num_states = 20
+    state_dim = 40
+    num_states = 4
     steps = 1000
     num_threads = None
     np.random.seed(seed)
+
 
     TEST_FIT_SIZE = False
     TEST_SAVE_LOAD = False
@@ -590,6 +590,7 @@ if __name__ == "__main__":
             def __getattr__(self, *args, **kwargs):
                 return lambda *args, **kwargs: None
 
+
     if TEST_SAVE_LOAD:
         # Try saving an untrained model.
         m = APOS()
@@ -601,6 +602,7 @@ if __name__ == "__main__":
         from util.approximate import PLRM
         m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
                  num_threads=num_threads, steps=steps, 
+                 orthogonalizing_step_frequency=10,
                  ) # discontinuity=-1000.0) # initial_step=0.01)
         print("Initialized model:")
         print(m)
@@ -686,7 +688,7 @@ if __name__ == "__main__":
                  ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
                  num_threads=num_threads, seed=seed)
         m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), 
-              steps=steps, num_threads=num_threads, seed=seed)
+              steps=steps, num_threads=num_threads, seed=seed, basis_replacement=False)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
