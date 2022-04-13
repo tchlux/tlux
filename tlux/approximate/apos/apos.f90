@@ -96,7 +96,7 @@ MODULE APOS
      INTEGER :: PRINT_DELAY_SEC = 3 ! Delay between output logging during fit.
      INTEGER :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
      INTEGER :: LOGGING_STEP_FREQUENCY = 10 ! Frequency with which to log expensive records (model variable 2-norm step size).
-     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 10 ! Frequency with which to orthogonalize internal basis functions.
+     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 50 ! Frequency with which to orthogonalize internal basis functions.
      INTEGER :: NUM_TO_UPDATE = HUGE(0) ! Number of model variables to update (initialize to large number).
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE.
@@ -1168,7 +1168,7 @@ CONTAINS
 
   ! Compute the gradient of the sum of squared error of this regression
   ! model with respect to its variables given input and output pairs.
-  SUBROUTINE MODEL_GRADIENT(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, &
+  SUBROUTINE MODEL_GRADIENT(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, YW, &
        SUM_SQUARED_GRADIENT, MODEL_GRAD, &
        AY_GRADIENT, Y_GRADIENT, A_STATES, A_GRADS, M_STATES, M_GRADS, &
        INFO)
@@ -1181,6 +1181,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     INTEGER,       INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW
     ! Sum (over all data) squared error (summed over dimensions).
     REAL(KIND=RT), INTENT(INOUT) :: SUM_SQUARED_GRADIENT
     ! Gradient of the model variables.
@@ -1199,6 +1200,15 @@ CONTAINS
     CALL EVALUATE(CONFIG, MODEL, AX, AY, SIZES, X, Y_GRADIENT, A_STATES, M_STATES, INFO)
     ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
     Y_GRADIENT(:,:) = Y_GRADIENT(:,:) - Y(:,:) ! squared error gradient
+    ! Apply weights to the computed gradients (if they were provided.
+    IF (SIZE(YW,1) .EQ. SIZE(Y,1)) THEN
+       Y_GRADIENT(:,:) = Y_GRADIENT(:,:) * YW(:,:)
+    ELSE IF (SIZE(YW,1) .EQ. 1) THEN
+       DO D = 1, SIZE(Y,1)
+          Y_GRADIENT(D,:) = Y_GRADIENT(D,:) * YW(1,:)
+       END DO
+    END IF
+    ! Compute the total squared gradient.
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SUM(Y_GRADIENT(:,:)**2)
     ! Copy the state values into holders for the gradients.
     A_GRADS(:,:,:) = A_STATES(:,:,:)
@@ -1225,7 +1235,7 @@ CONTAINS
   ! Make inputs and outputs radially symmetric (to make initialization
   !  more well spaced and lower the curvature of the error gradient).
   ! 
-  SUBROUTINE NORMALIZE_DATA(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, &
+  SUBROUTINE NORMALIZE_DATA(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, YW, &
        AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_RESCALE, X_RESCALE, &
        XI_SHIFT, XI_RESCALE, Y_RESCALE, &
        A_STATES, A_EMB_VECS, M_EMB_VECS, A_OUT_VECS, INFO)
@@ -1238,6 +1248,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     INTEGER,       INTENT(IN),    DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX_RESCALE
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: AXI_SHIFT
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AXI_RESCALE
@@ -1258,7 +1269,7 @@ CONTAINS
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     END IF
     ! 
-    !$OMP PARALLEL NUM_THREADS(5)
+    !$OMP PARALLEL NUM_THREADS(6)
     !$OMP SECTIONS PRIVATE(D)
     !$OMP SECTION
     IF ((.NOT. CONFIG%AX_NORMALIZED) .AND. (CONFIG%ADN .GT. 0)) THEN
@@ -1312,6 +1323,10 @@ CONTAINS
        MODEL(CONFIG%MOSS:CONFIG%MOSE) = 0.0_RT
        Y_RESCALE(:,:) = 0.0_RT
        FORALL (D=1:SIZE(Y,1)) Y_RESCALE(D,D) = 1.0_RT
+    END IF
+    !$OMP SECTION
+    IF (SIZE(YW) .GT. 0) THEN
+       YW(:,:) = YW(:,:) / (SUM(YW(:,:)) / REAL(SIZE(YW),RT))
     END IF
     !$OMP END SECTIONS
     !$OMP END PARALLEL
@@ -1579,8 +1594,6 @@ CONTAINS
           IF (CONFIG%BASIS_REPLACEMENT) THEN
              ! Sum the "usage" of internal nodes to see which are entirely unuseful.
              M_STATE_USAGE(:,1) = SUM(M_STATE_USAGE(:,:), 2)
-             ! PRINT *, ''
-             ! PRINT *, 'Layer', I
              ! Replace the basis functions with a policy that ensures convergence.
              IF (I .EQ. 1) THEN
                 IF (CONFIG%MNS .GT. 1) THEN
@@ -1648,10 +1661,12 @@ CONTAINS
       ! Local variables.
       REAL(KIND=RT), DIMENSION(SIZE(USAGE)) :: VALUES
       REAL(KIND=RT), DIMENSION(SIZE(PREV_STATE,1), SIZE(PREV_STATE,2)) :: PREV_TEMP
+      REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,1), SIZE(CURR_STATE,2)) :: CURR_TEMP
       REAL(KIND=RT), DIMENSION(SIZE(NEXT_GRADS,1), SIZE(NEXT_GRADS,2)) :: GRAD_TEMP
       REAL(KIND=RT), DIMENSION(SIZE(IN_VECS,2), SIZE(IN_VECS,1)) :: VECS_TEMP
+      ! REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,2)) :: VECS_TEMP
       INTEGER, DIMENSION(SIZE(USAGE)) :: ORDER
-      INTEGER :: RANK, I
+      INTEGER :: RANK, I, GRAD_RANK, MISS_RANK
       ! TODO:
       !  - Create a function that does LEAST_SQUARES with a truncation factor
       !    that uses the SVD to truncate the number of vectors generated.
@@ -1674,37 +1689,53 @@ CONTAINS
       !    regress previous layer onto the gradient components
       !    fill any remaining nodes (if not enough from gradient) with "uncaptured" principal components
       !    set new shift terms as the best of 5 well spaced values in [-1,1], or random given no order
+
+      ! Find the first zero-valued (unused) basis function (after orthogonalization).
       FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
-      ! PRINT *, '  order:', ORDER(:)
-      ! PRINT *, '  usage:', USAGE(:)
       VALUES(:) = -REAL(USAGE,RT)
       CALL ARGSORT(VALUES(:), ORDER(:))
-      ! Find the first zero-valued (unused) basis function.
       DO RANK = 1, SIZE(ORDER(:))
          IF (USAGE(ORDER(RANK)) .EQ. 0) EXIT
       END DO
       IF (RANK .GT. SIZE(ORDER)) RETURN
-      ! 
-      ! PRINT *, '  replacing:' , ORDER(RANK:)
-      ! PRINT *, ''
 
-      ! Reinitialize weights by performing a linear fit of the gradients.
-      PREV_TEMP(:,:) = PREV_STATE(:,:)
-      GRAD_TEMP(:,:) = NEXT_GRADS(:,:)
-      VECS_TEMP(RANK:,:) = TRANSPOSE(IN_VECS(:,ORDER(RANK:)))
-      CALL LEAST_SQUARES('N', PREV_TEMP(:,:), GRAD_TEMP(:,:), &
-           VECS_TEMP(RANK:,:))
-      IN_VECS(:,ORDER(RANK:)) = TRANSPOSE(VECS_TEMP(RANK:,:))
-      SHIFTS(ORDER(RANK:)) = 0.0_RT
+      ! ! Reduce the gradient to its nonzero components.
+      ! GRAD_TEMP(:,:GRAD_RANK) = NEXT_GRADS(:,:GRAD_RANK)
+      ! CALL ORTHOGONALIZE(NEXT_GRADS(:,:), GRAD_TEMP(1,:), RANK=GRAD_RANK)
+      ! ! Reinitialize weights by performing a linear fit of the gradients.
+      ! IF (GRAD_RANK .GT. 0) THEN
+      !    PREV_TEMP(:,:) = PREV_STATE(:,:)
+      !    GRAD_TEMP(:,:GRAD_RANK) = NEXT_GRADS(:,:GRAD_RANK)
+      !    VECS_TEMP(RANK:,:) = TRANSPOSE(IN_VECS(:,ORDER(RANK:)))
+      !    CALL LEAST_SQUARES('N', PREV_TEMP(:,:), GRAD_TEMP(:,:GRAD_RANK), VECS_TEMP(RANK:,:))
+      !    IN_VECS(:,ORDER(RANK:)) = TRANSPOSE(VECS_TEMP(RANK:,:))
+      !    ! TODO: Pick the shifts to maximize the dot product between the
+      !    !       produced values and the corresponding gradient components.
+      !    SHIFTS(ORDER(RANK:)) = 0.0_RT
+      ! END IF
+      ! IF (RANK + GRAD_RANK .GT. SIZE(ORDER)) RETURN
 
-      ! ! Initialize any remaining vectors (with no guidance)
-      ! !   using a randomized initialization scheme.
-      ! DO I = RANK, SIZE(ORDER)
-      !    CALL RANDOM_UNIT_VECTORS(IN_VECS(:,ORDER(I):ORDER(I)))
-      ! END DO
-      ! CALL RANDOM_NUMBER(SHIFTS(ORDER(RANK:)))
-      ! SHIFTS(ORDER(RANK:)) = (2.0_RT * SHIFTS(ORDER(RANK:)) - 1.0_RT) &
-      !      * CONFIG%INITIAL_SHIFT_RANGE
+      ! ! Find lost information by linearly regressing previous state
+      ! ! given the current state and looking at the residuals. Find
+      ! ! principal components of lost information and pick a shift to
+      ! ! keep all information.
+      ! CURR_TEMP(:,:) = CURR_STATE(:,:)
+      ! PREV_TEMP(:,:) = PREV_STATE(:,:)      
+      ! CALL LEAST_SQUARES('N', CURR_TEMP(:,:), PREV_TEMP(:,:), VECS_TEMP(:,:))
+      ! PREV_TEMP(:,:) = PREV_STATE(:,:) - MATMUL(CURR_TEMP(:,:), VECS_TEMP(:,:))
+      ! CALL SVD(PREV_TEMP(:,:), PREV_STATE(1,:), (), RANK=MISS_RANK, STEPS=10)
+      ! IF (MISS_RANK .GT. 0) THEN
+      ! END IF
+      ! IF (RANK + GRAD_RANK + MISS_RANK)
+
+      ! Initialize any remaining vectors (with no guidance)
+      !   using a randomized initialization scheme.
+      DO I = RANK, SIZE(ORDER)
+         CALL RANDOM_UNIT_VECTORS(IN_VECS(:,ORDER(I):ORDER(I)))
+      END DO
+      CALL RANDOM_NUMBER(SHIFTS(ORDER(RANK:)))
+      SHIFTS(ORDER(RANK:)) = (2.0_RT * SHIFTS(ORDER(RANK:)) - 1.0_RT) &
+           * CONFIG%INITIAL_SHIFT_RANGE
 
       ! Zero the output vectors for newly initialized basis functions.
       OUT_VECS(ORDER(RANK:),:) = 0.0_RT
@@ -1724,7 +1755,7 @@ CONTAINS
 
   ! Fit input / output pairs by minimizing mean squared error.
   SUBROUTINE MINIMIZE_MSE(CONFIG, MODEL, RWORK, IWORK, &
-       AX, AXI, SIZES, X, XI, Y, &
+       AX, AXI, SIZES, X, XI, Y, YW, &
        STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
@@ -1736,6 +1767,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     INTEGER,       INTENT(IN),    DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
     INTEGER,       INTENT(IN) :: STEPS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(6,STEPS), OPTIONAL :: RECORD
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
@@ -1775,6 +1807,16 @@ CONTAINS
        INFO = 15
     ELSE IF ((CONFIG%MDI .GT. 0) .AND. (CONFIG%NM .LT. 1)) THEN
        INFO = 16
+    END IF
+    ! Do shape checks on the YW (weights for Y's) provided.
+    IF (SIZE(YW,2) .NE. SIZE(Y,2)) THEN
+       INFO = 17 ! Bad YW number of points.
+    ELSE IF ((SIZE(YW,1) .NE. 0) & ! no weights provided
+         .AND. (SIZE(YW,1) .NE. 1) & ! one weight per point
+         .AND. (SIZE(YW,1) .NE. SIZE(Y,1))) THEN ! one weight per output component
+       INFO = 18 ! Bad YW dimension.
+    ELSE IF (MINVAL(YW(:,:)) .LE. 0.0_RT) THEN
+       INFO = 19 ! Bad YW values.
     END IF
     IF (INFO .NE. 0) RETURN
     ! Unpack all of the work storage into the expected shapes.
@@ -1895,7 +1937,7 @@ CONTAINS
       APPLY_SHIFT = CONFIG%APPLY_SHIFT
       CONFIG%APPLY_SHIFT = .FALSE.
       ! Normalize the data (with parallelization enabled for evaluating AY).
-      CALL NORMALIZE_DATA(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, &
+      CALL NORMALIZE_DATA(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, YW, &
            AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_RESCALE, X_RESCALE, &
            XI_SHIFT, XI_RESCALE, Y_RESCALE, A_STATES, &
            MODEL(CONFIG%ASEV:CONFIG%AEEV), &
@@ -1936,6 +1978,7 @@ CONTAINS
                  X(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
                  XI(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
                  Y(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                 YW(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
                  SUM_SQUARED_ERROR, MODEL_GRAD(:,BATCH), &
                  AY_GRADIENT(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
                  Y_GRADIENT(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &

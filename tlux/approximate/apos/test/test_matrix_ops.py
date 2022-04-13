@@ -2,7 +2,38 @@ import numpy as np
 import fmodpy
 
 # Matrix operations module.
-mops = fmodpy.fimport("matrix_operations.f90", blas=True, lapack=True).matrix_operations
+mops = fmodpy.fimport("../matrix_operations.f90", blas=True, lapack=True).matrix_operations
+
+# --------------------------------------------------------------------
+#                         ORTHOGONALIZE
+
+# Test orthogonalization.
+d = 4
+m = np.random.random(size=(d,d)).astype("float32")
+l = np.zeros(d, dtype="float32")
+
+print("m: ")
+print(m)
+print(m.T @ m)
+print(m @ m.T)
+print()
+
+mops.orthogonalize(m.T, l)
+
+print("m: ")
+print(m)
+print(m.T @ m)
+print(m @ m.T)
+print()
+
+print("l: ")
+print(l)
+print()
+
+exit()
+
+# --------------------------------------------------------------------
+#                        RANDOM_UNIT_VECTORS
 
 # Generate test data.
 n = 100 # number of points
@@ -19,6 +50,9 @@ mops.random_unit_vectors(a.T)
 x = np.zeros((bd,d), dtype="float32").T
 mops.random_unit_vectors(x)
 b = np.array(np.matmul(a, x), order="F", dtype="float32")
+
+# --------------------------------------------------------------------
+#                            LEAST_SQUARES
 
 # Use the matrix operations subroutine to solve the least squares problem.
 mo_x = np.zeros((d,br), order="F", dtype="float32")

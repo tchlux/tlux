@@ -228,7 +228,7 @@ class APOS:
 
 
     # Convert all inputs to the APOS model into the expected numpy format.
-    def _to_array(self, y, yi, x, xi, ax, axi, sizes):
+    def _to_array(self, ax, axi, sizes, x, xi, y, yi):
         # Get the number of inputs.
         if   (y  is not None): nm = len(y)
         elif (yi is not None): nm = len(yi)
@@ -315,8 +315,8 @@ class APOS:
 
 
     # Fit this model.
-    def fit(self, x=None, y=None, yi=None, xi=None, ax=None, axi=None,
-            sizes=None, new_model=False, **kwargs):
+    def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
+            y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "APOS.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -324,8 +324,14 @@ class APOS:
             assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
         # Get all inputs as arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
-            self._to_array(y, yi, x, xi, ax, axi, sizes)
+            self._to_array(ax, axi, sizes, x, xi, y, yi)
         )
+        # Convert yw to a numpy array (if it is not already).
+        if (yw is None):
+            yw = np.zeros((nm,0), dtype="float32", order="C")
+        else:
+            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((nm,-1)), order="C")
+        assert (yw.shape[1] in {0, 1, mdo}), f"Weights for points 'yw' {yw.shape} must have 1 column{' or '+str(mdo)+' columns' if (mdo > 0) else ''}."
         # Configure this model if requested (or not already done).
         if (new_model or (self.config is None)):
             # Ensure that the config is compatible with the data.
@@ -373,7 +379,7 @@ class APOS:
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         result = self.APOS.minimize_mse(self.config, self.model, rwork, iwork,
-                                        ax.T, axi.T, sizes, x.T, xi.T, y.T, 
+                                        ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
                                         steps=steps, record=self.record.T)
         assert (result[-1] == 0), f"APOS.minimize_mse returned nonzero exit code {result[-1]}."
         # Copy the updated values back into the input arrays (for transparency).
@@ -398,7 +404,7 @@ class APOS:
             assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, _, x, xi, ax, axi, sizes = (
-            self._to_array(None, None, x, xi, ax, axi, sizes)
+            self._to_array(ax, axi, sizes, x, xi, None, None)
         )
         # Embed the inputs into the purely positional form.
         ade = self.config.ade
@@ -544,10 +550,11 @@ if __name__ == "__main__":
     np.random.seed(seed)
 
 
+    TEST_WEIGHTING = False
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = False
+    TEST_SAVE_LOAD = True
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = True
+    TEST_APOSITIONAL = False
     TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
@@ -611,12 +618,18 @@ if __name__ == "__main__":
         x = np.asarray(well_spaced_box(n, 2), dtype="float32", order="C")
         # x[:,0] /= 2
         y = f(x).astype("float32")
+        # Construct weights.
+        yw = np.random.random(size=n) ** 5
+        yw = np.where(yw > 0.5, yw*2, 0.001)
+        if (not TEST_WEIGHTING): yw[:] = 1.0
         # Fit the model.
-        m.fit(x.copy(), y.copy())
+        m.fit(x=x.copy(), y=y.copy(), yw=yw)
         # Add the data and the surface of the model to the plot.
         p = Plot()
         x_min_max = np.asarray([x.min(axis=0), x.max(axis=0)]).T
-        p.add("Data", *x.T, y)
+        p.add("Data", *x[yw > 0.5].T, y[yw > 0.5])
+        if (TEST_WEIGHTING):
+            p.add("Data (low weight)", *x[yw <= 0.5].T, y[yw <= 0.5], color=3)
         # p.add("Normalized data", *x_fit.T, y_fit)
         p.add_func("Fit", m, *x_min_max, vectorized=True)
         # Try saving the trained model and applying it after loading.
@@ -744,7 +757,7 @@ if __name__ == "__main__":
         ads = 64
         mns = 8
         mds = 64
-        steps = 101
+        steps = 11
         num_threads = 20
         # Fit model.
         m = APOS(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
