@@ -20,3 +20,4 @@
 | 0.0.13<br>April 2022 | Preventing negative array sizes and numbers of <br> threads. |
 | 0.0.14<br>April 2022 | Cleaned APOS memory usage, disabled compiled fmath, <br> added testing codes for least squares fits. |
 | 0.0.15<br>April 2022 | Added large format testing for APOS and parallelized <br> the evaluation of internal state rank. |
+| 0.0.16<br>April 2022 | Modified APOS fit routines to allow weighting the <br> value of individual Y with the new parameter YW. |
