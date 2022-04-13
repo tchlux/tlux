@@ -21,3 +21,4 @@
 | 0.0.14<br>April 2022 | Cleaned APOS memory usage, disabled compiled fmath, <br> added testing codes for least squares fits. |
 | 0.0.15<br>April 2022 | Added large format testing for APOS and parallelized <br> the evaluation of internal state rank. |
 | 0.0.16<br>April 2022 | Modified APOS fit routines to allow weighting the <br> value of individual Y with the new parameter YW. |
+| 0.0.17<br>April 2022 | Minor patch, prevent division by zero in <br> CONDITION_MODEL. |
