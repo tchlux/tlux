@@ -1497,9 +1497,11 @@ CONTAINS
        ! Check the rank of all internal apositional states.
        J = CONFIG%ANS+1
        ! Batch computation formula.
-       N = SIZE(A_STATE_TEMP,1)
-       NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%ADS)) ! number of threads (as not to artificially reduce rank)
-       BN = (N + NT - 1) / NT ! = CEIL(N / NT)
+       IF (CONFIG%ANS .GT. 0) THEN
+          N = SIZE(A_STATE_TEMP,1)
+          NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%ADS)) ! number of threads (as not to artificially reduce rank)
+          BN = (N + NT - 1) / NT ! = CEIL(N / NT)
+       END IF
        DO I = 1, CONFIG%ANS
           TER = 0; TGR = 0;
           !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NT) &
@@ -1567,9 +1569,11 @@ CONTAINS
        END DO
        ! 
        ! Check the rank of all internal model states.
-       N = SIZE(M_STATE_TEMP,1)
-       NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%MDS)) ! number of threads (as not to artificially reduce rank)
-       BN = (N + NT - 1) / NT ! = CEIL(N / NT)
+       IF (CONFIG%MNS .GT. 0) THEN
+          N = SIZE(M_STATE_TEMP,1)
+          NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%MDS)) ! number of threads (as not to artificially reduce rank)
+          BN = (N + NT - 1) / NT ! = CEIL(N / NT)
+       END IF
        DO I = 1, CONFIG%MNS
           M_STATE_USAGE(:,:) = 0
           TER = 0; TGR = 0;

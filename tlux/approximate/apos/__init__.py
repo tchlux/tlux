@@ -107,7 +107,7 @@ class APOS:
             apos = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  dependencies=["matrix_operations.f90", "sort_and_select.f90"]
+                                  dependencies=["matrix_operations.f90", "sort_and_select.f90", "apos.f90"]
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
