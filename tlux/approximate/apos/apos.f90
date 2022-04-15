@@ -96,7 +96,7 @@ MODULE APOS
      INTEGER :: PRINT_DELAY_SEC = 3 ! Delay between output logging during fit.
      INTEGER :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
      INTEGER :: LOGGING_STEP_FREQUENCY = 10 ! Frequency with which to log expensive records (model variable 2-norm step size).
-     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 50 ! Frequency with which to orthogonalize internal basis functions.
+     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 0 ! Frequency with which to orthogonalize internal basis functions.
      INTEGER :: NUM_TO_UPDATE = HUGE(0) ! Number of model variables to update (initialize to large number).
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE.
@@ -104,6 +104,7 @@ MODULE APOS
      LOGICAL(KIND=INT8) :: X_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: XI_NORMALIZED = .FALSE.
      LOGICAL(KIND=INT8) :: Y_NORMALIZED = .FALSE.
+     LOGICAL(KIND=INT8) :: EQUALIZE_Y = .FALSE. ! Rescale all Y components to be equally weighted.
      LOGICAL(KIND=INT8) :: ENCODE_NORMALIZATION = .TRUE.
      LOGICAL(KIND=INT8) :: APPLY_SHIFT = .TRUE.
      LOGICAL(KIND=INT8) :: KEEP_BEST = .TRUE.
@@ -1317,7 +1318,7 @@ CONTAINS
     !$OMP SECTION
     IF (.NOT. CONFIG%Y_NORMALIZED) THEN
        CALL RADIALIZE(Y(:,:), MODEL(CONFIG%MOSS:CONFIG%MOSE), &
-            Y_RESCALE(:,:), INVERT_RESULT=.TRUE., FLATTEN=.FALSE.)
+            Y_RESCALE(:,:), INVERT_RESULT=.TRUE., FLATTEN=LOGICAL(CONFIG%EQUALIZE_Y))
        CONFIG%Y_NORMALIZED = .TRUE.
     ELSE
        MODEL(CONFIG%MOSS:CONFIG%MOSE) = 0.0_RT
@@ -1488,7 +1489,8 @@ CONTAINS
     ! 
     !      Orhtogonalize the basis functions inside the model
     ! 
-    IF (MOD(FIT_STEP-1,CONFIG%ORTHOGONALIZING_STEP_FREQUENCY) .EQ. 0) THEN
+    IF ((CONFIG%ORTHOGONALIZING_STEP_FREQUENCY .GT. 0) .AND. &
+         (MOD(FIT_STEP-1,CONFIG%ORTHOGONALIZING_STEP_FREQUENCY) .EQ. 0)) THEN
        ! Embed all integer inputs into real vector inputs.
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
        ! Compute total rank for values at all internal layers.

@@ -504,7 +504,7 @@ class APOS:
             value = attrs[key]
             if (key[-4:] == "_map"):
                 value = [np.asarray(l) for l in value]
-            elif (key[:2] in {"xi_","axi_","yi_"}):
+            elif (key[:3] in {"xi_","yi_"}) or (key[:4] == "axi_"):
                 pass
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
@@ -552,9 +552,9 @@ if __name__ == "__main__":
 
     TEST_WEIGHTING = False
     TEST_FIT_SIZE = False
-    TEST_SAVE_LOAD = True
+    TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = False
+    TEST_APOSITIONAL = True
     TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
@@ -642,7 +642,7 @@ if __name__ == "__main__":
         print(m)
         # print(str(m)[:str(m).index("\n\n")])
         print()
-        p.add("Loaded values", *x.T, m(x)[:,0]+0.05, color=1, marker_size=4)
+        p.add("Loaded values", *x.T, m(x.copy())[:,0]+0.05, color=1, marker_size=4)
         p.plot(show=(m.record.size == 0))
         # Remove the save files.
         import os
@@ -664,7 +664,6 @@ if __name__ == "__main__":
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
         x_fit = np.array(all_x, dtype="float32", order="C")
         m.fit(x=x_fit, xi=all_xi, y=all_y.copy())
-
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
         xi1 = np.ones((len(x),1),dtype="int32")
         y1 = m(x, xi=xi1)
