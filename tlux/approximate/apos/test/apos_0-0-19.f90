@@ -1,3 +1,610 @@
+! Module for matrix multiplication (absolutely crucial for APOS speed).
+! Includes routines for orthogonalization, computing the SVD, and
+! radializing data matrices with the SVD.
+MODULE MATRIX_OPERATIONS
+  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+  IMPLICIT NONE
+
+CONTAINS
+
+  ! Convenience wrapper routine for calling matrix multiply.
+  SUBROUTINE GEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
+       AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
+    CHARACTER, INTENT(IN) :: OP_A, OP_B
+    INTEGER, INTENT(IN) :: OUT_ROWS, OUT_COLS, INNER_DIM, A_ROWS, B_ROWS, C_ROWS
+    REAL(KIND=RT), INTENT(IN) :: AB_MULT, C_MULT
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: B
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: C
+    ! Call external single-precision matrix-matrix multiplication
+    !  (should be provided by hardware manufacturer, if not use custom).
+    EXTERNAL :: SGEMM 
+    CALL SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
+       AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
+    ! ! Fortran intrinsic version of general matrix multiplication routine,
+    ! !   first compute the initial values in the output matrix,
+    ! C(:,:) = C_MULT * C(:)
+    ! !   then compute the matrix multiplication.
+    ! IF (OP_A .EQ. 'N') THEN
+    !    IF (OP_B .EQ. 'N') THEN
+    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(A(:,:), B(:,:))
+    !    ELSE
+    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(A(:,:), TRANSPOSE(B(:,:)))
+    !    END IF
+    ! ELSE
+    !    IF (OP_B .EQ. 'N') THEN
+    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(TRANSPOSE(A(:,:)), B(:,:))
+    !    ELSE
+    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(TRANSPOSE(A(:,:)), TRANSPOSE(B(:,:)))
+    !    END IF
+    ! END IF
+  END SUBROUTINE GEMM
+
+  ! Generate randomly distributed vectors on the N-sphere.
+  SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: COLUMN_VECTORS
+    ! Local variables.
+    REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS
+    REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
+    REAL(KIND=RT) :: LEN
+    INTEGER :: I, J, K
+    ! Skip empty vector sets.
+    IF (SIZE(COLUMN_VECTORS) .LE. 0) RETURN
+    ! Generate random numbers in the range [0,1].
+    CALL RANDOM_NUMBER(COLUMN_VECTORS(:,:))
+    CALL RANDOM_NUMBER(TEMP_VECS(:,:))
+    ! Map the random uniform numbers to a radial distribution.
+    COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
+    ! Orthogonalize the vectors in (random) order.
+    IF (SIZE(COLUMN_VECTORS,1) .GT. 1) THEN
+       ! Compute the last vector that is part of the orthogonalization.
+       K = MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
+       ! Orthogonalize the "lazy way" without column pivoting.
+       ! Could result in imperfectly orthogonal vectors (because of
+       ! rounding errors being enlarged by upscaling), that is acceptable.
+       DO I = 1, K-1
+          LEN = NORM2(COLUMN_VECTORS(:,I))
+          IF (LEN .GT. 0.0_RT) THEN
+             ! Make this column unit length.
+             COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
+             ! Compute multipliers (store in row of TEMP_VECS) and subtract
+             ! from all remaining columns (doing the orthogonalization).
+             TEMP_VECS(1,I+1:K) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:K))
+             DO J = I+1, K
+                COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(1,J) * COLUMN_VECTORS(:,I)
+             END DO
+          ELSE
+             ! This should not happen (unless the vectors are at least in the
+             !   tens of thousands, in which case a different method should be used).
+             PRINT *, 'ERROR: Random unit vector failed to initialize correctly, rank deficient.'
+          END IF
+       END DO
+       ! Make the rest of the column vectors unit length.
+       DO I = K, SIZE(COLUMN_VECTORS,2)
+          LEN = NORM2(COLUMN_VECTORS(:,I))
+          IF (LEN .GT. 0.0_RT)  COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
+       END DO
+    END IF
+  END SUBROUTINE RANDOM_UNIT_VECTORS
+
+  ! Orthogonalize and normalize column vectors of A with pivoting.
+  SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER)
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: LENGTHS ! SIZE(A,2)
+    INTEGER, INTENT(OUT), OPTIONAL :: RANK
+    INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER ! SIZE(A,2)
+    REAL(KIND=RT) :: L, V
+    INTEGER :: I, J, K
+    IF (PRESENT(RANK)) RANK = 0
+    IF (PRESENT(ORDER)) THEN
+       FORALL (I=1:SIZE(A,2)) ORDER(I) = I
+    END IF
+    column_orthogonolization : DO I = 1, SIZE(A,2)
+       LENGTHS(I:) = SUM(A(:,I:)**2, 1)
+       ! Pivot the largest magnitude vector to the front.
+       J = I-1+MAXLOC(LENGTHS(I:),1)
+       IF (J .NE. I) THEN
+          IF (PRESENT(ORDER)) THEN
+             K = ORDER(I)
+             ORDER(I) = ORDER(J)
+             ORDER(J) = K
+          END IF
+          L = LENGTHS(I)
+          LENGTHS(I) = LENGTHS(J)
+          LENGTHS(J) = L
+          ! Perform the pivot.
+          DO K = 1, SIZE(A,1)
+             V = A(K,I)
+             A(K,I) = A(K,J)
+             A(K,J) = V
+          END DO
+       END IF
+       ! Subtract the first vector from all others.
+       IF (LENGTHS(I) .GT. EPSILON(1.0_RT)) THEN
+          LENGTHS(I) = SQRT(LENGTHS(I))
+          A(:,I) = A(:,I) / LENGTHS(I)
+          IF (I .LT. SIZE(A,2)) THEN
+             LENGTHS(I+1:) = MATMUL(A(:,I), A(:,I+1:))
+             DO J = I+1, SIZE(A,2)
+                A(:,J) = A(:,J) - LENGTHS(J) * A(:,I)
+             END DO
+          END IF
+          IF (PRESENT(RANK)) RANK = RANK + 1
+       ELSE
+          LENGTHS(I:) = 0.0_RT
+          EXIT column_orthogonolization
+       END IF
+    END DO column_orthogonolization
+  END SUBROUTINE ORTHOGONALIZE
+
+  ! Compute the singular values and right singular vectors for matrix A.
+  SUBROUTINE SVD(A, S, VT, RANK, STEPS, BIAS)
+    IMPLICIT NONE
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: S ! MIN(SIZE(A,1),SIZE(A,2))
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
+    INTEGER, INTENT(OUT), OPTIONAL :: RANK
+    INTEGER, INTENT(IN), OPTIONAL :: STEPS
+    REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
+    ! Local variables.
+    REAL(KIND=RT), DIMENSION(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))) :: ATA, Q
+    INTEGER :: I, J, K, NUM_STEPS
+    REAL(KIND=RT) :: MULTIPLIER
+    EXTERNAL :: SSYRK
+    ! Set the number of steps.
+    IF (PRESENT(STEPS)) THEN
+       NUM_STEPS = STEPS
+    ELSE
+       NUM_STEPS = 1
+    END IF
+    ! Set "K" (the number of components).
+    K = MIN(SIZE(A,1),SIZE(A,2))
+    ! Find the multiplier on A.
+    MULTIPLIER = MAXVAL(ABS(A(:,:)))
+    IF (MULTIPLIER .EQ. 0.0_RT) THEN
+       S(:) = 0.0_RT
+       VT(:,:) = 0.0_RT
+       RETURN
+    END IF
+    IF (PRESENT(BIAS)) MULTIPLIER = MULTIPLIER / BIAS
+    MULTIPLIER = 1.0_RT / MULTIPLIER
+    ! Compute ATA.
+    IF (SIZE(A,1) .LE. SIZE(A,2)) THEN
+       ! ATA(:,:) = MATMUL(AT(:,:), TRANSPOSE(AT(:,:)))
+       CALL SSYRK('U', 'N', K, SIZE(A,2), MULTIPLIER**2, A(:,:), &
+            SIZE(A,1), 0.0_RT, ATA(:,:), K)
+    ELSE
+       ! ATA(:,:) = MATMUL(TRANSPOSE(A(:,:)), A(:,:))
+       CALL SSYRK('U', 'T', K, SIZE(A,1), MULTIPLIER**2, A(:,:), &
+            SIZE(A,1), 0.0_RT, ATA(:,:), K)
+    END IF
+    ! Copy the upper diagnoal portion into the lower diagonal portion.
+    DO I = 1, K
+       ATA(I+1:,I) = ATA(I,I+1:)
+    END DO
+    ! Compute initial right singular vectors.
+    VT(1:SIZE(ATA,1),1:SIZE(ATA,2)) = ATA(:,:)
+    ! Fill remaining columns (if extra were provided) with zeros.
+    IF ((SIZE(VT,1) .GT. SIZE(ATA,1)) .OR. (SIZE(VT,2) .GT. SIZE(ATA,2))) THEN
+       VT(SIZE(ATA,1)+1:,SIZE(ATA,2)+1:) = 0.0_RT
+    END IF
+    ! Orthogonalize and reorder by magnitudes.
+    CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
+    ! Do power iterations.
+    power_iteration : DO I = 1, NUM_STEPS
+       Q(:,:) = VT(1:SIZE(Q,1),1:SIZE(Q,2))
+       ! Q(:,:) = MATMUL(TRANSPOSE(ATA(:,:)), QTEMP(:,:))
+       CALL GEMM('N', 'N', K, K, K, 1.0_RT, &
+            ATA(:,:), K, Q(:,:), K, 0.0_RT, &
+            VT(:,:), K)
+       CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
+    END DO power_iteration
+    ! Compute the singular values.
+    WHERE (S(:) .NE. 0.0_RT)
+       S(:) = SQRT(S(:)) / MULTIPLIER
+    END WHERE
+  END SUBROUTINE SVD
+
+  ! If there are at least as many data points as dimension, then
+  ! compute the principal components and rescale the data by
+  ! projecting onto those and rescaling so that each component has
+  ! identical singular values (this makes the data more "radially
+  ! symmetric").
+  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERT_RESULT, FLATTEN, STEPS)
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: SHIFT
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VECS
+    LOGICAL, INTENT(IN), OPTIONAL :: INVERT_RESULT
+    LOGICAL, INTENT(IN), OPTIONAL :: FLATTEN
+    INTEGER, INTENT(IN), OPTIONAL :: STEPS
+    ! Local variables.
+    LOGICAL :: INVERSE, FLAT
+    REAL(KIND=RT), DIMENSION(SIZE(VECS,1),SIZE(VECS,2)) :: TEMP_VECS
+    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS
+    REAL(KIND=RT), DIMENSION(SIZE(X,1), SIZE(X,2)) :: X1
+    REAL(KIND=RT) :: RN
+    INTEGER :: I, D
+    ! Set the default value for "INVERSE".
+    IF (PRESENT(INVERT_RESULT)) THEN
+       INVERSE = INVERT_RESULT
+    ELSE
+       INVERSE = .FALSE.
+    END IF
+    ! Set the default value for "FLAT".
+    IF (PRESENT(FLATTEN)) THEN
+       FLAT = FLATTEN
+    ELSE
+       FLAT = .TRUE.
+    END IF
+    ! Shift the data to be be centered about the origin.
+    D = SIZE(X,1)
+    RN = REAL(SIZE(X,2),RT)
+    SHIFT(:) = -SUM(X(:,:),2) / RN
+    DO I = 1, D
+       X(I,:) = X(I,:) + SHIFT(I)
+    END DO
+    ! Set the unused portion of the "VECS" matrix to the identity.
+    VECS(D+1:,D+1:) = 0.0_RT
+    DO I = D+1, SIZE(VECS,1)
+       VECS(I,I) = 1.0_RT
+    END DO
+    ! Find the directions along which the data is most elongated.
+    IF (PRESENT(STEPS)) THEN
+       CALL SVD(X, VALS, VECS(:D,:D), STEPS=STEPS)
+    ELSE
+       CALL SVD(X, VALS, VECS(:D,:D), STEPS=10)
+    END IF
+    ! Normalize the values to make the output componentwise unit mean squared magnitude.
+    IF (FLAT) THEN
+       VALS(:) = VALS(:) / SQRT(RN)
+       ! For all nonzero vectors, rescale them so that the
+       !  average squared distance from zero is exactly 1.
+       DO I = 1, D
+          IF (VALS(I) .GT. 0.0_RT) THEN
+             VECS(:,I) = VECS(:,I) / VALS(I)
+          END IF
+       END DO
+    ELSE
+       ! Rescale all vectors by the average magnitude.
+       VALS(:) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))
+       IF (VALS(1) .GT. 0.0_RT) THEN
+          VECS(:,:) = VECS(:,:) / VALS(1)
+       END IF
+    END IF
+    ! Apply the column vectors to the data to make it radially symmetric.
+    X1(:,:) = X(:,:)
+    CALL GEMM('T', 'N', D, SIZE(X,2), D, 1.0_RT, &
+         VECS(:D,:D), D, &
+         X1(:,:), D, &
+         0.0_RT, X(:,:), D)
+    ! Compute the inverse of the transformation if requested.
+    IF (INVERSE) THEN
+       VALS(:) = VALS(:)**2
+       DO I = 1, D
+          IF (VALS(I) .GT. 0.0_RT) THEN
+             VECS(:D,I) = VECS(:D,I) * VALS(I)
+          END IF
+       END DO
+       VECS(:D,:D) = TRANSPOSE(VECS(:D,:D))
+       SHIFT(:) = -SHIFT(:)
+    END IF
+  END SUBROUTINE RADIALIZE
+
+  ! Perform least squares with LAPACK.
+  ! 
+  !   A is column vectors (of points) if TRANS='T', and row vectors 
+  !     (of points) if TRANS='N'.
+  !   B must be COLUMN VECTORS of fit output (1 row = 1 point).
+  !   X always has a first dimension that is nonpoint axis size of A,
+  !     and the second dimension is determined by B's columns (or rank),
+  !     or (if smaller), then B is reduced to its principal components.
+  SUBROUTINE LEAST_SQUARES(TRANS, A, B, X)
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A, B
+    CHARACTER, INTENT(IN) :: TRANS
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: X ! MIN(SIZE(A,1),SIZE(A,2)),SIZE(B,2)
+    ! Local variables.
+    INTEGER :: M, N, R, NRHS, LDA, LDB, LWORK, INFO
+    REAL(KIND=RT), DIMENSION(:), ALLOCATABLE :: WORK
+    REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: PROJECTION
+    EXTERNAL :: SGELS
+    ! Reduce the rank of B to the desired size, if appropriate.
+    IF (SIZE(X,2) .LT. SIZE(B,2)) THEN
+       NRHS = MIN(SIZE(B,1), SIZE(B,2))
+       ALLOCATE( WORK(NRHS), PROJECTION(NRHS,NRHS) )
+       ! Compute the SVD to use as the projection.
+       CALL SVD(B, WORK, PROJECTION, RANK=NRHS, STEPS=10)
+       ! Project B down (and zero out the remaining columns).
+       NRHS = MIN(NRHS, SIZE(X,2))
+       B(:,:NRHS) = MATMUL(B(:,:), PROJECTION(:,:NRHS))
+       IF (SIZE(B,2) .GT. NRHS) B(:,NRHS+1:) = 0.0_RT
+       DEALLOCATE(PROJECTION, WORK)
+    END IF
+    ! Set variables for calling least squares routine.
+    M = SIZE(A,1)
+    N = SIZE(A,2)
+    NRHS = R
+    LDA = SIZE(A,1)
+    LDB = SIZE(B,1)
+    ! Allocate the work space for the call.
+    LWORK = MAX(1, MIN(M,N) + MAX(MIN(M,N), NRHS))
+    ALLOCATE(WORK(LWORK))
+    ! Make the call to the least squares routine.
+    CALL SGELS( TRANS, M, N, NRHS, A, LDA, B, LDB, WORK, LWORK, INFO )
+    ! Store the result.
+    IF (SIZE(X,2) .LE. SIZE(B,2)) THEN
+       X(:,:) = B(:SIZE(X,1),:SIZE(X,2))
+    ELSE
+       X(:,:SIZE(B,2)) = B(:SIZE(X,1),:SIZE(B,2))
+    END IF
+  END SUBROUTINE LEAST_SQUARES
+
+END MODULE MATRIX_OPERATIONS
+! A module for fast sorting and selecting of data.
+MODULE SORT_AND_SELECT
+  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+  IMPLICIT NONE
+
+CONTAINS
+
+  ! Swap the values of two integers.
+  SUBROUTINE SWAP_INT(V1, V2)
+    INTEGER, INTENT(INOUT) :: V1, V2
+    INTEGER :: TEMP
+    TEMP = V1
+    V1 = V2
+    V2 = TEMP
+  END SUBROUTINE SWAP_INT
+
+  !                       FastSelect method
+  ! 
+  ! Given VALUES list of numbers, rearrange the elements of INDICES
+  ! such that the element of VALUES at INDICES(K) has rank K (holds
+  ! its same location as if all of VALUES were sorted in INDICES).
+  ! All elements of VALUES at INDICES(:K-1) are less than or equal,
+  ! while all elements of VALUES at INDICES(K+1:) are greater or equal.
+  ! 
+  ! This algorithm uses a recursive approach to exponentially shrink
+  ! the number of indices that have to be considered to find the
+  ! element of desired rank, while simultaneously pivoting values
+  ! that are less than the target rank left and larger right.
+  ! 
+  ! Arguments:
+  ! 
+  !   VALUES   --  A 1D array of real numbers. Will not be modified.
+  !   K        --  A positive integer for the rank index about which
+  !                VALUES should be rearranged.
+  ! Optional:
+  ! 
+  !   DIVISOR  --  A positive integer >= 2 that represents the
+  !                division factor used for large VALUES arrays.
+  !   MAX_SIZE --  An integer >= DIVISOR that represents the largest
+  !                sized VALUES for which the worst-case pivot value
+  !                selection is tolerable. A worst-case pivot causes
+  !                O( SIZE(VALUES)^2 ) runtime. This value should be
+  !                determined heuristically based on compute hardware.
+  ! Output:
+  ! 
+  !   INDICES  --  A 1D array of original indices for elements of VALUES.
+  ! 
+  !   The elements of the array INDICES are rearranged such that the
+  !   element at position VALUES(INDICES(K)) is in the same location 
+  !   it would be if all of VALUES were referenced in sorted order in
+  !   INDICES. Also known as, VALUES(INDICES(K)) has rank K.
+  ! 
+  RECURSIVE SUBROUTINE ARGSELECT(VALUES, K, INDICES, DIVISOR, MAX_SIZE, RECURSING)
+    ! Arguments
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: VALUES
+    INTEGER, INTENT(IN) :: K
+    INTEGER, INTENT(INOUT), DIMENSION(:) :: INDICES
+    INTEGER, INTENT(IN), OPTIONAL :: DIVISOR, MAX_SIZE
+    LOGICAL, INTENT(IN), OPTIONAL :: RECURSING
+    ! Locals
+    INTEGER :: LEFT, RIGHT, L, R, MS, D, I
+    REAL(KIND=RT) :: P
+    ! Initialize the divisor (for making subsets).
+    IF (PRESENT(DIVISOR)) THEN ; D = DIVISOR
+    ELSE IF (SIZE(INDICES) .GE. 8388608) THEN ; D = 32 ! 2**5 ! 2**23
+    ELSE IF (SIZE(INDICES) .GE. 1048576) THEN ; D = 8  ! 2**3 ! 2**20
+    ELSE                                      ; D = 4  ! 2**2
+    END IF
+    ! Initialize the max size (before subsets are created).
+    IF (PRESENT(MAX_SIZE)) THEN ; MS = MAX_SIZE
+    ELSE                        ; MS = 1024 ! 2**10
+    END IF
+    ! When not recursing, set the INDICES to default values.
+    IF (.NOT. PRESENT(RECURSING)) THEN
+       FORALL(I=1:SIZE(INDICES)) INDICES(I) = I
+    END IF
+    ! Initialize LEFT and RIGHT to be the entire array.
+    LEFT = 1
+    RIGHT = SIZE(INDICES)
+    ! Loop until done finding the K-th element.
+    DO WHILE (LEFT .LT. RIGHT)
+       ! Use SELECT recursively to improve the quality of the
+       ! selected pivot value for large arrays.
+       IF (RIGHT - LEFT .GT. MS) THEN
+          ! Compute how many elements should be left and right of K
+          ! to maintain the same percentile in a subset.
+          L = K - K / D
+          R = L + (SIZE(INDICES) / D)
+          ! Perform fast select on an array a fraction of the size about K.
+          CALL ARGSELECT(VALUES(:), K - L + 1, INDICES(L:R), &
+               DIVISOR=D, MAX_SIZE=MS, RECURSING=.TRUE.)
+       END IF
+       ! Pick a partition element at position K.
+       P = VALUES(INDICES(K))
+       L = LEFT
+       R = RIGHT
+       ! Move the partition element to the front of the list.
+       CALL SWAP_INT(INDICES(LEFT), INDICES(K))
+       ! Pre-swap the left and right elements (temporarily putting a
+       ! larger element on the left) before starting the partition loop.
+       IF (VALUES(INDICES(RIGHT)) .GT. P) THEN
+          CALL SWAP_INT(INDICES(LEFT), INDICES(RIGHT))
+       END IF
+       ! Now partition the elements about the pivot value "P".
+       DO WHILE (L .LT. R)
+          CALL SWAP_INT(INDICES(L), INDICES(R))
+          L = L + 1
+          R = R - 1
+          DO WHILE (VALUES(INDICES(L)) .LT. P) ; L = L + 1 ; END DO
+          DO WHILE (VALUES(INDICES(R)) .GT. P) ; R = R - 1 ; END DO
+       END DO
+       ! Place the pivot element back into its appropriate place.
+       IF (VALUES(INDICES(LEFT)) .EQ. P) THEN
+          CALL SWAP_INT(INDICES(LEFT), INDICES(R))
+       ELSE
+          R = R + 1
+          CALL SWAP_INT(INDICES(R), INDICES(RIGHT))
+       END IF
+       ! adjust left and right towards the boundaries of the subset
+       ! containing the (k - left + 1)th smallest element
+       IF (R .LE. K) LEFT = R + 1
+       IF (K .LE. R) RIGHT = R - 1
+    END DO
+  END SUBROUTINE ARGSELECT
+  
+  !                         FastSort
+  ! 
+  ! This routine uses a combination of QuickSort (with modestly
+  ! intelligent pivot selection) and Insertion Sort (for small arrays)
+  ! to achieve very fast average case sort times for both random and
+  ! partially sorted data. The pivot is selected for QuickSort as the
+  ! median of the first, middle, and last values in the array.
+  ! 
+  ! Arguments:
+  ! 
+  !   VALUES   --  A 1D array of real numbers.
+  !   INDICES  --  A 1D array of original indices for elements of VALUES.
+  ! 
+  ! Optional:
+  ! 
+  !   MIN_SIZE --  An positive integer that represents the largest
+  !                sized VALUES for which a partition about a pivot
+  !                is used to reduce the size of a an unsorted array.
+  !                Any size less than this will result in the use of
+  !                INSERTION_ARGSORT instead of ARGPARTITION.
+  ! 
+  ! Output:
+  ! 
+  !   The elements of the array INDICES contain ths sorted order of VALUES.
+  ! 
+  RECURSIVE SUBROUTINE ARGSORT(VALUES, INDICES, MIN_SIZE, INIT_INDS)
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:) :: VALUES
+    INTEGER,       INTENT(INOUT), DIMENSION(:) :: INDICES
+    INTEGER,       INTENT(IN), OPTIONAL        :: MIN_SIZE
+    LOGICAL,       INTENT(IN), OPTIONAL        :: INIT_INDS
+    ! Local variables
+    LOGICAL :: INIT
+    INTEGER :: I, MS
+    IF (PRESENT(MIN_SIZE)) THEN ; MS = MIN_SIZE
+    ELSE                        ; MS = 2**6
+    END IF
+    IF (PRESENT(INIT_INDS)) THEN ; INIT = INIT_INDS
+    ELSE                         ; INIT = .TRUE.
+    END IF
+    ! Initialize all indices (for the first call).
+    IF (INIT) THEN
+       FORALL (I=1:SIZE(INDICES)) INDICES(I) = I
+    END IF
+    ! Base case, return.
+    IF (SIZE(INDICES) .LT. MS) THEN
+       CALL INSERTION_ARGSORT(VALUES, INDICES)
+    ! Call this function recursively after pivoting about the median.
+    ELSE
+       ! ---------------------------------------------------------------
+       ! If you are having slow runtime with the selection of pivot values 
+       ! provided by ARGPARTITION, then consider using ARGSELECT instead.
+       I = ARGPARTITION(VALUES, INDICES)
+       ! ---------------------------------------------------------------
+       ! I = SIZE(INDICES) / 2
+       ! CALL ARGSELECT(VALUES, INDICES, I)
+       ! ---------------------------------------------------------------
+       CALL ARGSORT(VALUES(:), INDICES(:I-1), MS, INIT_INDS=.FALSE.)
+       CALL ARGSORT(VALUES(:), INDICES(I+1:), MS, INIT_INDS=.FALSE.)
+    END IF
+  END SUBROUTINE ARGSORT
+
+  ! This function efficiently partitions values based on the median
+  ! of the first, middle, and last elements of the VALUES array. This
+  ! function returns the index of the pivot.
+  FUNCTION ARGPARTITION(VALUES, INDICES) RESULT(LEFT)
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:) :: VALUES
+    INTEGER,       INTENT(INOUT), DIMENSION(:) :: INDICES
+    INTEGER :: LEFT, MID, RIGHT
+    REAL(KIND=RT) :: PIVOT
+    ! Use the median of the first, middle, and last element as the
+    ! pivot. Place the pivot at the end of the array.
+    MID = (1 + SIZE(INDICES)) / 2
+    ! Swap the first and last elements (if the last is smaller).
+    IF (VALUES(INDICES(SIZE(INDICES))) < VALUES(INDICES(1))) THEN
+       CALL SWAP_INT(INDICES(1), INDICES(SIZE(INDICES)))
+    END IF
+    ! Swap the middle and first elements (if the middle is smaller).
+    IF (VALUES(INDICES(MID)) < VALUES(INDICES(SIZE(INDICES)))) THEN
+       CALL SWAP_INT(INDICES(MID), INDICES(SIZE(INDICES)))       
+       ! Swap the last and first elements (if the last is smaller).
+       IF (VALUES(INDICES(SIZE(INDICES))) < VALUES(INDICES(1))) THEN
+          CALL SWAP_INT(INDICES(1), INDICES(SIZE(INDICES)))
+       END IF
+    END IF
+    ! Set the pivot, LEFT index and RIGHT index (skip the smallest,
+    ! which is in location 1, and the pivot at the end).
+    PIVOT = VALUES(INDICES(SIZE(INDICES)))
+    LEFT  = 2
+    RIGHT = SIZE(INDICES) - 1
+    ! Partition all elements to the left and right side of the pivot
+    ! (left if they are smaller, right if they are bigger).
+    DO WHILE (LEFT < RIGHT)
+       ! Loop left until we find a value that is greater or equal to pivot.
+       DO WHILE (VALUES(INDICES(LEFT)) < PIVOT)
+          LEFT = LEFT + 1
+       END DO
+       ! Loop right until we find a value that is less or equal to pivot (or LEFT).
+       DO WHILE (RIGHT .NE. LEFT)
+          IF (VALUES(INDICES(RIGHT)) .LT. PIVOT) EXIT
+          RIGHT = RIGHT - 1
+       END DO
+       ! Now we know that [VALUES(RIGHT) < PIVOT < VALUES(LEFT)], so swap them.
+       CALL SWAP_INT(INDICES(LEFT), INDICES(RIGHT))
+    END DO
+    ! The last swap was done even though LEFT == RIGHT, we need to undo.
+    CALL SWAP_INT(INDICES(LEFT), INDICES(RIGHT))
+    ! Finally, we put the pivot back into its proper location.
+    CALL SWAP_INT(INDICES(LEFT), INDICES(SIZE(INDICES)))
+  END FUNCTION ARGPARTITION
+
+  ! Insertion sort (best for small lists).
+  SUBROUTINE INSERTION_ARGSORT(VALUES, INDICES)
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:) :: VALUES
+    INTEGER,       INTENT(INOUT), DIMENSION(:) :: INDICES
+    ! Local variables.
+    REAL(KIND=RT)   :: TEMP_VAL
+    INTEGER :: I, BEFORE, AFTER, TEMP_IND
+    ! Return for the base case.
+    IF (SIZE(INDICES) .LE. 1) RETURN
+    ! Put the smallest value at the front of the list.
+    I = MINLOC(VALUES(INDICES(:)),1)
+    CALL SWAP_INT(INDICES(1), INDICES(I))
+    ! Insertion sort the rest of the array.
+    DO I = 3, SIZE(INDICES)
+       TEMP_IND = INDICES(I)
+       TEMP_VAL = VALUES(TEMP_IND)
+       ! Search backwards in the list, 
+       BEFORE = I - 1
+       AFTER  = I
+       DO WHILE (TEMP_VAL .LT. VALUES(INDICES(BEFORE)))
+          INDICES(AFTER) = INDICES(BEFORE)
+          BEFORE = BEFORE - 1
+          AFTER  = AFTER - 1
+       END DO
+       ! Put the value into its place (where it is greater than the
+       ! element before it, but less than all values after it).
+       INDICES(AFTER) = TEMP_IND
+    END DO
+  END SUBROUTINE INSERTION_ARGSORT
+
+END MODULE SORT_AND_SELECT
 ! TODO:
 ! 
 ! - Update CONDITION_MODEL to:
@@ -88,7 +695,6 @@ MODULE APOS
      REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT  ! Rate of exponential sliding average over gradient steps.
      REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient variation.
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.05_RT   ! Rate of exponential sliding average over AY (centering about zero).
-     REAL(KIND=RT) :: STEP_REPLACEMENT = 0.2_RT  ! Rate of exponential sliding average towards zeroing for redundant basis functions.
      REAL(KIND=RT) :: FASTER_RATE = 1.01_RT      ! Rate of increase of optimization factors.
      REAL(KIND=RT) :: SLOWER_RATE = 0.99_RT      ! Rate of decrease of optimization factors.
      REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.05_RT ! Minimum ratio of model variables to update.
@@ -194,7 +800,7 @@ CONTAINS
      ELSE IF (CONFIG%ANE .GT. 0) THEN
         ! Compute a reasonable default dimension (tied to volume of space).
         CONFIG%ADE = MAX(1, 2 * CEILING(LOG(REAL(CONFIG%ANE,RT)) / LOG(2.0_RT)))
-        IF (CONFIG%ANE .LE. 3) CONFIG%ADE = CONFIG%ADE - 1
+        IF (CONFIG%ANE .LE. 3) CONFIG%ADE = MAX(1, CONFIG%ADE - 1)
      END IF
      ! ADN, ADI
      CONFIG%ADN = ADN
@@ -317,11 +923,6 @@ CONTAINS
      CONFIG%MSEV = 1 + CONFIG%TOTAL_SIZE
      CONFIG%MEEV = CONFIG%MSEV-1  +  CONFIG%MDE * CONFIG%MNE
      CONFIG%TOTAL_SIZE = CONFIG%MEEV
-     ! THIS IS SPECIAL, IT IS PART OF MODEL AND CHANGES DURING TRAINING
-     !   apositional post-output shift
-     CONFIG%AOSS = 1 + CONFIG%TOTAL_SIZE
-     CONFIG%AOSE = CONFIG%AOSS-1 + CONFIG%ADO
-     CONFIG%TOTAL_SIZE = CONFIG%AOSE
      ! ---------------------------------------------------------------
      !   number of variables
      CONFIG%NUM_VARS = CONFIG%TOTAL_SIZE
@@ -330,6 +931,10 @@ CONTAINS
      CONFIG%AISS = 1 + CONFIG%TOTAL_SIZE
      CONFIG%AISE = CONFIG%AISS-1 + CONFIG%ADN
      CONFIG%TOTAL_SIZE = CONFIG%AISE
+     !   apositional post-output shift
+     CONFIG%AOSS = 1 + CONFIG%TOTAL_SIZE
+     CONFIG%AOSE = CONFIG%AOSS-1 + CONFIG%ADO
+     CONFIG%TOTAL_SIZE = CONFIG%AOSE
      !   model pre-input shift
      CONFIG%MISS = 1 + CONFIG%TOTAL_SIZE
      CONFIG%MISE = CONFIG%MISS-1 + CONFIG%MDN
@@ -1441,16 +2046,12 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
     INTEGER, DIMENSION(:,:) :: A_ORDER, M_ORDER
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
-    !  Local variables.
+    ! Local variables.
     REAL(KIND=RT) :: SCALAR
     INTEGER :: I, L, VS, VE, J, R, NT, N, BS, BE, BN, BATCH, TER, TGR
     ! TODO: The following allocations are for DEVELOPMENT, will be moved eventually.
     INTEGER, DIMENSION(CONFIG%ADS, NUM_THREADS) :: A_STATE_USAGE
     INTEGER, DIMENSION(CONFIG%MDS, NUM_THREADS) :: M_STATE_USAGE
-    ! REAL(KIND=RT), DIMENSION(CONFIG%ADS, 2*CONFIG%ADS+1) :: A_TEMP_VECS
-    ! REAL(KIND=RT), DIMENSION(CONFIG%MDS, 2*CONFIG%MDS+1) :: M_TEMP_VECS
-    ! TODO: Compute first singular value of weight matrix and divide by that instead.
-    !       Largest singular value of the matrix should be 1, not largest vector.
     ! 
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
     ! 
@@ -1474,10 +2075,6 @@ CONTAINS
           M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
        ! [ANS+MNS+1] -> AY
        ELSE
-          ! TODO: This zero-centering of AY should be computed in the
-          !       MODEL_GRADIENT routine, similarly for unit scaling
-          !       the output to maintain rough symmetry.
-          ! 
           ! Update the apositional model output shift to produce componentwise mean-zero
           !  values (prevent divergence), but only when there is a model afterwards. 
           IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0)) THEN
@@ -1507,8 +2104,9 @@ CONTAINS
        TOTAL_EVAL_RANK = 0
        TOTAL_GRAD_RANK = 0
        ! Check the rank of all internal apositional states.
+       J = CONFIG%ANS+1
+       ! Batch computation formula.
        IF (CONFIG%ANS .GT. 0) THEN
-          ! Batch computation formula.
           N = SIZE(A_STATE_TEMP,1)
           NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%ADS)) ! number of threads (as not to artificially reduce rank)
           BN = (N + NT - 1) / NT ! = CEIL(N / NT)
@@ -1581,7 +2179,6 @@ CONTAINS
        ! 
        ! Check the rank of all internal model states.
        IF (CONFIG%MNS .GT. 0) THEN
-          ! Batch computation formula.
           N = SIZE(M_STATE_TEMP,1)
           NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%MDS)) ! number of threads (as not to artificially reduce rank)
           BN = (N + NT - 1) / NT ! = CEIL(N / NT)
@@ -1684,13 +2281,13 @@ CONTAINS
       INTEGER, DIMENSION(SIZE(USAGE)) :: ORDER
       INTEGER :: RANK, I, GRAD_RANK, MISS_RANK
       ! TODO:
-      !  - Multiply value columns by the 2-norm of all outgoing
-      !    weights before doing the orthogonalization and ranking.
-      ! 
-      !  - Set new shift term such that the sum of the gradient is maximized.
-      ! 
       !  - Create a function that does LEAST_SQUARES with a truncation factor
       !    that uses the SVD to truncate the number of vectors generated.
+      ! 
+      !  - Using the computed rank of values and gradients, delete the
+      !    redundant basis functions and initialize with a combination
+      !    of uncaptured previous layer values with gradients (first nonzero
+      !    gradient components, then remaining nonzero input components).
       ! 
       ! - When measuring alignment of two vectors come up with way to
       !   quickly find the "most aligned" shift term (the shift that
@@ -1715,27 +2312,37 @@ CONTAINS
       END DO
       IF (RANK .GT. SIZE(ORDER)) RETURN
 
-      ! Update the mean gradient for the redundant basis functions and
-      !  and their output weights to point towards zero.
-      DO I = RANK, SIZE(ORDER)
-         IN_VECS_GRAD_MEAN(:,ORDER(I)) = &
-              (1.0_RT - CONFIG%STEP_REPLACEMENT) * IN_VECS_GRAD_MEAN(:,ORDER(I)) &
-              - CONFIG%STEP_REPLACEMENT * IN_VECS(:,ORDER(I))
-         OUT_VECS_GRAD_MEAN(ORDER(I),:) = &
-              (1.0_RT - CONFIG%STEP_REPLACEMENT) * OUT_VECS_GRAD_MEAN(ORDER(I),:) &
-              - CONFIG%STEP_REPLACEMENT * OUT_VECS(ORDER(I),:)
-      END DO
+      ! ! Reduce the gradient to its nonzero components.
+      ! GRAD_TEMP(:,:GRAD_RANK) = NEXT_GRADS(:,:GRAD_RANK)
+      ! CALL ORTHOGONALIZE(NEXT_GRADS(:,:), GRAD_TEMP(1,:), RANK=GRAD_RANK)
+      ! ! Reinitialize weights by performing a linear fit of the gradients.
+      ! IF (GRAD_RANK .GT. 0) THEN
+      !    PREV_TEMP(:,:) = PREV_STATE(:,:)
+      !    GRAD_TEMP(:,:GRAD_RANK) = NEXT_GRADS(:,:GRAD_RANK)
+      !    VECS_TEMP(RANK:,:) = TRANSPOSE(IN_VECS(:,ORDER(RANK:)))
+      !    CALL LEAST_SQUARES('N', PREV_TEMP(:,:), GRAD_TEMP(:,:GRAD_RANK), VECS_TEMP(RANK:,:))
+      !    IN_VECS(:,ORDER(RANK:)) = TRANSPOSE(VECS_TEMP(RANK:,:))
+      !    ! TODO: Pick the shifts to maximize the dot product between the
+      !    !       produced values and the corresponding gradient components.
+      !    SHIFTS(ORDER(RANK:)) = 0.0_RT
+      ! END IF
+      ! IF (RANK + GRAD_RANK .GT. SIZE(ORDER)) RETURN
 
-      ! Check value magnitudes, look for near-zero valued basis functions.
-      FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
-      VALUES(:) = -SUM(CURR_STATE**2, 1)
-      CALL ARGSORT(VALUES(:), ORDER(:))
-      DO RANK = 1, SIZE(ORDER(:))
-         IF (VALUES(ORDER(RANK)) .GT. SQRT(EPSILON(0.0_RT))) EXIT
-      END DO
-      IF (RANK .GT. SIZE(ORDER)) RETURN
+      ! ! Find lost information by linearly regressing previous state
+      ! ! given the current state and looking at the residuals. Find
+      ! ! principal components of lost information and pick a shift to
+      ! ! keep all information.
+      ! CURR_TEMP(:,:) = CURR_STATE(:,:)
+      ! PREV_TEMP(:,:) = PREV_STATE(:,:)      
+      ! CALL LEAST_SQUARES('N', CURR_TEMP(:,:), PREV_TEMP(:,:), VECS_TEMP(:,:))
+      ! PREV_TEMP(:,:) = PREV_STATE(:,:) - MATMUL(CURR_TEMP(:,:), VECS_TEMP(:,:))
+      ! CALL SVD(PREV_TEMP(:,:), PREV_STATE(1,:), (), RANK=MISS_RANK, STEPS=10)
+      ! IF (MISS_RANK .GT. 0) THEN
+      ! END IF
+      ! IF (RANK + GRAD_RANK + MISS_RANK)
 
-      ! Initialize any zero-valued basis functions with new random vectors.
+      ! Initialize any remaining vectors (with no guidance)
+      !   using a randomized initialization scheme.
       DO I = RANK, SIZE(ORDER)
          CALL RANDOM_UNIT_VECTORS(IN_VECS(:,ORDER(I):ORDER(I)))
       END DO
@@ -2190,14 +2797,3 @@ CONTAINS
 
 
 END MODULE APOS
-
-
-!2022-04-25 06:39:01
-!
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      ! !  - Using the computed rank of values and gradients, delete the       !
-      ! !    redundant basis functions and initialize with a combination       !
-      ! !    of uncaptured previous layer values with gradients (first nonzero !
-      ! !    gradient components, then remaining nonzero input components).    !
-      ! !                                                                      !
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

@@ -47,7 +47,7 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS
     REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
     REAL(KIND=RT) :: LEN
-    INTEGER :: I, J
+    INTEGER :: I, J, K
     ! Skip empty vector sets.
     IF (SIZE(COLUMN_VECTORS) .LE. 0) RETURN
     ! Generate random numbers in the range [0,1].
@@ -55,35 +55,34 @@ CONTAINS
     CALL RANDOM_NUMBER(TEMP_VECS(:,:))
     ! Map the random uniform numbers to a radial distribution.
     COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
-    ! Make the vectors uniformly distributed on the unit ball (for dimension > 1).
-    DO I = 2, SIZE(COLUMN_VECTORS,2)
-       COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / NORM2(COLUMN_VECTORS(:,I))
-    END DO
     ! Orthogonalize the vectors in (random) order.
-    IF (SIZE(COLUMN_VECTORS,1) .EQ. 1) THEN
-       COLUMN_VECTORS(:,1) = COLUMN_VECTORS(:,1) / NORM2(COLUMN_VECTORS(:,1))
-    ELSE ! (SIZE(COLUMN_VECTORS,1) .GT. 1)
+    IF (SIZE(COLUMN_VECTORS,1) .GT. 1) THEN
+       ! Compute the last vector that is part of the orthogonalization.
+       K = MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
        ! Orthogonalize the "lazy way" without column pivoting.
        ! Could result in imperfectly orthogonal vectors (because of
-       ! rounding errors being enlarged by upscaling), that is okay.
-       DO I = 1, MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
+       ! rounding errors being enlarged by upscaling), that is acceptable.
+       DO I = 1, K-1
           LEN = NORM2(COLUMN_VECTORS(:,I))
           IF (LEN .GT. 0.0_RT) THEN
              ! Make this column unit length.
              COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
-             ! Compute the last vector that is part of the orthogonalization.
-             J = MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
              ! Compute multipliers (store in row of TEMP_VECS) and subtract
              ! from all remaining columns (doing the orthogonalization).
-             TEMP_VECS(1,I+1:J) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:J))
-             DO J = I+1, MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
+             TEMP_VECS(1,I+1:K) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:K))
+             DO J = I+1, K
                 COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(1,J) * COLUMN_VECTORS(:,I)
              END DO
           ELSE
-             ! This should not happen (unless the vectors are ridiculously large,
-             !   in which case a different method should be used).
+             ! This should not happen (unless the vectors are at least in the
+             !   tens of thousands, in which case a different method should be used).
              PRINT *, 'ERROR: Random unit vector failed to initialize correctly, rank deficient.'
           END IF
+       END DO
+       ! Make the rest of the column vectors unit length.
+       DO I = K, SIZE(COLUMN_VECTORS,2)
+          LEN = NORM2(COLUMN_VECTORS(:,I))
+          IF (LEN .GT. 0.0_RT)  COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
        END DO
     END IF
   END SUBROUTINE RANDOM_UNIT_VECTORS
@@ -184,12 +183,16 @@ CONTAINS
        ATA(I+1:,I) = ATA(I,I+1:)
     END DO
     ! Compute initial right singular vectors.
-    VT(:,:) = ATA(:,:)
+    VT(1:SIZE(ATA,1),1:SIZE(ATA,2)) = ATA(:,:)
+    ! Fill remaining columns (if extra were provided) with zeros.
+    IF ((SIZE(VT,1) .GT. SIZE(ATA,1)) .OR. (SIZE(VT,2) .GT. SIZE(ATA,2))) THEN
+       VT(SIZE(ATA,1)+1:,SIZE(ATA,2)+1:) = 0.0_RT
+    END IF
     ! Orthogonalize and reorder by magnitudes.
     CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
     ! Do power iterations.
     power_iteration : DO I = 1, NUM_STEPS
-       Q(:,:) = VT(:,:)
+       Q(:,:) = VT(1:SIZE(Q,1),1:SIZE(Q,2))
        ! Q(:,:) = MATMUL(TRANSPOSE(ATA(:,:)), QTEMP(:,:))
        CALL GEMM('N', 'N', K, K, K, 1.0_RT, &
             ATA(:,:), K, Q(:,:), K, 0.0_RT, &
@@ -263,7 +266,7 @@ CONTAINS
        END DO
     ELSE
        ! Rescale all vectors by the average magnitude.
-       VALS(1) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))
+       VALS(:) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))
        IF (VALS(1) .GT. 0.0_RT) THEN
           VECS(:,:) = VECS(:,:) / VALS(1)
        END IF

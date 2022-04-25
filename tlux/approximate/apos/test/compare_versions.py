@@ -1,9 +1,7 @@
+import fmodpy
 import os
 import numpy as np
-
 _this_dir = os.path.dirname(os.path.abspath(__file__))
-_source_code = os.path.join(_this_dir, "apos.f90")
-
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
 class AposModel:
@@ -26,14 +24,12 @@ class AposModel:
         self.ay_shift = self.model[self.config.aoss-1:self.config.aose]
         self.x_shift = self.model[self.config.miss-1:self.config.mise]
         self.y_shift = self.model[self.config.moss-1:self.config.mose]
-
     # Allow square brackets to access attributes of this model and its configuration.
     def __getitem__(self, attr):
         if hasattr(self, attr):
             return getattr(self, attr)
         elif hasattr(self.config, attr):
             return getattr(self.config, attr)
-
     # Create a summary string for this model.
     def __str__(self, vecs=False):
         # A function for creating a byte-size string from an integer.
@@ -93,21 +89,17 @@ class AposModel:
             f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
              if (self.m_output_vecs.size > 0) else "")
         )
-
-
 # Class for calling the underlying APOS model code.
 class APOS:
     # Make the string function return the unpacked model.
     def __str__(self): return str(self.unpack())
-
     # Initialize a new APOS model.
-    def __init__(self, **kwargs):
+    def __init__(self, source="apos.f90", name=None, **kwargs):
         try:
             import fmodpy
-            apos = fmodpy.fimport(_source_code, blas=True,
+            apos = fmodpy.fimport(source, name=name, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  dependencies=["matrix_operations.f90", "sort_and_select.f90", "apos.f90"]
             )
             # Store the Fortran module as an attribute.
             self.APOS = apos.apos
@@ -135,8 +127,6 @@ class APOS:
         self.yi_starts = []
         # Initialize the attributes of the model that can be initialized.
         self._init_model(**kwargs)
-
-
     # Initialize a model, if possible.
     def _init_model(self, **kwargs):
         # Apositional model parameters.
@@ -170,8 +160,6 @@ class APOS:
             # Set all internal arrays and initialize the model.
             self.model = np.zeros(self.config.total_size, dtype="float32")
             self.APOS.init_model(self.config, self.model, seed=self.seed)
-
-
     # Generate the string containing all the configuration information for this model.
     def config_str(self):
         s = ""
@@ -182,16 +170,12 @@ class APOS:
             t = str(t).split("'")[1].split('.')[1]
             s += f"  {str(t):{max_t_len}s}  {n:{max_n_len}s}  =  {getattr(self.config,n)}\n"
         return s
-
-
     # Unpack the model (which is in one array) into it's constituent parts.
     def unpack(self):
         # If there is no model or configuration, return None.
         if (self.config is None) or (self.model is None):
             return None
         return AposModel(self.config, self.model)
-
-
     # Given a categorical input array, construct a dictionary for
     #  mapping the unique values in the columns of the array to integers.
     def _i_map(self, xi):
@@ -202,8 +186,6 @@ class APOS:
         xi_sizes = [len(u) for u in xi_map]
         xi_starts = (np.cumsum(xi_sizes) - xi_sizes[0] + 1).tolist()
         return xi_map, xi_sizes, xi_starts
-
-
     # Given a categorical input array (either 2D or struct), map this
     #  array to an integer encoding matrix with the same number of
     #  columns, but unique integers assigned to each unique value.
@@ -225,10 +207,8 @@ class APOS:
             val_indices[:,1:] += start_index-1
             _xi[:,i] = val_indices[eq_val]
         return _xi
-
-
     # Convert all inputs to the APOS model into the expected numpy format.
-    def _to_array(self, ax, axi, sizes, x, xi, y, yi):
+    def _to_array(self, y, yi, x, xi, ax, axi, sizes):
         # Get the number of inputs.
         if   (y  is not None): nm = len(y)
         elif (yi is not None): nm = len(yi)
@@ -312,11 +292,9 @@ class APOS:
             mdo += yne
         # Return all the shapes and numpy formatted inputs.
         return nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes
-
-
     # Fit this model.
-    def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
-            y=None, yi=None, yw=None, new_model=False, **kwargs):
+    def fit(self, x=None, y=None, yi=None, xi=None, ax=None, axi=None,
+            sizes=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "APOS.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
@@ -324,14 +302,8 @@ class APOS:
             assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
         # Get all inputs as arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
-            self._to_array(ax, axi, sizes, x, xi, y, yi)
+            self._to_array(y, yi, x, xi, ax, axi, sizes)
         )
-        # Convert yw to a numpy array (if it is not already).
-        if (yw is None):
-            yw = np.zeros((nm,0), dtype="float32", order="C")
-        else:
-            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((nm,-1)), order="C")
-        assert (yw.shape[1] in {0, 1, mdo}), f"Weights for points 'yw' {yw.shape} must have 1 column{' or '+str(mdo)+' columns' if (mdo > 0) else ''}."
         # Configure this model if requested (or not already done).
         if (new_model or (self.config is None)):
             # Ensure that the config is compatible with the data.
@@ -347,12 +319,6 @@ class APOS:
                 kwargs["mdo"] = 0
                 kwargs["mns"] = 0
             self._init_model(**kwargs)
-        else:
-            # Set any configuration keyword arguments.
-            for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
-                if (kwargs[n] is not None):
-                    setattr(self.config, n, kwargs[n])
-            
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
         if (self.config.ade > 0):
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
@@ -374,26 +340,28 @@ class APOS:
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
         self.APOS.new_fit_config(nm, na, self.config)
-        rwork = np.zeros(self.config.rwork_size, dtype="float32")
-        iwork = np.zeros(self.config.iwork_size, dtype="int32")
+        self.rwork = np.zeros(self.config.rwork_size, dtype="float32")
+        self.iwork = np.zeros(self.config.iwork_size, dtype="int32")
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
-        result = self.APOS.minimize_mse(self.config, self.model, rwork, iwork,
-                                        ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
-                                        steps=steps, record=self.record.T)
+        try:
+            result = self.APOS.minimize_mse(self.config, self.model, self.rwork, self.iwork,
+                                            ax.T, axi.T, sizes, x.T, xi.T, y.T, 
+                                            steps=steps, record=self.record.T)
+        except:
+            yw = np.zeros((nm,0), dtype="float32", order="C")
+            result = self.APOS.minimize_mse(self.config, self.model, self.rwork, self.iwork,
+                                            ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
+                                            steps=steps, record=self.record.T)
         assert (result[-1] == 0), f"APOS.minimize_mse returned nonzero exit code {result[-1]}."
         # Copy the updated values back into the input arrays (for transparency).
         if (self.config.mde > 0):
             _x[:,:] = x[:,:_x.shape[1]]
         if (self.config.ade > 0):
             _ax[:,:] = ax[:,:_ax.shape[1]]
-
-
     # Calling this model is an alias for 'APOS.predict'.
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
-
-
     # Make predictions for new data.
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, **kwargs):
@@ -404,7 +372,7 @@ class APOS:
             assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, _, x, xi, ax, axi, sizes = (
-            self._to_array(ax, axi, sizes, x, xi, None, None)
+            self._to_array(None, None, x, xi, ax, axi, sizes)
         )
         # Embed the inputs into the purely positional form.
         ade = self.config.ade
@@ -449,8 +417,9 @@ class APOS:
         assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
         # Save the states if that's 
         if (save_states):
-            self.m_states = m_states
             self.a_states = a_states
+            self.ay = ay
+            self.m_states = m_states
         # If there are embedded y values in the output, return them to the format at training time.
         if (len(self.yi_map) > 0) and (not embedding):
             yne = sum(self.yi_sizes)
@@ -466,8 +435,6 @@ class APOS:
             return m_states[:,:,-2]
         else:
             return y
-
-
     # Save this model to a path.
     def save(self, path):
         import json
@@ -491,8 +458,6 @@ class APOS:
                 "yi_sizes"  : self.yi_sizes,
                 "yi_starts" : self.yi_starts,
             }))
-
-
     # Load this model from a path (after having been saved).
     def load(self, path):
         # Read the file.
@@ -504,7 +469,7 @@ class APOS:
             value = attrs[key]
             if (key[-4:] == "_map"):
                 value = [np.asarray(l) for l in value]
-            elif (key[:3] in {"xi_","yi_"}) or (key[:4] == "axi_"):
+            elif (key[:2] in {"xi_","axi_","yi_"}):
                 pass
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
@@ -516,278 +481,150 @@ class APOS:
         return self
 
 
-if __name__ == "__main__":
-    print("_"*70)
-    print(" TESTING APOS MODULE")
-
-    # ----------------------------------------------------------------
-    #  Enable debugging option "-fcheck=bounds".
-    import fmodpy
-    fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
-    # fmodpy.config.link_omp = ""
-    # ----------------------------------------------------------------
-
-    from tlux.plot import Plot
-    from tlux.random import well_spaced_ball, well_spaced_box
-
-    # TODO: test saving and loading with unique value maps
-    # TODO: design concise test function that has meaningful signal
-    #       in each of "ax", "axi", "x", "xi", test all combinations
-
-    # A function for testing approximation algorithms.
-    def f(x):
-        x = x.reshape((-1,2))
-        x, y = x[:,0], x[:,1]
-        return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
 
-    n = 100
-    seed = 2
-    state_dim = 20
-    num_states = 4
-    steps = 1000
-    num_threads = None
-    np.random.seed(seed)
+
+import fmodpy
+fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+np.random.seed(0)
+
+# m = 10
+# kwargs = dict(
+#     adn = 3*m,
+#     ane = 8*m,
+#     ans = 2*m,
+#     ads = 2*m,
+#     ado = 3*m,
+#     mdn = 5*m,
+#     mne = 24*m,
+#     mns = 2*m,
+#     mds = 3*m,
+#     mdo = 2*m,
+#     seed = 0,
+#     num_threads = 1,
+# )
+# aold = APOS(source="apos_0-0-15.f90", name="apos_old", **kwargs)
+# anew = APOS(source="apos_0-0-19.f90", name="apos_new", **kwargs)
+# an = 200
+# mn = 100
+# nec = 2 # num embedding columns
+# sizes = np.ones(mn, dtype=np.int32) * max(1,an // mn)
+# sizes[-1] = an - sum(sizes[:-1])
+# ax = np.random.random(size=(an, aold.config.adn)).astype(np.float32)
+# axi = np.random.randint(1, aold.config.ane // nec, size=(an,nec))
+# x = np.random.random(size=(mn, aold.config.mdn)).astype(np.float32)
+# xi = np.random.randint(1, aold.config.mne // nec, size=(mn,nec))
+# y = np.random.random(size=(mn, aold.config.mdo)).astype(np.float32)
 
 
-    TEST_FIT_SIZE = False
-    TEST_WEIGHTING = False
-    TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = False
-    TEST_APOSITIONAL = True
-    TEST_LARGE_MODEL = False
-    SHOW_VISUALS = True
+aold = APOS(source="apos_0-0-15.f90", name="apos_old", seed=0, num_threads=1)
+anew = APOS(source="apos_0-0-19.f90", name="apos_new", seed=0, num_threads=1)
+
+from tlux.random import well_spaced_box
+n = 100
+# A function for testing approximation algorithms.
+def f(x):
+    x = x.reshape((-1,2))
+    x, y = x[:,0], x[:,1]
+    return (3*x + np.cos(8*x)/2 + np.sin(5*y))
+x = well_spaced_box(n, 2)
+y = f(x)
+y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0).reshape(-1,1)
+# Create all data.
+xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
+ax = np.concatenate((x, x), axis=0).reshape((-1,1)).copy()
+axi = (np.ones(ax.shape, dtype="int32").reshape((xi.shape[0],-1)) * (np.arange(xi.shape[1])+1)).reshape(-1,1)
+sizes = np.ones(xi.shape[0], dtype="int32") * 2
+x = np.zeros((xi.shape[0], 0), dtype="float32", order="C")
+# Initialize the models.
+aold.fit(ax=ax.copy(), axi=axi, sizes=sizes, x=x.copy(), xi=xi, y=y.copy(), steps=0, num_threads=1)
+anew.fit(ax=ax.copy(), axi=axi, sizes=sizes, x=x.copy(), xi=xi, y=y.copy(), steps=0, num_threads=1)
 
 
-    if TEST_FIT_SIZE:
-        # Apositional model settings.
-        dim_a_numeric = 4
-        dim_a_embedding = None
-        num_a_embeddings = 32
-        dim_a_state = 8
-        num_a_states = 2
-        dim_a_out = None
-        # Model settings.
-        dim_m_numeric = 8
-        dim_m_embedding = 32
-        num_m_embeddings = 32
-        dim_m_state = 64
-        num_m_states = 8
-        dim_m_out = 1
-        # Number of points going into each model.
-        na = 100000000
-        nm = 100000
-        num_threads = 100
-        # Initialize the model and its fit configuration.
-        m = APOS(
-            adn=dim_a_numeric, ade=dim_a_embedding, ane=num_a_embeddings,
-            ads=dim_a_state, ans=num_a_states, ado=dim_a_out,
-            mdn=dim_m_numeric, mde=dim_m_embedding, mne=num_m_embeddings,
-            mds=dim_m_state, mns=num_m_states, mdo=dim_m_out,
-            num_threads=num_threads, seed=seed,
-        )
-        m.APOS.new_fit_config(nm, na, m.config)
-        print()
-        print(m)
+print()
+print(aold)
+# print(aold.unpack().__str__(vecs=True))
+print()
+print(anew)
+# print(anew.unpack().__str__(vecs=True))
+print()
+
+nv = aold.config.num_vars
+print("model_difference:", max(abs(aold.model[:nv] - anew.model[:nv])))
+
+# Make the models the same before taking a fit step.
+aold.model[:nv] = anew.model[:nv]
 
 
-    if (not SHOW_VISUALS):
-        class Plot:
-            def __init__(self, *args, **kwargs): pass
-            def __getattr__(self, *args, **kwargs):
-                return lambda *args, **kwargs: None
+# Set internal parameters to be similar (to control code execution path).
+# aold.config.ax_normalized = False
+# anew.config.ax_normalized = False
+# aold.config.ay_normalized = False
+# anew.config.ay_normalized = False
+# aold.config.x_normalized = False
+# anew.config.x_normalized = False
+# aold.config.y_normalized = False
+# anew.config.y_normalized = False
+# aold.config.logging_step_frequency = 1
+# anew.config.logging_step_frequency = 1 
 
+# anew.config.orthogonalizing_step_frequency = 100
+anew.config.basis_replacement = False
+# anew.config.equalize_y = False
 
-    if TEST_SAVE_LOAD:
-        # Try saving an untrained model.
-        m = APOS()
-        print("Empty model:")
-        print("  str(model) =", str(m))
-        print()
-        m.save("testing_empty_save.json")
-        m.load("testing_empty_save.json")
-        from util.approximate import PLRM
-        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
-                 num_threads=num_threads, steps=steps, 
-                 orthogonalizing_step_frequency=10,
-                 ) # discontinuity=-1000.0) # initial_step=0.01)
-        print("Initialized model:")
-        print(m)
-        print()
-        # Create the test plot.
-        x = np.asarray(well_spaced_box(n, 2), dtype="float32", order="C")
-        # x[:,0] /= 2
-        y = f(x).astype("float32")
-        # Construct weights.
-        yw = np.random.random(size=n) ** 5
-        yw = np.where(yw > 0.5, yw*2, 0.001)
-        if (not TEST_WEIGHTING): yw[:] = 1.0
-        # Fit the model.
-        m.fit(x=x.copy(), y=y.copy(), yw=yw)
-        # Add the data and the surface of the model to the plot.
-        p = Plot()
-        x_min_max = np.asarray([x.min(axis=0), x.max(axis=0)]).T
-        p.add("Data", *x[yw > 0.5].T, y[yw > 0.5])
-        if (TEST_WEIGHTING):
-            p.add("Data (low weight)", *x[yw <= 0.5].T, y[yw <= 0.5], color=3)
-        # p.add("Normalized data", *x_fit.T, y_fit)
-        p.add_func("Fit", m, *x_min_max, vectorized=True)
-        # Try saving the trained model and applying it after loading.
-        print("Saving model:")
-        print(m)
-        print()
-        m.save("testing_real_save.json")
-        m.load("testing_real_save.json")
-        print("Loaded model:")
-        print(m)
-        # print(str(m)[:str(m).index("\n\n")])
-        print()
-        p.add("Loaded values", *x.T, m(x.copy())[:,0]+0.05, color=1, marker_size=4)
-        p.plot(show=(m.record.size == 0))
-        # Remove the save files.
-        import os
-        try: os.remove("testing_empty_save.json")
-        except: pass
-        try: os.remove("testing_real_save.json")
-        except: pass
+# aold.config.encode_normalization = True
+# anew.config.encode_normalization = True
+aold.config.num_threads = 1
+anew.config.num_threads = 1
 
+steps = 0
 
-    if TEST_INT_INPUT:
-        print("Building model..")
-        x = well_spaced_box(n, 2)
-        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
-        y = f(x)
-        # Initialize a new model.
-        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, seed=seed, steps=steps, num_threads=num_threads)
-        all_x = np.concatenate((x, x), axis=0)
-        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
-        all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        x_fit = np.array(all_x, dtype="float32", order="C")
-        m.fit(x=x_fit, xi=all_xi, y=all_y.copy())
-        # Create an evaluation set that evaluates the model that was built over two differnt functions.
-        xi1 = np.ones((len(x),1),dtype="int32")
-        y1 = m(x, xi=xi1)
-        y2 = m(x, xi=2*xi1)
-        print("Adding to plot..")
-        p = Plot()
-        # p.add("x fit", *x_fit.T, all_y[:], color=0)
-        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2], color=0)
-        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:], color=1)
-        p.add_func("xi=1", lambda x: m(x.copy(), xi=np.ones(len(x), dtype="int32").reshape((-1,1))), *x_min_max, vectorized=True, color=3, shade=True)
-        p.add_func("xi=2", lambda x: m(x.copy(), xi=2*np.ones(len(x), dtype="int32").reshape((-1,1))), *x_min_max, vectorized=True, color=2, shade=True)
-        # Generate the visual.
-        print("Generating surface plot..")
-        p.show(show=False)
+ax_old = ax.copy()
+x_old = x.copy()
+y_old = y.copy()
+aold.fit(ax=ax_old, axi=axi, sizes=sizes, x=x_old, xi=xi, y=y_old, steps=steps)
 
+ax_new = ax.copy()
+x_new = x.copy()
+y_new = y.copy()
+anew.fit(ax=ax_new, axi=axi, sizes=sizes, x=x_new, xi=xi, y=y_new, steps=steps)
+# 
+print("model_difference:", max(abs(aold.model[:nv] - anew.model[:nv])))
+print()
+fy_old = aold(ax=ax_old.copy(), axi=axi, sizes=sizes, x=x_old.copy(), xi=xi, save_states=True)
+fy_new = anew(ax=ax_new.copy(), axi=axi, sizes=sizes, x=x_new.copy(), xi=xi, save_states=True)
+print("ax_difference: ", abs(ax_old - ax_new).max())
+print("as_difference: ", abs(aold.a_states - anew.a_states).max())
+print("ay_difference: ", abs(aold.ay - anew.ay).max())
+if (x_old.size > 0):
+    print("x_difference:  ", abs(x_old - x_new).max())
+print("ms_difference: ", abs(aold.m_states - anew.m_states).max())
+print("fy_difference: ", abs(fy_old - fy_new).max())
+print()
 
-    if TEST_APOSITIONAL:
-        print("Building model..")
-        x = well_spaced_box(n, 2)
-        x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
-        y = f(x)
-        # Create all data.
-        all_x = np.concatenate((x, x), axis=0)
-        all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
-        ax = all_x.reshape((-1,1)).copy()
-        axi = (np.ones(all_x.shape, dtype="int32") * (np.arange(all_x.shape[1])+1)).reshape(-1,1)
-        sizes = np.ones(all_x.shape[0], dtype="int32") * 2
-        all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
-        all_y = all_y.reshape((all_y.shape[0],-1))
-        # Initialize a new model.
-        print("Fitting model..")
-        m = APOS(
-            mdn=0, adn=ax.shape[1], ado=2, mdo=all_y.shape[1], 
-            ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
-            ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
-            num_threads=num_threads, seed=seed,
-            # basis_replacement = True,
-            # orthogonalizing_step_frequency = 200,
-            # early_stop=False,
-            # equalize_y = False,
-        )
-        m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), steps=steps)
-        # Create an evaluation set that evaluates the model that was built over two differnt functions.
-        xi1 = np.ones((len(x),1),dtype="int32")
-        ax = x.reshape((-1,1)).copy()
-        axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
-        sizes = np.ones(x.shape[0], dtype="int32") * 2
-        temp_x = np.zeros((x.shape[0],0), dtype="float32")
-        y1 = m(x=temp_x, xi=xi1, ax=ax, axi=axi, sizes=sizes)
-        y2 = m(x=temp_x, xi=2*xi1, ax=ax, axi=axi, sizes=sizes)
-        print("Adding to plot..")
-        p = Plot()
-        p.add("xi=1 true", *x.T, all_y[:len(all_y)//2,0], color=0, group=0)
-        p.add("xi=2 true", *x.T, all_y[len(all_y)//2:,0], color=1, group=1)
-        def fhat(x, i=1):
-            xi = i * np.ones((len(x),1),dtype="int32")
-            ax = x.reshape((-1,1)).copy()
-            axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
-            sizes = np.ones(x.shape[0], dtype="int32") * 2
-            temp_x = np.zeros((x.shape[0],0), dtype="float32")
-            return m(x=temp_x, xi=xi, ax=ax, axi=axi, sizes=sizes)
-        p.add_func("xi=1", lambda x: fhat(x, 1), [0,1], [0,1], vectorized=True, color=3, opacity=0.8, group=0) #, mode="markers", shade=True)
-        p.add_func("xi=2", lambda x: fhat(x, 2), [0,1], [0,1], vectorized=True, color=2, opacity=0.8, group=1) #, mode="markers", shade=True)
-        # Generate the visual.
-        print("Generating surface plot..")
-        p.show(show=False)
+print("ax_shift:   ", abs(aold.rwork[aold.config.aiss-1:aold.config.aise] - 
+                          anew.rwork[anew.config.aiss-1:anew.config.aise]).max())
+print("ay_shift:   ", abs(aold.rwork[aold.config.aoss-1:aold.config.aose] - 
+                          anew.rwork[anew.config.aoss-1:anew.config.aose]).max())
+print("ay:         ", abs(aold.rwork[aold.config.say-1:aold.config.eay] - 
+                          anew.rwork[anew.config.say-1:anew.config.eay]).max())
+print("y_rescale:  ", abs(aold.rwork[aold.config.syr-1:aold.config.eyr] - 
+                          anew.rwork[anew.config.syr-1:anew.config.eyr]).max())
+print("y_gradient: ", abs(aold.rwork[aold.config.syg-1:aold.config.eyg] -
+                          anew.rwork[anew.config.syg-1:anew.config.eyg]).max())
+print()
 
-
-    if (TEST_LARGE_MODEL):
-        # Data size.
-        nm = 100000
-        na = 6000000
-        adn = 10
-        ane = 10
-        mdn = 10
-        mne = 10
-        mdo = 10
-        # Data to fit.
-        ax = np.random.random(size=(na,adn)).astype("float32")
-        axi = np.random.randint(0,ane,size=(na,1)).astype("float32")
-        x = np.random.random(size=(nm,mdn)).astype("float32")
-        xi = np.random.randint(0,mne,size=(nm,1)).astype("float32")
-        y = np.random.random(size=(nm,mdo)).astype("float32")
-        # Generate random starting indices for all the sizes and
-        #   convert those starting indices into sizes of batches.
-        sizes = np.arange(na, dtype="int32")
-        np.random.shuffle(sizes)
-        sizes = sizes[:nm]
-        sizes[0] = 0
-        sizes.sort()
-        sizes[:-1] = sizes[1:] - sizes[:-1]
-        sizes[-1] = na - sizes[-1]
-        # Model settings.
-        ans = 4
-        ads = 64
-        mns = 8
-        mds = 64
-        steps = 11
-        num_threads = 20
-        # Fit model.
-        m = APOS(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
-                 ans=ans, ads=ads, mns=mns, mds=mds)
-        m.fit(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, y=y,
-              steps=steps, num_threads=num_threads, early_stop=False)
-
-
-    # Generate a visual of the loss function.
-    if (SHOW_VISUALS and (len(getattr(globals().get("m",None), "record", [])) > 0)):
-        print()
-        print("Generating loss plot..")
-        p = Plot("Mean squared error")
-        # Rescale the columns of the record for visualization.
-        record = m.record
-        for i in range(0, record.shape[0], max(1,record.shape[0] // 100)):
-            step_indices = list(range(i))
-            p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
-            p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
-            p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines", frame=i)
-            p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
-            p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
-            p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
-        p.show(append=True, show=True, y_range=[-.2, 1.2])
-    print("", "done.", flush=True)
-
-    if ("m" in globals()):
-        print()
-        print(m)
+if (aold.config.ane > 0):
+    print("a_embeddings:  ", abs(aold.unpack().a_embeddings  - anew.unpack().a_embeddings).max() )
+print("a_input_vecs:  ", abs(aold.unpack().a_input_vecs  - anew.unpack().a_input_vecs).max() )
+print("a_input_shift: ", abs(aold.unpack().a_input_shift - anew.unpack().a_input_shift).max())
+print("a_state_vecs:  ", abs(aold.unpack().a_state_vecs  - anew.unpack().a_state_vecs).max() )
+print("a_state_shift: ", abs(aold.unpack().a_state_shift - anew.unpack().a_state_shift).max())
+print("a_output_vecs: ", abs(aold.unpack().a_output_vecs - anew.unpack().a_output_vecs).max())
+print("m_embeddings:  ", abs(aold.unpack().m_embeddings  - anew.unpack().m_embeddings).max() )
+print("m_input_vecs:  ", abs(aold.unpack().m_input_vecs  - anew.unpack().m_input_vecs).max() )
+print("m_input_shift: ", abs(aold.unpack().m_input_shift - anew.unpack().m_input_shift).max())
+print("m_state_vecs:  ", abs(aold.unpack().m_state_vecs  - anew.unpack().m_state_vecs).max() )
+print("m_state_shift: ", abs(aold.unpack().m_state_shift - anew.unpack().m_state_shift).max())
+print("m_output_vecs: ", abs(aold.unpack().m_output_vecs - anew.unpack().m_output_vecs).max())
+print()
