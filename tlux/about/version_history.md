@@ -23,3 +23,4 @@
 | 0.0.16<br>April 2022 | Modified APOS fit routines to allow weighting the <br> value of individual Y with the new parameter YW. |
 | 0.0.17<br>April 2022 | Minor patch, prevent division by zero in <br> CONDITION_MODEL. |
 | 0.0.18<br>April 2022 | Implemented numpy evaluation class without need for <br> compiled code. Added EQUALIZE_Y configuration to <br> determine whether Y principal components are <br> flattened. Made default <br> ORTHOGONALIZING_STEP_FREQUENCY=0 to disable the <br> orthogonalizing entirely. |
+| 0.0.19<br>April 2022 | Fixed a few bugs introduced after version 15. Now <br> refactored code still converges correctly for <br> apositional inputs. |
