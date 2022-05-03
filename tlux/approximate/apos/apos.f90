@@ -1,6 +1,13 @@
 ! TODO:
 ! 
+! - Handle NaN and Infinity in the data normalization process, as well
+!   as in model evaluation (controlled through some logical setting).
+! 
 ! - Update CONDITION_MODEL to:
+!    multiply the 2-norm of output weights by values before orthogonalization
+!    push gradient mean of always-redundant basis functions towards zero
+!    reinitialize basis functions randomly at first, metric PCA best
+! 
 !    sum the number of times a component had no rank across threads
 !    swap weights for the no-rank components to the back
 !    swap no-rank state component values into contiguous memory at back
@@ -1514,6 +1521,7 @@ CONTAINS
           BN = (N + NT - 1) / NT ! = CEIL(N / NT)
        END IF
        DO I = 1, CONFIG%ANS
+          A_STATE_USAGE(:,:) = 0
           TER = 0; TGR = 0;
           !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NT) &
           !$OMP& REDUCTION(MAX: TER, TGR)
@@ -1522,7 +1530,18 @@ CONTAINS
              BE = MIN(N, BN*BATCH)
              ! Compute model state rank.
              A_STATE_TEMP(BS:BE,:) = A_STATES(BS:BE,:,I)
+             ! !   multiply column values by 2-norm magnitude of output weights
+             ! IF (I .LT. CONFIG%ANS) THEN
+             !    DO J = 1, CONFIG%ADS
+             !       A_STATE_TEMP(BS:BE,J) = A_STATE_TEMP(BS:BE,J) * NORM2(A_STATE_VECS(J,:,I))
+             !    END DO
+             ! ELSE
+             !    DO J = 1, CONFIG%ADS
+             !       A_STATE_TEMP(BS:BE,J) = A_STATE_TEMP(BS:BE,J) * NORM2(A_OUTPUT_VECS(J,:))
+             !    END DO
+             ! END IF
              CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TER, A_ORDER(:,BATCH))
+             A_STATE_USAGE(A_ORDER(:TER,BATCH),BATCH) = 1
              ! Compute grad state rank.
              A_STATE_TEMP(BS:BE,:) = A_GRADS(BS:BE,:,I)
              CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TGR, A_ORDER(:,BATCH))
@@ -1596,6 +1615,16 @@ CONTAINS
              BE= MIN(N, BN*BATCH)
              ! Compute model state rank.
              M_STATE_TEMP(BS:BE,:) = M_STATES(BS:BE,:,I)
+             ! !   multiply column values by 2-norm magnitude of output weights
+             ! IF (I .LT. CONFIG%MNS) THEN
+             !    DO J = 1, CONFIG%MDS
+             !       M_STATE_TEMP(BS:BE,J) = M_STATE_TEMP(BS:BE,J) * NORM2(M_STATE_VECS(J,:,I))
+             !    END DO
+             ! ELSE
+             !    DO J = 1, CONFIG%MDS
+             !       M_STATE_TEMP(BS:BE,J) = M_STATE_TEMP(BS:BE,J) * NORM2(M_OUTPUT_VECS(J,:))
+             !    END DO
+             ! END IF
              CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TER, M_ORDER(:,BATCH))
              M_STATE_USAGE(M_ORDER(:TER,BATCH),BATCH) = 1
              ! Compute grad state rank.
@@ -1727,11 +1756,12 @@ CONTAINS
       END DO
 
       ! Check value magnitudes, look for near-zero valued basis functions.
+      ! Set "RANK" equal to the first index where all values are near zero.
       FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
       VALUES(:) = -SUM(CURR_STATE**2, 1)
       CALL ARGSORT(VALUES(:), ORDER(:))
       DO RANK = 1, SIZE(ORDER(:))
-         IF (VALUES(ORDER(RANK)) .GT. SQRT(EPSILON(0.0_RT))) EXIT
+         IF (VALUES(ORDER(RANK)) .GT. SQRT(SQRT(EPSILON(0.0_RT)))) EXIT
       END DO
       IF (RANK .GT. SIZE(ORDER)) RETURN
 
@@ -1747,11 +1777,11 @@ CONTAINS
       OUT_VECS(ORDER(RANK:),:) = 0.0_RT
       ! Zero out the mean of the gradient for the new vectors.
       IN_VECS_GRAD_MEAN(:,ORDER(RANK:)) = 0.0_RT
-      IN_VECS_GRAD_CURV(:,ORDER(RANK:)) = HUGE(0.0_RT)
+      IN_VECS_GRAD_CURV(:,ORDER(RANK:)) = 0.0_RT ! HUGE(0.0_RT)
       SHIFTS_GRAD_MEAN(ORDER(RANK:)) = 0.0_RT
-      SHIFTS_GRAD_CURV(ORDER(RANK:)) = HUGE(0.0_RT)
+      SHIFTS_GRAD_CURV(ORDER(RANK:)) = 0.0_RT ! HUGE(0.0_RT)
       OUT_VECS_GRAD_MEAN(ORDER(RANK:),:) = 0.0_RT
-      OUT_VECS_GRAD_CURV(ORDER(RANK:),:) = HUGE(0.0_RT)
+      OUT_VECS_GRAD_CURV(ORDER(RANK:),:) = 0.0_RT ! HUGE(0.0_RT)
 
     END SUBROUTINE REPLACE_BASIS_FUNCTIONS
 

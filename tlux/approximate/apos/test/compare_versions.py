@@ -518,7 +518,7 @@ np.random.seed(0)
 
 
 aold = APOS(source="apos_0-0-15.f90", name="apos_old", seed=0, num_threads=1)
-anew = APOS(source="apos_0-0-19.f90", name="apos_new", seed=0, num_threads=1)
+anew = APOS(source="apos_0-0-20.f90", name="apos_new", seed=0, num_threads=1)
 
 from tlux.random import well_spaced_box
 n = 100
@@ -549,7 +549,9 @@ print(anew)
 # print(anew.unpack().__str__(vecs=True))
 print()
 
-nv = aold.config.num_vars
+print("aold.config.num_vars: ", aold.config.num_vars)
+print("anew.config.num_vars: ", anew.config.num_vars)
+nv = max(aold.config.num_vars, anew.config.num_vars)
 print("model_difference:", max(abs(aold.model[:nv] - anew.model[:nv])))
 
 # Make the models the same before taking a fit step.
@@ -577,7 +579,7 @@ anew.config.basis_replacement = False
 aold.config.num_threads = 1
 anew.config.num_threads = 1
 
-steps = 0
+steps = 100
 
 ax_old = ax.copy()
 x_old = x.copy()
@@ -614,7 +616,7 @@ print("y_gradient: ", abs(aold.rwork[aold.config.syg-1:aold.config.eyg] -
                           anew.rwork[anew.config.syg-1:anew.config.eyg]).max())
 print()
 
-if (aold.config.ane > 0):
+if (min(aold.config.ade, anew.config.ade) > 0):
     print("a_embeddings:  ", abs(aold.unpack().a_embeddings  - anew.unpack().a_embeddings).max() )
 print("a_input_vecs:  ", abs(aold.unpack().a_input_vecs  - anew.unpack().a_input_vecs).max() )
 print("a_input_shift: ", abs(aold.unpack().a_input_shift - anew.unpack().a_input_shift).max())

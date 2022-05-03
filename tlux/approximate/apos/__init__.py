@@ -700,10 +700,11 @@ if __name__ == "__main__":
             ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
             ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
             num_threads=num_threads, seed=seed,
-            # basis_replacement = True,
+            basis_replacement = True,
             # orthogonalizing_step_frequency = 200,
-            # early_stop=False,
-            # equalize_y = False,
+            early_stop = False,
+            keep_best = False,
+            # equalize_y = True,
         )
         m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), steps=steps)
         # Create an evaluation set that evaluates the model that was built over two differnt functions.
