@@ -1,11 +1,14 @@
 ! TODO:
 ! 
+! - Make sure that the print time actually adheres to the 3-second guidance.
+!   Or optionally write updates to a designated file instead.
+! 
 ! - Handle NaN and Infinity in the data normalization process, as well
 !   as in model evaluation (controlled through some logical setting).
 ! 
 ! - Update CONDITION_MODEL to:
 !    multiply the 2-norm of output weights by values before orthogonalization
-!    push gradient mean of always-redundant basis functions towards zero
+!    do weight substitution to randomly reinitialize "redundant" basis functions
 !    reinitialize basis functions randomly at first, metric PCA best
 ! 
 !    sum the number of times a component had no rank across threads
@@ -95,7 +98,7 @@ MODULE APOS
      REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT  ! Rate of exponential sliding average over gradient steps.
      REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient variation.
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.05_RT   ! Rate of exponential sliding average over AY (centering about zero).
-     REAL(KIND=RT) :: STEP_REPLACEMENT = 0.2_RT  ! Rate of exponential sliding average towards zeroing for redundant basis functions.
+     REAL(KIND=RT) :: STEP_REPLACEMENT = 0.1_RT  ! Rate of exponential sliding average towards zeroing for redundant basis functions.
      REAL(KIND=RT) :: FASTER_RATE = 1.01_RT      ! Rate of increase of optimization factors.
      REAL(KIND=RT) :: SLOWER_RATE = 0.99_RT      ! Rate of decrease of optimization factors.
      REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.05_RT ! Minimum ratio of model variables to update.
@@ -1749,10 +1752,13 @@ CONTAINS
       DO I = RANK, SIZE(ORDER)
          IN_VECS_GRAD_MEAN(:,ORDER(I)) = &
               (1.0_RT - CONFIG%STEP_REPLACEMENT) * IN_VECS_GRAD_MEAN(:,ORDER(I)) &
-              - CONFIG%STEP_REPLACEMENT * IN_VECS(:,ORDER(I))
+              + CONFIG%STEP_REPLACEMENT * IN_VECS(:,ORDER(I))
+         SHIFTS_GRAD_MEAN(ORDER(I)) = &
+              (1.0_RT - CONFIG%STEP_REPLACEMENT) * SHIFTS_GRAD_MEAN(ORDER(I)) &
+              + CONFIG%STEP_REPLACEMENT * SHIFTS(ORDER(I))
          OUT_VECS_GRAD_MEAN(ORDER(I),:) = &
               (1.0_RT - CONFIG%STEP_REPLACEMENT) * OUT_VECS_GRAD_MEAN(ORDER(I),:) &
-              - CONFIG%STEP_REPLACEMENT * OUT_VECS(ORDER(I),:)
+              + CONFIG%STEP_REPLACEMENT * OUT_VECS(ORDER(I),:)
       END DO
 
       ! Check value magnitudes, look for near-zero valued basis functions.
@@ -1777,11 +1783,11 @@ CONTAINS
       OUT_VECS(ORDER(RANK:),:) = 0.0_RT
       ! Zero out the mean of the gradient for the new vectors.
       IN_VECS_GRAD_MEAN(:,ORDER(RANK:)) = 0.0_RT
-      IN_VECS_GRAD_CURV(:,ORDER(RANK:)) = 0.0_RT ! HUGE(0.0_RT)
+      IN_VECS_GRAD_CURV(:,ORDER(RANK:)) = HUGE(0.0_RT)
       SHIFTS_GRAD_MEAN(ORDER(RANK:)) = 0.0_RT
-      SHIFTS_GRAD_CURV(ORDER(RANK:)) = 0.0_RT ! HUGE(0.0_RT)
+      SHIFTS_GRAD_CURV(ORDER(RANK:)) = HUGE(0.0_RT)
       OUT_VECS_GRAD_MEAN(ORDER(RANK:),:) = 0.0_RT
-      OUT_VECS_GRAD_CURV(ORDER(RANK:),:) = 0.0_RT ! HUGE(0.0_RT)
+      OUT_VECS_GRAD_CURV(ORDER(RANK:),:) = HUGE(0.0_RT)
 
     END SUBROUTINE REPLACE_BASIS_FUNCTIONS
 

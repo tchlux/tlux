@@ -18,9 +18,21 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: C
     ! Call external single-precision matrix-matrix multiplication
     !  (should be provided by hardware manufacturer, if not use custom).
-    EXTERNAL :: SGEMM 
+    INTERFACE
+       SUBROUTINE SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
+            AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
+         CHARACTER :: OP_A, OP_B
+         INTEGER :: OUT_ROWS, OUT_COLS, INNER_DIM, A_ROWS, B_ROWS, C_ROWS
+         REAL :: AB_MULT, C_MULT
+         REAL, DIMENSION(*) :: A
+         REAL, DIMENSION(*) :: B
+         REAL, DIMENSION(*) :: C
+       END SUBROUTINE SGEMM
+    END INTERFACE
+
     CALL SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
        AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
+
     ! ! Fortran intrinsic version of general matrix multiplication routine,
     ! !   first compute the initial values in the output matrix,
     ! C(:,:) = C_MULT * C(:)
@@ -88,16 +100,20 @@ CONTAINS
   END SUBROUTINE RANDOM_UNIT_VECTORS
 
   ! Orthogonalize and normalize column vectors of A with pivoting.
-  SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER)
+  SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER, MULTIPLIERS)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: LENGTHS ! SIZE(A,2)
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
     INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER ! SIZE(A,2)
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:), OPTIONAL :: MULTIPLIERS ! SIZE(A,2), SIZE(A,2)
     REAL(KIND=RT) :: L, V
     INTEGER :: I, J, K
     IF (PRESENT(RANK)) RANK = 0
     IF (PRESENT(ORDER)) THEN
        FORALL (I=1:SIZE(A,2)) ORDER(I) = I
+    END IF
+    IF (PRESENT(MULTIPLIERS)) THEN
+       MULTIPLIERS(:,:) = 0.0_RT
     END IF
     column_orthogonolization : DO I = 1, SIZE(A,2)
        LENGTHS(I:) = SUM(A(:,I:)**2, 1)
@@ -112,12 +128,20 @@ CONTAINS
           L = LENGTHS(I)
           LENGTHS(I) = LENGTHS(J)
           LENGTHS(J) = L
-          ! Perform the pivot.
+          ! Perform the column pivot.
           DO K = 1, SIZE(A,1)
              V = A(K,I)
              A(K,I) = A(K,J)
              A(K,J) = V
           END DO
+          ! Do column pivot on multipliers too, if present.
+          IF (PRESENT(MULTIPLIERS)) THEN
+             DO K = 1, SIZE(MULTIPLIERS,1)
+                V = MULTIPLIERS(K,I)
+                MULTIPLIERS(K,I) = MULTIPLIERS(K,J)
+                MULTIPLIERS(K,J) = V
+             END DO
+          END IF
        END IF
        ! Subtract the first vector from all others.
        IF (LENGTHS(I) .GT. EPSILON(1.0_RT)) THEN
@@ -128,10 +152,15 @@ CONTAINS
              DO J = I+1, SIZE(A,2)
                 A(:,J) = A(:,J) - LENGTHS(J) * A(:,I)
              END DO
+             ! Store these multipliers if they were requested.
+             IF (PRESENT(MULTIPLIERS)) THEN
+                MULTIPLIERS(I,I:) = LENGTHS(I:)
+             END IF
           END IF
           IF (PRESENT(RANK)) RANK = RANK + 1
        ELSE
           LENGTHS(I:) = 0.0_RT
+          ! A(:,I:) = 0.0_RT ! <- Expected or not? Unclear.
           EXIT column_orthogonolization
        END IF
     END DO column_orthogonolization

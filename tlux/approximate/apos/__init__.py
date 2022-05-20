@@ -123,6 +123,7 @@ class APOS:
         self.config = None
         self.model = np.zeros(0, dtype="float32")
         self.record = np.zeros(0, dtype="float32")
+        self.embedding_transform = np.zeros(0, dtype="float32")
         # Default descriptors for categorical inputs.
         self.axi_map = []
         self.axi_sizes = []
@@ -258,7 +259,7 @@ class APOS:
         assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
         assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
         assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
-        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
+        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vector."
         # Reshape inputs to all be two dimensional (except sizes).
         if (len(y.shape) == 1): y = y.reshape((-1,1))
         if (len(yi.shape) == 1) and (len(yi.dtype) == 0): yi = yi.reshape((-1,1))
@@ -315,6 +316,8 @@ class APOS:
 
 
     # Fit this model.
+    # TODO: When sizes for Aggregator are set, but aggregate data has
+    #       zero shape, then reset the aggregator sizes to be zeros.
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
@@ -351,8 +354,7 @@ class APOS:
             # Set any configuration keyword arguments.
             for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
                 if (kwargs[n] is not None):
-                    setattr(self.config, n, kwargs[n])
-            
+                    setattr(self.config, n, kwargs[n])            
         # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
         if (self.config.ade > 0):
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
@@ -387,6 +389,12 @@ class APOS:
             _x[:,:] = x[:,:_x.shape[1]]
         if (self.config.ade > 0):
             _ax[:,:] = ax[:,:_ax.shape[1]]
+        # Store the multiplier to be used in embeddings.
+        if (self.config.mdo > 0):
+            last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
+        else:
+            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, order="F")            
+        self.embedding_transform = np.linalg.norm(last_weights, axis=1)
 
 
     # Calling this model is an alias for 'APOS.predict'.
@@ -451,8 +459,31 @@ class APOS:
         if (save_states):
             self.m_states = m_states
             self.a_states = a_states
-        # If there are embedded y values in the output, return them to the format at training time.
-        if (len(self.yi_map) > 0) and (not embedding):
+        # If embeddings are desired, multiply the last state by the 2-norm
+        #  of output weights for each component of that last embedding.
+        if (embedding):
+            # Store the "last_state" representation of data before output,
+            #  as well as the "last_weights" that precede output.
+            if (self.config.mdo > 0):
+                if (self.config.mns > 0):
+                    last_state = m_states[:,:,-2]
+                else:
+                    last_state = x
+            else:
+                if (self.config.ans > 0):
+                    last_state = a_states[:,:,-2]
+                else:
+                    last_state = ax
+            # Rescale the last state to linearly level according to outputs.
+            if (self.embedding_transform.size > 0):
+                last_state = last_state * self.embedding_transform
+            # Return the last state.
+            return last_state
+        # If there are categorical outputs, then select by taking the max magnitude output.
+        # TODO: The max might not have the same meaning for each category, 
+        #       this needs to be considered further.
+        #       Perhaps divide by value occurrence?
+        elif (len(self.yi_map) > 0):
             yne = sum(self.yi_sizes)
             _y = [y[:,i] for i in range(y.shape[1]-yne)]
             for i in range(len(self.yi_map)):
@@ -461,9 +492,8 @@ class APOS:
                 _y.append(
                     self.yi_map[i][np.argmax(y[:,start:start+size], axis=1)]
                 )
-            return np.asarray(_y).T
-        elif (embedding and (len(self.yi_map) == 0)):
-            return m_states[:,:,-2]
+            return np.asarray(_y, dtype=object).T
+        # Otherwise simply return the numeric predicted outputs by the model.
         else:
             return y
 
@@ -481,6 +511,7 @@ class APOS:
                 "config" : config,
                 "model"  : self.model.tolist(),
                 "record" : self.record.tolist(),
+                "embedding_transform" : self.embedding_transform.tolist(),
                 "xi_map"    : [l.tolist() for l in self.xi_map],
                 "xi_sizes"  : self.xi_sizes,
                 "xi_starts" : self.xi_starts,
@@ -524,6 +555,8 @@ if __name__ == "__main__":
     #  Enable debugging option "-fcheck=bounds".
     import fmodpy
     fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+    # fmodpy.config.link_blas = "-framework Accelerate"
+    # fmodpy.config.link_lapack = "-framework Accelerate"
     # fmodpy.config.link_omp = ""
     # ----------------------------------------------------------------
 
@@ -554,9 +587,9 @@ if __name__ == "__main__":
     TEST_WEIGHTING = False
     TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = True
-    TEST_LARGE_MODEL = False
-    SHOW_VISUALS = True
+    TEST_APOSITIONAL = False
+    TEST_LARGE_MODEL = True
+    SHOW_VISUALS = False
 
 
     if TEST_FIT_SIZE:
@@ -704,6 +737,7 @@ if __name__ == "__main__":
             # orthogonalizing_step_frequency = 200,
             early_stop = False,
             keep_best = False,
+            step_replacement = 0.00,
             # equalize_y = True,
         )
         m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), steps=steps)
