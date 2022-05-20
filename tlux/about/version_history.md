@@ -25,3 +25,4 @@
 | 0.0.18<br>April 2022 | Implemented numpy evaluation class without need for <br> compiled code. Added EQUALIZE_Y configuration to <br> determine whether Y principal components are <br> flattened. Made default <br> ORTHOGONALIZING_STEP_FREQUENCY=0 to disable the <br> orthogonalizing entirely. |
 | 0.0.19<br>April 2022 | Fixed a few bugs introduced after version 15. Now <br> refactored code still converges correctly for <br> apositional inputs. |
 | 0.0.20<br>May 2022 | Added fast ball tree nearest neighbor codes to the <br> 'approximate' subpackage. |
+| 0.0.21<br>May 2022 | Cleaning repository and pushing some waiting APOS <br> safeguards. Next step is well founded basis <br> replacement. |
