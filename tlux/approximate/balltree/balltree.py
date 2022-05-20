@@ -6,10 +6,9 @@
 import os 
 import numpy as np
 
-PATH_TO_HERE = os.path.dirname(os.path.abspath(__file__))
-
 # Allow OpenMP to create nested threads.
 from multiprocessing import cpu_count
+
 # Set OpenMP variables to allow for greatest parallelism when building tree.
 if "OMP_NUM_THREADS" not in os.environ:
     os.environ["OMP_NUM_THREADS"] = str(cpu_count())
@@ -18,23 +17,27 @@ if "OMP_MAX_ACTIVE_LEVELS" not in os.environ:
 if "OMP_NESTED" not in os.environ:
     os.environ["OMP_NESTED"] = "TRUE"
 
-# Define paths to the Fortran utilities.
-PATH_TO_BT = os.path.join(PATH_TO_HERE, "ball_tree.f90")
-PATH_TO_PRUNE = os.path.join(PATH_TO_HERE, "prune.f90")
-PATH_TO_SORT   = os.path.join(PATH_TO_HERE, "fast_sort.f90")
-PATH_TO_SELECT = os.path.join(PATH_TO_HERE, "fast_select.f90")
-
 # Import the Fortran utilities.
 try:
     from .ball_tree import ball_tree
     from .prune import prune
-import fmodpy
-dependencies = ["swap.f90", "prune.f90", "fast_select.f90", "fast_sort.f90", "ball_tree.f90"]
-ball_tree  = fmodpy.fimport(PATH_TO_BT, output_dir=PATH_TO_HERE, omp=True,
-                            verbose=False, dependencies=dependencies).ball_tree
-prune = fmodpy.fimport(PATH_TO_PRUNE, output_dir=PATH_TO_HERE, verbose=False).prune
-fast_sort = fmodpy.fimport(PATH_TO_SORT, output_dir=PATH_TO_HERE, verbose=False).fast_sort
-fast_select = fmodpy.fimport(PATH_TO_SELECT, output_dir=PATH_TO_HERE, verbose=False).fast_select
+    from .fast_sort import fast_sort
+    from .fast_select import fast_select
+except:
+    print("Importing 'fmodpy' and building wrappers..")
+    import fmodpy
+    _PATH_TO_HERE = os.path.dirname(os.path.abspath(__file__))
+    # Define paths to the Fortran utilities.
+    _PATH_TO_BT = os.path.join(_PATH_TO_HERE, "ball_tree.f90")
+    _PATH_TO_PRUNE = os.path.join(_PATH_TO_HERE, "prune.f90")
+    _PATH_TO_SORT   = os.path.join(_PATH_TO_HERE, "fast_sort.f90")
+    _PATH_TO_SELECT = os.path.join(_PATH_TO_HERE, "fast_select.f90")
+    _DEPENDENCIES = ["swap.f90", "prune.f90", "fast_select.f90", "fast_sort.f90", "ball_tree.f90"]
+    ball_tree  = fmodpy.fimport(_PATH_TO_BT, output_dir=_PATH_TO_HERE, omp=True,
+                                verbose=False, dependencies=_DEPENDENCIES).ball_tree
+    prune = fmodpy.fimport(_PATH_TO_PRUNE, output_dir=_PATH_TO_HERE, verbose=False).prune
+    fast_sort = fmodpy.fimport(_PATH_TO_SORT, output_dir=_PATH_TO_HERE, verbose=False).fast_sort
+    fast_select = fmodpy.fimport(_PATH_TO_SELECT, output_dir=_PATH_TO_HERE, verbose=False).fast_select
 
 # ------------------------------------------------------------------
 #                        FastSort method
@@ -180,7 +183,7 @@ class BallTree:
                 old_points = self.tree[:,:self.size]
                 dim = self.tree.shape[1]
                 self.size += points.shape[1]
-                self.tree = np.zeros((dim, self.size), dtype=self.ttype)
+                self.tree = np.zeros((dim, self.size), dtype=self.ttype, order='F')
                 # Assign the relevant internals for this tree.
                 self.sq_sums = np.zeros(self.tree.shape[1],  dtype=self.sstype)
                 self.order   = np.arange(self.tree.shape[1], dtype='int64') + 1
@@ -198,7 +201,7 @@ class BallTree:
             self.tree    = np.asarray(points, order='F', dtype=self.ttype)
             # Assign the relevant internals for this tree.
             self.sq_sums = np.zeros(self.tree.shape[1],  dtype=self.sstype)
-            self.order   = np.arange(self.tree.shape[1], dtype='int64') + 1
+            self.order   = np.arange(1, self.tree.shape[1]+1, dtype='int64')
             self.radii   = np.zeros(self.tree.shape[1],  dtype='float32')
             self.splits  = np.zeros(self.tree.shape[1],  dtype='float32')
             # Store BallTree internals for knowing how to evaluate.
