@@ -3,6 +3,7 @@
 ! radializing data matrices with the SVD.
 MODULE MATRIX_OPERATIONS
   USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+  USE IEEE_ARITHMETIC, ONLY: IS_NAN => IEEE_IS_NAN, IS_FINITE => IEEE_IS_FINITE
   IMPLICIT NONE
 
 CONTAINS
@@ -248,10 +249,11 @@ CONTAINS
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     ! Local variables.
     LOGICAL :: INVERSE, FLAT
+    LOGICAL, DIMENSION(SIZE(X,1), SIZE(X,2)) :: NON_NUMBER_MASK
     REAL(KIND=RT), DIMENSION(SIZE(VECS,1),SIZE(VECS,2)) :: TEMP_VECS
-    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS
+    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS, RN
     REAL(KIND=RT), DIMENSION(SIZE(X,1), SIZE(X,2)) :: X1
-    REAL(KIND=RT) :: RN
+    REAL(KIND=RT) :: SCALAR
     INTEGER :: I, D
     ! Set the default value for "INVERSE".
     IF (PRESENT(INVERT_RESULT)) THEN
@@ -265,10 +267,19 @@ CONTAINS
     ELSE
        FLAT = .TRUE.
     END IF
+    ! Identify the location of "bad values" (Inf and NaN).
+    NON_NUMBER_MASK(:,:) = IS_NAN(X(:,:)) .OR. (.NOT. IS_FINITE(X(:,:)))
+    WHERE (NON_NUMBER_MASK(:,:))
+       X(:,:) = 0.0_RT
+    END WHERE
     ! Shift the data to be be centered about the origin.
     D = SIZE(X,1)
-    RN = REAL(SIZE(X,2),RT)
-    SHIFT(:) = -SUM(X(:,:),2) / RN
+    RN(:) = MAX(1.0_RT, REAL(SIZE(X,2) - COUNT(NON_NUMBER_MASK(:,:), 2), RT))
+    SCALAR = MAXVAL(X(:,:))
+    IF (SCALAR .EQ. 0.0_RT) THEN
+       SCALAR = 1.0_RT
+    END IF
+    SHIFT(:) = (-SUM(X(:,:) / SCALAR, 2) / RN(:)) * SCALAR
     DO I = 1, D
        X(I,:) = X(I,:) + SHIFT(I)
     END DO

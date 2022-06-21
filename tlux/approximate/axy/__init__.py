@@ -2,11 +2,11 @@ import os
 import numpy as np
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
-_source_code = os.path.join(_this_dir, "apos.f90")
+_source_code = os.path.join(_this_dir, "axy.f90")
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
-class AposModel:
+class AxyModel:
     def __init__(self, config, model):
         self.config = config
         self.model = model
@@ -61,8 +61,8 @@ class AposModel:
         else:    to_str = lambda arr: "\n"
         # Provide details (and some values where possible).
         return (
-            f"APOS model ({self.config.total_size} parameters) [{byte_size}]\n"+
-            (" apositional\n"+
+            f"AXY model ({self.config.total_size} parameters) [{byte_size}]\n"+
+            (" aggregator model\n"+
             f"  input dimension  {self.config.adn}\n"+
             f"  output dimension {self.config.ado}\n"+
             f"  state dimension  {self.config.ads}\n"+
@@ -77,7 +77,7 @@ class AposModel:
             f"  state shift  {self.a_state_shift.shape} "+to_str(self.a_state_shift)+
             f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
              "\n" if (self.a_output_vecs.size > 0) else "") +
-            (" positional\n"+
+            (" model\n"+
             f"  input dimension  {self.config.mdn}\n"+
             f"  output dimension {self.config.mdo}\n"+
             f"  state dimension  {self.config.mds}\n"+
@@ -95,22 +95,22 @@ class AposModel:
         )
 
 
-# Class for calling the underlying APOS model code.
-class APOS:
+# Class for calling the underlying AXY model code.
+class AXY:
     # Make the string function return the unpacked model.
     def __str__(self): return str(self.unpack())
 
-    # Initialize a new APOS model.
+    # Initialize a new AXY model.
     def __init__(self, **kwargs):
         try:
             import fmodpy
-            apos = fmodpy.fimport(_source_code, blas=True,
+            axy = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  dependencies=["matrix_operations.f90", "sort_and_select.f90", "apos.f90"]
+                                  dependencies=["matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
             )
             # Store the Fortran module as an attribute.
-            self.APOS = apos.apos
+            self.AXY = axy.axy
         except:
             # TODO:
             #  - python fallback that supports the basic evaluation of
@@ -140,7 +140,7 @@ class APOS:
 
     # Initialize a model, if possible.
     def _init_model(self, **kwargs):
-        # Apositional model parameters.
+        # Aggregator model parameters.
         adn = kwargs.pop("adn", 0)
         ado = kwargs.pop("ado", None)
         ads = kwargs.pop("ads", None)
@@ -160,7 +160,7 @@ class APOS:
         self.steps = kwargs.pop("steps", self.steps)
         # Initialize if enough arguments were provided.
         if (None not in {adn, mdn, mdo}):
-            self.config = self.APOS.new_model_config(
+            self.config = self.AXY.new_model_config(
                 adn=adn, ado=ado, ads=ads, ans=ans, ane=ane, ade=ade,
                 mdn=mdn, mdo=mdo, mds=mds, mns=mns, mne=mne, mde=mde,
                 num_threads=self.num_threads)
@@ -170,7 +170,7 @@ class APOS:
                 setattr(self.config, n, kwargs[n])
             # Set all internal arrays and initialize the model.
             self.model = np.zeros(self.config.total_size, dtype="float32")
-            self.APOS.init_model(self.config, self.model, seed=self.seed)
+            self.AXY.init_model(self.config, self.model, seed=self.seed)
 
 
     # Generate the string containing all the configuration information for this model.
@@ -190,7 +190,7 @@ class APOS:
         # If there is no model or configuration, return None.
         if (self.config is None) or (self.model is None):
             return None
-        return AposModel(self.config, self.model)
+        return AxyModel(self.config, self.model)
 
 
     # Given a categorical input array, construct a dictionary for
@@ -228,7 +228,7 @@ class APOS:
         return _xi
 
 
-    # Convert all inputs to the APOS model into the expected numpy format.
+    # Convert all inputs to the AXY model into the expected numpy format.
     def _to_array(self, ax, axi, sizes, x, xi, y, yi):
         # Get the number of inputs.
         if   (y  is not None): nm = len(y)
@@ -321,10 +321,10 @@ class APOS:
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
-        assert ((y is not None) or (yi is not None)), "APOS.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
-        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        assert ((y is not None) or (yi is not None)), "AXY.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
+        # Make sure that 'sizes' were provided for aggregate inputs.
         if ((ax is not None) or (axi is not None)):
-            assert (sizes is not None), "APOS.fit requires 'sizes' to be provided for apositional input sets (ax and axi)."
+            assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, y, yi)
@@ -370,20 +370,20 @@ class APOS:
         if (self.seed is not None):
             if (self.config.num_threads > 2):
                 import warnings
-                warnings.warn("Seeding an APOS model will deterministically initialize weights, but num_threads > 2 will result in a nondeterministic model fit.")
+                warnings.warn("Seeding an AXY model will deterministically initialize weights, but num_threads > 2 will result in a nondeterministic model fit.")
         # Get the number of steps for training.
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
-        self.APOS.new_fit_config(nm, na, self.config)
+        self.AXY.new_fit_config(nm, na, self.config)
         rwork = np.zeros(self.config.rwork_size, dtype="float32")
         iwork = np.zeros(self.config.iwork_size, dtype="int32")
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
-        result = self.APOS.minimize_mse(self.config, self.model, rwork, iwork,
+        result = self.AXY.minimize_mse(self.config, self.model, rwork, iwork,
                                         ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
                                         steps=steps, record=self.record.T)
-        assert (result[-1] == 0), f"APOS.minimize_mse returned nonzero exit code {result[-1]}."
+        assert (result[-1] == 0), f"AXY.minimize_mse returned nonzero exit code {result[-1]}."
         # Copy the updated values back into the input arrays (for transparency).
         if (self.config.mde > 0):
             _x[:,:] = x[:,:_x.shape[1]]
@@ -397,7 +397,32 @@ class APOS:
         self.embedding_transform = np.linalg.norm(last_weights, axis=1)
 
 
-    # Calling this model is an alias for 'APOS.predict'.
+        # # Check that the max vectors are correctly the first singular vectors.
+        # print()
+        # print('-'*70)
+        # print(self)
+        # print()
+        # print(self.config.smsm-1, m.config.emsm, '->', m.config.emsm - self.config.smsm-1)
+        # layer = 1
+        # v = rwork[self.config.smsm-1:self.config.emsm].reshape((m.config.mds,m.config.mns-1), order='F')[:,layer]
+        # print('v', v.shape)
+        # a = self.unpack().m_state_vecs[:,:,layer]
+        # print('a', a.shape)
+        # # TODO: find out why "s" is not a vector from the SVD of the weight matrix...
+        # U, s, V = np.linalg.svd(a)
+        # print('s', s.shape)
+        # print("s: ", s)
+        # print("v.shape: ", v.shape)
+        # print("a.shape: ", a.shape)
+        # print("np.linalg.norm(v): ", np.linalg.norm(v))
+        # print("np.linalg.norm(v @ a): ", np.linalg.norm(v @ a))
+        # print("np.linalg.norm(a, axis=0): ", np.linalg.norm(a, axis=0))
+        # print('-'*70)          
+        # print()
+        # exit()
+
+
+    # Calling this model is an alias for 'AXY.predict'.
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
 
@@ -406,10 +431,10 @@ class APOS:
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, **kwargs):
         # Evaluate the model at all data.
-        assert ((x is not None) or (xi is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
-        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
+        # Make sure that 'sizes' were provided for aggregate inputs.
         if ((ax is not None) or (axi is not None)):
-            assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
+            assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, _, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, None, None)
@@ -449,12 +474,12 @@ class APOS:
             a_states = np.zeros((na, ads, 2), dtype="float32", order="F")
         # ------------------------------------------------------------
         # Call the unerlying library.
-        info = self.APOS.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
-        assert (info == 0), f"APOS.predict encountered nonzero exit code {info} when calling APOS.check_shape."
-        self.APOS.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
-        result = self.APOS.evaluate(self.config, self.model, ax.T, ay, sizes,
+        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
+        assert (info == 0), f"AXY.predict encountered nonzero exit code {info} when calling AXY.check_shape."
+        self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
+        result = self.AXY.evaluate(self.config, self.model, ax.T, ay, sizes,
                                     x.T, y.T, a_states, m_states, info)
-        assert (result[-1] == 0), f"APOS.evaluate returned nonzero exit code {result[-1]}."
+        assert (result[-1] == 0), f"AXY.evaluate returned nonzero exit code {result[-1]}."
         # Save the states if that's 
         if (save_states):
             self.m_states = m_states
@@ -542,14 +567,14 @@ class APOS:
             setattr(self, key, value)
         # Convert the the dictionary configuration into the correct type.
         if (type(self.config) is dict):
-            self.config = self.APOS.MODEL_CONFIG(**self.config)
+            self.config = self.AXY.MODEL_CONFIG(**self.config)
         # Return self in case an assignment was made.
         return self
 
 
 if __name__ == "__main__":
     print("_"*70)
-    print(" TESTING APOS MODULE")
+    print(" TESTING AXY MODULE")
 
     # ----------------------------------------------------------------
     #  Enable debugging option "-fcheck=bounds".
@@ -576,8 +601,8 @@ if __name__ == "__main__":
 
     n = 100
     seed = 2
-    state_dim = 20
-    num_states = 4
+    state_dim = 32
+    num_states = 8
     steps = 1000
     num_threads = None
     np.random.seed(seed)
@@ -585,15 +610,15 @@ if __name__ == "__main__":
 
     TEST_FIT_SIZE = False
     TEST_WEIGHTING = False
-    TEST_SAVE_LOAD = False
+    TEST_SAVE_LOAD = True
     TEST_INT_INPUT = False
-    TEST_APOSITIONAL = False
-    TEST_LARGE_MODEL = True
-    SHOW_VISUALS = False
+    TEST_AGGREGATE = False
+    TEST_LARGE_MODEL = False
+    SHOW_VISUALS = True
 
 
     if TEST_FIT_SIZE:
-        # Apositional model settings.
+        # Aggreagtor model settings.
         dim_a_numeric = 4
         dim_a_embedding = None
         num_a_embeddings = 32
@@ -612,14 +637,14 @@ if __name__ == "__main__":
         nm = 100000
         num_threads = 100
         # Initialize the model and its fit configuration.
-        m = APOS(
+        m = AXY(
             adn=dim_a_numeric, ade=dim_a_embedding, ane=num_a_embeddings,
             ads=dim_a_state, ans=num_a_states, ado=dim_a_out,
             mdn=dim_m_numeric, mde=dim_m_embedding, mne=num_m_embeddings,
             mds=dim_m_state, mns=num_m_states, mdo=dim_m_out,
             num_threads=num_threads, seed=seed,
         )
-        m.APOS.new_fit_config(nm, na, m.config)
+        m.AXY.new_fit_config(nm, na, m.config)
         print()
         print(m)
 
@@ -633,16 +658,20 @@ if __name__ == "__main__":
 
     if TEST_SAVE_LOAD:
         # Try saving an untrained model.
-        m = APOS()
+        m = AXY()
         print("Empty model:")
         print("  str(model) =", str(m))
         print()
         m.save("testing_empty_save.json")
         m.load("testing_empty_save.json")
         from util.approximate import PLRM
-        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
+        m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
                  num_threads=num_threads, steps=steps, 
                  orthogonalizing_step_frequency=10,
+                 initial_shift_range=0.0,
+                 min_update_ratio=1.0,
+                 faster_rate=1.0,
+                 slower_rate=1.0,
                  ) # discontinuity=-1000.0) # initial_step=0.01)
         print("Initialized model:")
         print(m)
@@ -691,7 +720,7 @@ if __name__ == "__main__":
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
         y = f(x)
         # Initialize a new model.
-        m = APOS(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, seed=seed, steps=steps, num_threads=num_threads)
+        m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, seed=seed, steps=steps, num_threads=num_threads)
         all_x = np.concatenate((x, x), axis=0)
         all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
         all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
@@ -713,7 +742,7 @@ if __name__ == "__main__":
         p.show(show=False)
 
 
-    if TEST_APOSITIONAL:
+    if TEST_AGGREGATE:
         print("Building model..")
         x = well_spaced_box(n, 2)
         x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
@@ -728,7 +757,7 @@ if __name__ == "__main__":
         all_y = all_y.reshape((all_y.shape[0],-1))
         # Initialize a new model.
         print("Fitting model..")
-        m = APOS(
+        m = AXY(
             mdn=0, adn=ax.shape[1], ado=2, mdo=all_y.shape[1], 
             ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
             ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
@@ -799,7 +828,7 @@ if __name__ == "__main__":
         steps = 11
         num_threads = 20
         # Fit model.
-        m = APOS(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
+        m = AXY(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
                  ans=ans, ads=ads, mns=mns, mds=mds)
         m.fit(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, y=y,
               steps=steps, num_threads=num_threads, early_stop=False)
@@ -826,3 +855,6 @@ if __name__ == "__main__":
     if ("m" in globals()):
         print()
         print(m)
+
+
+
