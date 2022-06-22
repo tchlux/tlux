@@ -26,3 +26,4 @@
 | 0.0.19<br>April 2022 | Fixed a few bugs introduced after version 15. Now <br> refactored code still converges correctly for <br> apositional inputs. |
 | 0.0.20<br>May 2022 | Added fast ball tree nearest neighbor codes to the <br> 'approximate' subpackage. |
 | 0.0.21<br>May 2022 | Cleaning repository and pushing some waiting APOS <br> safeguards. Next step is well founded basis <br> replacement. |
+| 0.0.22<br>June 2022 | Renamed APOS to AXY. Fixed error in aggregator <br> output mean calculation. Refactored CONDITION_MODEL <br> subroutines in preparation for further development. |
