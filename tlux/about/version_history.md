@@ -27,3 +27,4 @@
 | 0.0.20<br>May 2022 | Added fast ball tree nearest neighbor codes to the <br> 'approximate' subpackage. |
 | 0.0.21<br>May 2022 | Cleaning repository and pushing some waiting APOS <br> safeguards. Next step is well founded basis <br> replacement. |
 | 0.0.22<br>June 2022 | Renamed APOS to AXY. Fixed error in aggregator <br> output mean calculation. Refactored CONDITION_MODEL <br> subroutines in preparation for further development. |
+| 0.0.23<br>June 2022 | Added Data module. |
