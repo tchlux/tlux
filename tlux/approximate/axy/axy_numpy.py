@@ -5,7 +5,7 @@
 #    Date: 2022/04
 # 
 # Description:
-#   A class that implements a numpy-only evaluation mode for APOS models.
+#   A class that implements a numpy-only evaluation mode for AXY models.
 # 
 # -----------------------------------------------------------------------
 
@@ -17,7 +17,7 @@ import numpy as np
 #  python attribute access to all of the different components of the models.
 #  Define a "predict" method that evaluates the model using only numpy
 #  the same way as would be done in the compiled code.
-class AposNumpy:
+class AxyNumpy:
     # Static method for loading a saved model from a path.
     def load(path):
         # Read the file.
@@ -35,7 +35,7 @@ class AposNumpy:
                 value = np.asarray(value, dtype="float32")
             attrs[key] = value
         # Return an initialized model.
-        return AposNumpy(config=attrs.pop("config",None), model=attrs.pop("model", None), **attrs)
+        return AxyNumpy(config=attrs.pop("config",None), model=attrs.pop("model", None), **attrs)
 
 
     # Given a configuration object and a model array, store internal parameters.
@@ -96,8 +96,8 @@ class AposNumpy:
         else:    to_str = lambda arr: "\n"
         # Provide details (and some values where possible).
         return (
-            f"APOS model ({self.total_size} parameters) [{byte_size}]\n"+
-            (" apositional\n"+
+            f"AXY model ({self.total_size} parameters) [{byte_size}]\n"+
+            (" aggregator model\n"+
             f"  input dimension  {self.adn}\n"+
             f"  output dimension {self.ado}\n"+
             f"  state dimension  {self.ads}\n"+
@@ -112,7 +112,7 @@ class AposNumpy:
             f"  state shift  {self.a_state_shift.shape} "+to_str(self.a_state_shift)+
             f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
              "\n" if (self.a_output_vecs.size > 0) else "") +
-            (" positional\n"+
+            (" model\n"+
             f"  input dimension  {self.mdn}\n"+
             f"  output dimension {self.mdo}\n"+
             f"  state dimension  {self.mds}\n"+
@@ -165,7 +165,7 @@ class AposNumpy:
         return _xi
 
 
-    # Convert all inputs to the APOS model into the expected numpy format.
+    # Convert all inputs to the AXY model into the expected numpy format.
     def _to_array(self, ax, axi, sizes, x, xi, y, yi):
         # Get the number of inputs.
         if   (y  is not None): nm = len(y)
@@ -252,7 +252,7 @@ class AposNumpy:
         return nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes
 
 
-    # Calling this model is an alias for 'APOS.predict'.
+    # Calling this model is an alias for 'AXY.predict'.
     def __call__(self, *args, **kwargs):
         return self.predict(*args, **kwargs)
 
@@ -260,10 +260,10 @@ class AposNumpy:
     # Make predictions for new data.
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None):
         # Evaluate the model at all data.
-        assert ((x is not None) or (xi is not None) or (sizes is not None)), "APOS.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
-        # Make sure that 'sizes' were provided for apositional (aggregate) inputs.
+        assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
+        # Make sure that 'sizes' were provided for aggregator (aggregate) inputs.
         if ((ax is not None) or (axi is not None)):
-            assert (sizes is not None), "APOS.predict requires 'sizes' to be provided for apositional input sets (ax and axi)."
+            assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregator input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
         nm, na, mdn, mne, mdo, adn, ane, yne, _, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, None, None)
@@ -329,7 +329,7 @@ class AposNumpy:
             )
             x[:, self.mdn:self.mdn+self.mde] = m_embeddings.T
         # ------------------------------------------------------------
-        # Evaluate apositional model first, if it exists.
+        # Evaluate aggregator model first, if it exists.
         if (self.adi > 0):
             state = ax
             state[:,:self.adn] += self.ax_shift[:]

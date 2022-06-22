@@ -130,7 +130,7 @@ MODULE AXY
      INTEGER :: PRINT_DELAY_SEC = 2 ! Delay between output logging during fit.
      INTEGER :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
      INTEGER :: LOGGING_STEP_FREQUENCY = 10 ! Frequency with which to log expensive records (model variable 2-norm step size).
-     INTEGER :: ORTHOGONALIZING_STEP_FREQUENCY = 50 ! Frequency with which to orthogonalize internal basis functions.
+     INTEGER :: RANK_CHECK_FREQUENCY = 50 ! Frequency with which to orthogonalize internal basis functions.
      INTEGER :: NUM_TO_UPDATE = HUGE(0) ! Number of model variables to update (initialize to large number).
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE. ! False if AX data needs to be normalized.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE. ! False if AXI embeddings need to be normalized.
@@ -143,17 +143,12 @@ MODULE AXY
      LOGICAL(KIND=INT8) :: APPLY_SHIFT = .TRUE. ! True if shifts should be applied to inputs before processing.
      LOGICAL(KIND=INT8) :: KEEP_BEST = .TRUE. ! True if best observed model should be greedily kept at end of optimization.
      LOGICAL(KIND=INT8) :: EARLY_STOP = .TRUE. ! True if optimization should end when num-steps since best model is greater than the num-steps remaining.
-     LOGICAL(KIND=INT8) :: BASIS_REPLACEMENT = .FALSE. ! True if redundant basis functions should be replaced during optimization.
+     LOGICAL(KIND=INT8) :: BASIS_REPLACEMENT = .FALSE. ! True if redundant basis functions should be replaced during optimization rank checks.
      ! Descriptions of the number of points that can be in one batch.
      INTEGER(KIND=INT64) :: RWORK_SIZE = 0
      INTEGER(KIND=INT64) :: IWORK_SIZE = 0
      INTEGER(KIND=INT64) :: NA = 0
      INTEGER(KIND=INT64) :: NM = 0
-     ! Conditioning work space (for values used to keep model well-conditioned).
-     INTEGER(KIND=INT64) :: SAIM, EAIM ! AI_MAX(ADI)
-     INTEGER(KIND=INT64) :: SASM, EASM ! AS_MAX(ADS,ANS-1)
-     INTEGER(KIND=INT64) :: SMIM, EMIM ! MI_MAX(MDI)
-     INTEGER(KIND=INT64) :: SMSM, EMSM ! MS_MAX(MDS,MNS-1)
      ! Optimization work space.
      INTEGER(KIND=INT64) :: SMG, EMG ! MODEL_GRAD(NUM_VARS,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMGM, EMGM ! MODEL_GRAD_MEAN(NUM_VARS)
@@ -400,22 +395,6 @@ CONTAINS
     ! ------------------------------------------------------------
     ! Set up the real valued work array.
     CONFIG%RWORK_SIZE = 0
-    ! aggregator input max
-    CONFIG%SAIM = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EAIM = CONFIG%SAIM-1 + CONFIG%ADI
-    CONFIG%RWORK_SIZE = CONFIG%EAIM
-    ! aggregator state max
-    CONFIG%SASM = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EASM = CONFIG%SASM-1 + CONFIG%ADS * MAX(0, CONFIG%ANS-1)
-    CONFIG%RWORK_SIZE = CONFIG%EASM
-    ! model input max
-    CONFIG%SMIM = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EMIM = CONFIG%SMIM-1 + CONFIG%MDI
-    CONFIG%RWORK_SIZE = CONFIG%EMIM
-    ! model state max
-    CONFIG%SMSM = 1 + CONFIG%RWORK_SIZE
-    CONFIG%EMSM = CONFIG%SMSM-1 + CONFIG%MDS * MAX(0, CONFIG%MNS-1)
-    CONFIG%RWORK_SIZE = CONFIG%EMSM
     ! model gradient
     CONFIG%SMG = 1 + CONFIG%RWORK_SIZE
     CONFIG%EMG = CONFIG%SMG-1 + CONFIG%NUM_VARS * CONFIG%NUM_THREADS
@@ -1433,18 +1412,7 @@ CONTAINS
   
   ! Performing conditioning related operations on this model 
   !  (ensure that mean squared error is effectively reduced).
-  SUBROUTINE CONDITION_MODEL(CONFIG, MODEL, &
-       A_INPUT_VECS, A_INPUT_SHIFT, A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, &
-       M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS, &
-       AI_MAX, AS_MAX, MI_MAX, MS_MAX, &
-       A_INPUT_VECS_GRAD_MEAN, A_INPUT_SHIFT_GRAD_MEAN, A_STATE_VECS_GRAD_MEAN, &
-       A_STATE_SHIFT_GRAD_MEAN, A_OUTPUT_VECS_GRAD_MEAN, &
-       M_INPUT_VECS_GRAD_MEAN, M_INPUT_SHIFT_GRAD_MEAN, M_STATE_VECS_GRAD_MEAN, &
-       M_STATE_SHIFT_GRAD_MEAN, M_OUTPUT_VECS_GRAD_MEAN, &
-       A_INPUT_VECS_GRAD_CURV, A_INPUT_SHIFT_GRAD_CURV, A_STATE_VECS_GRAD_CURV, &
-       A_STATE_SHIFT_GRAD_CURV, A_OUTPUT_VECS_GRAD_CURV, &
-       M_INPUT_VECS_GRAD_CURV, M_INPUT_SHIFT_GRAD_CURV, M_STATE_VECS_GRAD_CURV, &
-       M_STATE_SHIFT_GRAD_CURV, M_OUTPUT_VECS_GRAD_CURV, &
+  SUBROUTINE CONDITION_MODEL(CONFIG, MODEL, MODEL_GRAD_MEAN, MODEL_GRAD_CURV, &
        AX, AXI, AY, AY_GRADIENT, X, XI, Y, Y_GRADIENT, &
        NUM_THREADS, FIT_STEP, &
        A_STATES, M_STATES, A_GRADS, M_GRADS, &
@@ -1452,45 +1420,8 @@ CONTAINS
        TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), DIMENSION(:) :: MODEL
-    ! Model variables.
-    REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT
-    REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS
-    REAL(KIND=RT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
-    REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
-    REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
-    ! First singular vectors for all non-output matrices.
-    REAL, DIMENSION(:) :: AI_MAX
-    REAL, DIMENSION(:,:) :: AS_MAX
-    REAL, DIMENSION(:) :: MI_MAX
-    REAL, DIMENSION(:,:) :: MS_MAX
-    ! Gradient means for all variables.
-    REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS_GRAD_MEAN
-    ! Gradient curvatures for all variables.
-    REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT_GRAD_CURV
-    REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS_GRAD_CURV
+    REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_MEAN
+    REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_CURV
     ! Data.
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
     INTEGER,       INTENT(IN),    DIMENSION(:,:) :: AXI
@@ -1509,126 +1440,199 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
     INTEGER, DIMENSION(:,:) :: A_ORDER, M_ORDER
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
-    !  Local variables.
-    REAL(KIND=RT) :: SCALAR
-    INTEGER :: I, L, VS, VE, J, R, NT, N, BS, BE, BN, BATCH, TER, TGR
-    ! TODO: The following allocations are for DEVELOPMENT, will be moved eventually.
-    INTEGER, DIMENSION(CONFIG%ADS, NUM_THREADS) :: A_STATE_USAGE
-    INTEGER, DIMENSION(CONFIG%MDS, NUM_THREADS) :: M_STATE_USAGE
-    ! REAL(KIND=RT), DIMENSION(CONFIG%ADS, 2*CONFIG%ADS+1) :: A_TEMP_VECS
-    ! REAL(KIND=RT), DIMENSION(CONFIG%MDS, 2*CONFIG%MDS+1) :: M_TEMP_VECS
     ! 
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
-    ! Ensure that all shift values are within the ranges of the data.
     ! 
-    !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
-    DO L = 1, CONFIG%MNS+CONFIG%ANS+1
-       ! [1,ANS-1] -> A_STATE_VECS
-       IF (L .LT. CONFIG%ANS) THEN
-          AS_MAX(:,L) = MATMUL( &
-               MATMUL(AS_MAX(:,L), A_STATE_VECS(:,:,L)), &
-               TRANSPOSE(A_STATE_VECS(:,:,L)))
-          SCALAR = SUM(AS_MAX(:,L)**2)**(0.25_RT)
-          ! SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
-          A_STATE_VECS(:,:,L) = A_STATE_VECS(:,:,L) / SCALAR
-          A_STATE_SHIFT(:,L) = A_STATE_SHIFT(:,L) / SCALAR
-          AS_MAX(:,L) = AS_MAX(:,L) / (SCALAR**2)
-       ! [ANS] -> A_INPUT_VECS
-       ELSE IF (L .EQ. CONFIG%ANS) THEN
-          AI_MAX(:) = MATMUL( &
-               MATMUL(AI_MAX(:), A_INPUT_VECS(:,:)), &
-               TRANSPOSE(A_INPUT_VECS(:,:)))
-          SCALAR = SUM(AI_MAX(:)**2)**(0.25_RT)
-          ! SCALAR = SQRT(MAXVAL(SUM(A_INPUT_VECS(:,:)**2, 1)))
-          A_INPUT_VECS(:,:) = A_INPUT_VECS(:,:) / SCALAR
-          A_INPUT_SHIFT(:) = A_INPUT_SHIFT(:) / SCALAR
-          AI_MAX(:) = AI_MAX(:) / (SCALAR**2)
-       ! [ANS+1, ANS+MNS-1] -> M_STATE_VECS
-       ELSE IF (L-CONFIG%ANS .LT. CONFIG%MNS) THEN
-          MS_MAX(:,L-CONFIG%ANS) = MATMUL( &
-               MATMUL(MS_MAX(:,L-CONFIG%ANS), M_STATE_VECS(:,:,L-CONFIG%ANS)), &
-               TRANSPOSE(M_STATE_VECS(:,:,L-CONFIG%ANS)))
-          SCALAR = SUM(MS_MAX(:,L-CONFIG%ANS)**2)**(0.25_RT)
-          ! SCALAR = SQRT(MAXVAL(SUM(M_STATE_VECS(:,:,L-CONFIG%ANS)**2, 1)))
-          M_STATE_VECS(:,:,L-CONFIG%ANS) = M_STATE_VECS(:,:,L-CONFIG%ANS) / SCALAR
-          M_STATE_SHIFT(:,L-CONFIG%ANS) = M_STATE_SHIFT(:,L-CONFIG%ANS) / SCALAR
-          MS_MAX(:,L-CONFIG%ANS) = MS_MAX(:,L-CONFIG%ANS) / (SCALAR**2)
-       ! [ANS+MNS] -> M_INPUT_VECS
-       ELSE IF (L .EQ. CONFIG%ANS+CONFIG%MNS) THEN
-          MI_MAX(:) = MATMUL( &
-               MATMUL(MI_MAX(:), M_INPUT_VECS(:,:)), &
-               TRANSPOSE(M_INPUT_VECS(:,:)))
-          SCALAR = SUM(MI_MAX(:)**2)**(0.25_RT)
-          ! SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
-          M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
-          M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
-          MI_MAX(:) = MI_MAX(:) / (SCALAR**2)
-       ! [ANS+MNS+1] -> AY
-       ELSE
-          ! TODO: This zero-centering of AY should be computed in the
-          !       MODEL_GRADIENT routine, similarly for unit scaling
-          !       the output to maintain rough symmetry.
-          ! 
-          ! Update the aggregator model output shift to produce componentwise mean-zero
-          !  values (prevent divergence), but only when there is a model afterwards. 
-          IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0)) THEN
-             MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
-                  CONFIG%STEP_AY_CHANGE * (-SUM(AY(:,:),1) / REAL(SIZE(AY,1),RT)) &
-                  + (1.0_RT - CONFIG%STEP_AY_CHANGE * MODEL(CONFIG%AOSS:CONFIG%AOSE))
-          END IF
-       END IF
-    END DO
-    !$OMP END PARALLEL DO
+    CALL UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
+         MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
+         MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
+         MODEL(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
+         MODEL(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
+         MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
+         MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
+         MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
+         MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
+         MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
+         MODEL(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
+         MODEL(CONFIG%MSOV:CONFIG%MEOV)) ! M output vecs
     ! 
-    ! Bound the embeddings.
+    ! Check rank and optionally replace redundant basis functions.
     ! 
-    !   TODO: Decide how to reasonably bound the embeddings (given how they can
-    !         be rescaled at initialization based on frequency, should probably
-    !         bound the largest component standard deviation (or similar).
-    ! 
-    ! --------------------------------------------------------------
-    ! 
-    !      Orhtogonalize the basis functions inside the model
-    ! 
-    IF ((CONFIG%ORTHOGONALIZING_STEP_FREQUENCY .GT. 0) .AND. &
-         (MOD(FIT_STEP-1,CONFIG%ORTHOGONALIZING_STEP_FREQUENCY) .EQ. 0)) THEN
+    IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
+         (MOD(FIT_STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
        ! Embed all integer inputs into real vector inputs.
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
        ! Compute total rank for values at all internal layers.
        TOTAL_EVAL_RANK = 0
        TOTAL_GRAD_RANK = 0
-       ! Check the rank of all internal aggregator states.
-       IF (CONFIG%ANS .GT. 0) THEN
-          ! Batch computation formula.
-          N = SIZE(A_STATE_TEMP,1)
-          NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%ADS)) ! number of threads (as not to artificially reduce rank)
+       ! Update for the aggregator model.
+       CALL CHECK_MODEL_RANK( &
+            CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ADSO, CONFIG%ADO, NUM_THREADS, &
+            AX(:,:), AY_GRADIENT(:,:), &
+            MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
+            MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
+            MODEL(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
+            MODEL(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
+            MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
+            MODEL_GRAD_MEAN(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
+            MODEL_GRAD_MEAN(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
+            MODEL_GRAD_MEAN(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
+            MODEL_GRAD_MEAN(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
+            MODEL_GRAD_MEAN(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
+            MODEL_GRAD_CURV(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
+            MODEL_GRAD_CURV(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
+            MODEL_GRAD_CURV(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
+            MODEL_GRAD_CURV(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
+            MODEL_GRAD_CURV(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
+            A_STATE_TEMP(:,:), A_STATES(:,:,:), A_LENGTHS(:,:), A_ORDER(:,:), A_GRADS(:,:,:))
+       ! Update for the model.
+       CALL CHECK_MODEL_RANK( &
+            CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, CONFIG%MDSO, CONFIG%MDO, NUM_THREADS, &
+            X(:,:), TRANSPOSE(Y_GRADIENT(:,:)), &
+            MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
+            MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
+            MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
+            MODEL(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
+            MODEL(CONFIG%MSOV:CONFIG%MEOV), & ! M out vecs
+            MODEL_GRAD_MEAN(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
+            MODEL_GRAD_MEAN(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
+            MODEL_GRAD_MEAN(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
+            MODEL_GRAD_MEAN(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
+            MODEL_GRAD_MEAN(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
+            MODEL_GRAD_CURV(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
+            MODEL_GRAD_CURV(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
+            MODEL_GRAD_CURV(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
+            MODEL_GRAD_CURV(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
+            MODEL_GRAD_CURV(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
+            M_STATE_TEMP(:,:), M_STATES(:,:,:), M_LENGTHS(:,:), M_ORDER(:,:), M_GRADS(:,:,:))
+    END IF
+
+  CONTAINS
+
+    ! Make max length vector in each weight matrix have unit length.
+    SUBROUTINE UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
+         A_INPUT_VECS, A_INPUT_SHIFT, A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, &
+         M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
+      TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
+      INTEGER, INTENT(IN) :: NUM_THREADS
+      REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
+      ! Local variables.
+      INTEGER :: L
+      REAL(KIND=RT) :: SCALAR
+      ! 
+      !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
+      DO L = 1, CONFIG%MNS+CONFIG%ANS+1
+         ! [1,ANS-1] -> A_STATE_VECS
+         IF (L .LT. CONFIG%ANS) THEN
+            SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
+            A_STATE_VECS(:,:,L) = A_STATE_VECS(:,:,L) / SCALAR
+            A_STATE_SHIFT(:,L) = A_STATE_SHIFT(:,L) / SCALAR
+            ! [ANS] -> A_INPUT_VECS
+         ELSE IF (L .EQ. CONFIG%ANS) THEN
+            SCALAR = SQRT(MAXVAL(SUM(A_INPUT_VECS(:,:)**2, 1)))
+            A_INPUT_VECS(:,:) = A_INPUT_VECS(:,:) / SCALAR
+            A_INPUT_SHIFT(:) = A_INPUT_SHIFT(:) / SCALAR
+            ! [ANS+1, ANS+MNS-1] -> M_STATE_VECS
+         ELSE IF (L-CONFIG%ANS .LT. CONFIG%MNS) THEN
+            SCALAR = SQRT(MAXVAL(SUM(M_STATE_VECS(:,:,L-CONFIG%ANS)**2, 1)))
+            M_STATE_VECS(:,:,L-CONFIG%ANS) = M_STATE_VECS(:,:,L-CONFIG%ANS) / SCALAR
+            M_STATE_SHIFT(:,L-CONFIG%ANS) = M_STATE_SHIFT(:,L-CONFIG%ANS) / SCALAR
+            ! [ANS+MNS] -> M_INPUT_VECS
+         ELSE IF (L .EQ. CONFIG%ANS+CONFIG%MNS) THEN
+            SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
+            M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
+            M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
+            ! [ANS+MNS+1] -> AY
+         ELSE
+            ! Update the aggregator model output shift to produce componentwise mean-zero
+            !  values (prevent divergence), but only when there is a model afterwards. 
+            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0)) THEN
+               MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
+                    (1.0_RT - CONFIG%STEP_AY_CHANGE) *  MODEL(CONFIG%AOSS:CONFIG%AOSE) &
+                    - CONFIG%STEP_AY_CHANGE  * (SUM(AY(:,:),1) / REAL(SIZE(AY,1),RT))
+            END IF
+         END IF
+      END DO
+      !$OMP END PARALLEL DO
+    END SUBROUTINE UNIT_MAX_NORM
+
+    ! Check the rank of all internal states.
+    SUBROUTINE CHECK_MODEL_RANK(DI, DS, NS, DSO, DO, NUM_THREADS, X, Y_GRADIENT, &
+         INPUT_VECS, INPUT_SHIFT, STATE_VECS, STATE_SHIFT, OUTPUT_VECS, &
+         INPUT_VECS_GRAD_MEAN, INPUT_SHIFT_GRAD_MEAN, STATE_VECS_GRAD_MEAN, STATE_SHIFT_GRAD_MEAN, OUTPUT_VECS_GRAD_MEAN, &
+         INPUT_VECS_GRAD_CURV, INPUT_SHIFT_GRAD_CURV, STATE_VECS_GRAD_CURV, STATE_SHIFT_GRAD_CURV, OUTPUT_VECS_GRAD_CURV, &
+         STATE_TEMP, STATES, LENGTHS, ORDER, GRADS)
+      INTEGER, INTENT(IN) :: DI, DS, NS, DSO, DO, NUM_THREADS
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: X, Y_GRADIENT
+      ! Model variables.
+      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS
+      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT
+      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS
+      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT
+      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS
+      ! Gradient means for all variables.
+      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_MEAN
+      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_MEAN
+      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_MEAN
+      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_MEAN
+      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_MEAN
+      ! Gradient curvatures for all variables.
+      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_CURV
+      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_CURV
+      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_CURV
+      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_CURV
+      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_CURV
+      ! Temporary variables.
+      REAL(KIND=RT), DIMENSION(:,:) :: STATE_TEMP
+      REAL(KIND=RT), DIMENSION(:,:,:) :: STATES
+      REAL(KIND=RT), DIMENSION(:,:) :: LENGTHS
+      INTEGER, DIMENSION(:,:) :: ORDER
+      REAL(KIND=RT), DIMENSION(:,:,:) :: GRADS
+      INTEGER :: BATCH, BS, BE, BN, I, N, NT, TER, TGR
+      ! TODO: This allocation should occur at workspace initialization.
+      INTEGER, DIMENSION(DS, NUM_THREADS) :: STATE_USAGE
+      ! 
+      ! Batch computation formula.
+       IF (NS .GT. 0) THEN
+          N = SIZE(STATE_TEMP,1)
+          NT = MIN(NUM_THREADS, MAX(1, N / DS)) ! number of threads (as not to artificially reduce rank)
           BN = (N + NT - 1) / NT ! = CEIL(N / NT)
        END IF
-       DO I = 1, CONFIG%ANS
-          A_STATE_USAGE(:,:) = 0
+       DO I = 1, NS
+          STATE_USAGE(:,:) = 0
           TER = 0; TGR = 0;
-          !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NT) &
+          !$OMP PARALLEL DO PRIVATE(BS,BE) NUM_THREADS(NT) &
           !$OMP& REDUCTION(MAX: TER, TGR)
           DO BATCH = 1, NT
              BS = BN*(BATCH-1) + 1
              BE = MIN(N, BN*BATCH)
              ! Compute model state rank.
-             A_STATE_TEMP(BS:BE,:) = A_STATES(BS:BE,:,I)
+             STATE_TEMP(BS:BE,:) = STATES(BS:BE,:,I)
              ! ! TODO: multiply column values by 2-norm magnitude of output weights
-             ! IF (I .LT. CONFIG%ANS) THEN
-             !    DO J = 1, CONFIG%ADS
-             !       A_STATE_TEMP(BS:BE,J) = A_STATE_TEMP(BS:BE,J) * NORM2(A_STATE_VECS(J,:,I))
+             ! IF (I .LT. NS) THEN
+             !    DO J = 1, DS
+             !       STATE_TEMP(BS:BE,J) = STATE_TEMP(BS:BE,J) * NORM2(STATE_VECS(J,:,I))
              !    END DO
              ! ELSE
-             !    DO J = 1, CONFIG%ADS
-             !       A_STATE_TEMP(BS:BE,J) = A_STATE_TEMP(BS:BE,J) * NORM2(A_OUTPUT_VECS(J,:))
+             !    DO J = 1, DS
+             !       STATE_TEMP(BS:BE,J) = STATE_TEMP(BS:BE,J) * NORM2(OUTPUT_VECS(J,:))
              !    END DO
              ! END IF
-             CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TER, A_ORDER(:,BATCH))
-             A_STATE_USAGE(A_ORDER(:TER,BATCH),BATCH) = 1
+             CALL ORTHOGONALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TER, ORDER(:,BATCH))
+             STATE_USAGE(ORDER(:TER,BATCH),BATCH) = 1
              ! Compute grad state rank.
-             A_STATE_TEMP(BS:BE,:) = A_GRADS(BS:BE,:,I)
-             CALL ORTHOGONALIZE(A_STATE_TEMP(BS:BE,:), A_LENGTHS(:,BATCH), TGR, A_ORDER(:,BATCH))
+             STATE_TEMP(BS:BE,:) = GRADS(BS:BE,:,I)
+             CALL ORTHOGONALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TGR, ORDER(:,BATCH))
           END DO
           !$OMP END PARALLEL DO
           TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
@@ -1637,138 +1641,51 @@ CONTAINS
           ! If basis replacement is enabled..
           IF (CONFIG%BASIS_REPLACEMENT) THEN
              ! Sum the "usage" of internal nodes to see which are entirely unuseful.
-             A_STATE_USAGE(:,1) = SUM(A_STATE_USAGE(:,:), 2)
+             STATE_USAGE(:,1) = SUM(STATE_USAGE(:,:), 2)
              ! Replace the basis functions with a policy that ensures convergence.
              IF (I .EQ. 1) THEN
-                IF (CONFIG%ANS .GT. 1) THEN
+                IF (NS .GT. 1) THEN
                    CALL REPLACE_BASIS_FUNCTIONS( &
-                        A_STATE_USAGE(:,1), &
-                        AX(:,:), &
-                        A_STATES(:,:,I), &
-                        A_GRADS(:,:,I+1), &
-                        A_INPUT_VECS(:,:),   A_INPUT_VECS_GRAD_MEAN(:,:),   A_INPUT_VECS_GRAD_CURV(:,:), &
-                        A_INPUT_SHIFT(:),    A_INPUT_SHIFT_GRAD_MEAN(:),    A_INPUT_SHIFT_GRAD_CURV(:),  &
-                        A_STATE_VECS(:,:,I), A_STATE_VECS_GRAD_MEAN(:,:,I), A_STATE_VECS_GRAD_CURV(:,:,I))
+                        STATE_USAGE(:,1), &
+                        X(:,:), &
+                        STATES(:,:,I), &
+                        GRADS(:,:,I+1), &
+                        INPUT_VECS(:,:),   INPUT_VECS_GRAD_MEAN(:,:),   INPUT_VECS_GRAD_CURV(:,:), &
+                        INPUT_SHIFT(:),    INPUT_SHIFT_GRAD_MEAN(:),    INPUT_SHIFT_GRAD_CURV(:),  &
+                        STATE_VECS(:,:,I), STATE_VECS_GRAD_MEAN(:,:,I), STATE_VECS_GRAD_CURV(:,:,I))
                 ELSE
                    CALL REPLACE_BASIS_FUNCTIONS( &
-                        A_STATE_USAGE(:,1), &
-                        AX(:,:), &
-                        A_STATES(:,:,I), &
-                        AY_GRADIENT(:,:), &
-                        A_INPUT_VECS(:,:),  A_INPUT_VECS_GRAD_MEAN(:,:),  A_INPUT_VECS_GRAD_CURV(:,:), &
-                        A_INPUT_SHIFT(:),   A_INPUT_SHIFT_GRAD_MEAN(:),   A_INPUT_SHIFT_GRAD_CURV(:),  &
-                        A_OUTPUT_VECS(:,:), A_OUTPUT_VECS_GRAD_MEAN(:,:), A_OUTPUT_VECS_GRAD_CURV(:,:))
+                        STATE_USAGE(:,1), &
+                        X(:,:), &
+                        STATES(:,:,I), &
+                        Y_GRADIENT(:,:), &
+                        INPUT_VECS(:,:),  INPUT_VECS_GRAD_MEAN(:,:),  INPUT_VECS_GRAD_CURV(:,:), &
+                        INPUT_SHIFT(:),   INPUT_SHIFT_GRAD_MEAN(:),   INPUT_SHIFT_GRAD_CURV(:),  &
+                        OUTPUT_VECS(:,:), OUTPUT_VECS_GRAD_MEAN(:,:), OUTPUT_VECS_GRAD_CURV(:,:))
                 END IF
-             ELSE IF (I .EQ. CONFIG%ANS) THEN
+             ELSE IF (I .EQ. NS) THEN
                 CALL REPLACE_BASIS_FUNCTIONS( &
-                     A_STATE_USAGE(:,1), &
-                     A_STATES(:,:,I-1), &
-                     A_STATES(:,:,I), &
-                     AY_GRADIENT(:,:), &
-                     A_STATE_VECS(:,:,I-1), A_STATE_VECS_GRAD_MEAN(:,:,I-1), A_STATE_VECS_GRAD_CURV(:,:,I-1), &
-                     A_STATE_SHIFT(:,I-1),  A_STATE_SHIFT_GRAD_MEAN(:,I-1),  A_STATE_SHIFT_GRAD_CURV(:,I-1),  &
-                     A_OUTPUT_VECS(:,:),    A_OUTPUT_VECS_GRAD_MEAN(:,:),    A_OUTPUT_VECS_GRAD_CURV(:,:))
+                     STATE_USAGE(:,1), &
+                     STATES(:,:,I-1), &
+                     STATES(:,:,I), &
+                     Y_GRADIENT(:,:), &
+                     STATE_VECS(:,:,I-1), STATE_VECS_GRAD_MEAN(:,:,I-1), STATE_VECS_GRAD_CURV(:,:,I-1), &
+                     STATE_SHIFT(:,I-1),  STATE_SHIFT_GRAD_MEAN(:,I-1),  STATE_SHIFT_GRAD_CURV(:,I-1),  &
+                     OUTPUT_VECS(:,:),    OUTPUT_VECS_GRAD_MEAN(:,:),    OUTPUT_VECS_GRAD_CURV(:,:))
              ELSE
                 CALL REPLACE_BASIS_FUNCTIONS( &
-                     A_STATE_USAGE(:,1), &
-                     A_STATES(:,:,I-1), &
-                     A_STATES(:,:,I), &
-                     A_GRADS(:,:,I+1), &
-                     A_STATE_VECS(:,:,I-1), A_STATE_VECS_GRAD_MEAN(:,:,I-1), A_STATE_VECS_GRAD_CURV(:,:,I-1), &
-                     A_STATE_SHIFT(:,I-1),  A_STATE_SHIFT_GRAD_MEAN(:,I-1),  A_STATE_SHIFT_GRAD_CURV(:,I-1),  &
-                     A_STATE_VECS(:,:,I),   A_STATE_VECS_GRAD_MEAN(:,:,I),   A_STATE_VECS_GRAD_CURV(:,:,I))
+                     STATE_USAGE(:,1), &
+                     STATES(:,:,I-1), &
+                     STATES(:,:,I), &
+                     GRADS(:,:,I+1), &
+                     STATE_VECS(:,:,I-1), STATE_VECS_GRAD_MEAN(:,:,I-1), STATE_VECS_GRAD_CURV(:,:,I-1), &
+                     STATE_SHIFT(:,I-1),  STATE_SHIFT_GRAD_MEAN(:,I-1),  STATE_SHIFT_GRAD_CURV(:,I-1),  &
+                     STATE_VECS(:,:,I),   STATE_VECS_GRAD_MEAN(:,:,I),   STATE_VECS_GRAD_CURV(:,:,I))
              END IF
           END IF ! END basis replacement
           ! --------------------------------------------------------------------------------
        END DO
-       ! 
-       ! Check the rank of all internal model states.
-       IF (CONFIG%MNS .GT. 0) THEN
-          ! Batch computation formula.
-          N = SIZE(M_STATE_TEMP,1)
-          NT = MIN(NUM_THREADS, MAX(1, N / CONFIG%MDS)) ! number of threads (as not to artificially reduce rank)
-          BN = (N + NT - 1) / NT ! = CEIL(N / NT)
-       END IF
-       DO I = 1, CONFIG%MNS
-          M_STATE_USAGE(:,:) = 0
-          TER = 0; TGR = 0;
-          !$OMP PARALLEL DO PRIVATE(R,BS,BE) NUM_THREADS(NT) &
-          !$OMP& REDUCTION(MAX: TER, TGR)
-          DO BATCH = 1, NT
-             BS = BN*(BATCH-1) + 1
-             BE= MIN(N, BN*BATCH)
-             ! Compute model state rank.
-             M_STATE_TEMP(BS:BE,:) = M_STATES(BS:BE,:,I)
-             ! ! TODO: multiply column values by 2-norm magnitude of output weights
-             ! IF (I .LT. CONFIG%MNS) THEN
-             !    DO J = 1, CONFIG%MDS
-             !       M_STATE_TEMP(BS:BE,J) = M_STATE_TEMP(BS:BE,J) * NORM2(M_STATE_VECS(J,:,I))
-             !    END DO
-             ! ELSE
-             !    DO J = 1, CONFIG%MDS
-             !       M_STATE_TEMP(BS:BE,J) = M_STATE_TEMP(BS:BE,J) * NORM2(M_OUTPUT_VECS(J,:))
-             !    END DO
-             ! END IF
-             CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TER, M_ORDER(:,BATCH))
-             M_STATE_USAGE(M_ORDER(:TER,BATCH),BATCH) = 1
-             ! Compute grad state rank.
-             M_STATE_TEMP(BS:BE,:) = M_GRADS(BS:BE,:,I)
-             CALL ORTHOGONALIZE(M_STATE_TEMP(BS:BE,:), M_LENGTHS(:,BATCH), TGR, M_ORDER(:,BATCH))
-          END DO
-          !$OMP END PARALLEL DO
-          TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
-          TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + TGR
-          ! --------------------------------------------------------------------------------
-          ! If basis replacement is enabled..
-          IF (CONFIG%BASIS_REPLACEMENT) THEN
-             ! Sum the "usage" of internal nodes to see which are entirely unuseful.
-             M_STATE_USAGE(:,1) = SUM(M_STATE_USAGE(:,:), 2)
-             ! Replace the basis functions with a policy that ensures convergence.
-             IF (I .EQ. 1) THEN
-                IF (CONFIG%MNS .GT. 1) THEN
-                   CALL REPLACE_BASIS_FUNCTIONS( &
-                        M_STATE_USAGE(:,1), &
-                        X(:,:), &
-                        M_STATES(:,:,I), &
-                        M_GRADS(:,:,I+1), &
-                        M_INPUT_VECS(:,:),   M_INPUT_VECS_GRAD_MEAN(:,:),   M_INPUT_VECS_GRAD_CURV(:,:), &
-                        M_INPUT_SHIFT(:),    M_INPUT_SHIFT_GRAD_MEAN(:),    M_INPUT_SHIFT_GRAD_CURV(:),  &
-                        M_STATE_VECS(:,:,I), M_STATE_VECS_GRAD_MEAN(:,:,I), M_STATE_VECS_GRAD_CURV(:,:,I))
-                ELSE
-                   CALL REPLACE_BASIS_FUNCTIONS( &
-                        M_STATE_USAGE(:,1), &
-                        X(:,:), &
-                        M_STATES(:,:,I), &
-                        TRANSPOSE(Y_GRADIENT(:,:)), &
-                        M_INPUT_VECS(:,:),  M_INPUT_VECS_GRAD_MEAN(:,:),  M_INPUT_VECS_GRAD_CURV(:,:), &
-                        M_INPUT_SHIFT(:),   M_INPUT_SHIFT_GRAD_MEAN(:),   M_INPUT_SHIFT_GRAD_CURV(:),  &
-                        M_OUTPUT_VECS(:,:), M_OUTPUT_VECS_GRAD_MEAN(:,:), M_OUTPUT_VECS_GRAD_CURV(:,:))
-                END IF
-             ELSE IF (I .EQ. CONFIG%MNS) THEN
-                CALL REPLACE_BASIS_FUNCTIONS( &
-                     M_STATE_USAGE(:,1), &
-                     M_STATES(:,:,I-1), &
-                     M_STATES(:,:,I), &
-                     TRANSPOSE(Y_GRADIENT(:,:)), &
-                     M_STATE_VECS(:,:,I-1), M_STATE_VECS_GRAD_MEAN(:,:,I-1), M_STATE_VECS_GRAD_CURV(:,:,I-1), &
-                     M_STATE_SHIFT(:,I-1),  M_STATE_SHIFT_GRAD_MEAN(:,I-1),  M_STATE_SHIFT_GRAD_CURV(:,I-1),  &
-                     M_OUTPUT_VECS(:,:),    M_OUTPUT_VECS_GRAD_MEAN(:,:),    M_OUTPUT_VECS_GRAD_CURV(:,:))
-             ELSE
-                CALL REPLACE_BASIS_FUNCTIONS( &
-                     M_STATE_USAGE(:,1), &
-                     M_STATES(:,:,I-1), &
-                     M_STATES(:,:,I), &
-                     M_GRADS(:,:,I+1), &
-                     M_STATE_VECS(:,:,I-1), M_STATE_VECS_GRAD_MEAN(:,:,I-1), M_STATE_VECS_GRAD_CURV(:,:,I-1), &
-                     M_STATE_SHIFT(:,I-1),  M_STATE_SHIFT_GRAD_MEAN(:,I-1),  M_STATE_SHIFT_GRAD_CURV(:,I-1),  &
-                     M_STATE_VECS(:,:,I),   M_STATE_VECS_GRAD_MEAN(:,:,I),   M_STATE_VECS_GRAD_CURV(:,:,I))
-             END IF
-          END IF ! END basis replacement
-          ! --------------------------------------------------------------------------------
-       END DO
-    END IF
-
-  CONTAINS
+    END SUBROUTINE CHECK_MODEL_RANK
 
     ! Create new basis functions when the total rank of the current
     ! state is not full with the following priorities:
@@ -1809,7 +1726,7 @@ CONTAINS
       !   quickly find the "most aligned" shift term (the shift that
       !   maximizes the dot product of the vectors assuming rectification).
       ! 
-      ! - Update CONDITION_MODEL to:
+      ! - Update REPLACE_BASIS_FUNCTIONS to:
       !    sum the number of times a component had no rank across threads
       !    (not necessary) swap weights for the no-rank components to the back
       !    (not necessary) swap no-rank state component values into contiguous memory at back
@@ -1862,15 +1779,18 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
     INTEGER,       INTENT(OUT) :: INFO
     ! Local variables.
-    !    measured gradient contribution of all input points
-    REAL(KIND=RT), DIMENSION(SIZE(AX,2)) :: AX_CONTRIB
-    REAL(KIND=RT), DIMENSION(SIZE(X,2)) :: X_CONTRIB
-    !    count of how many steps have been taken since last usage
-    INTEGER, DIMENSION(SIZE(AX,2)) :: AX_UNUSED_STEPS
-    INTEGER, DIMENSION(SIZE(X,2)) :: X_UNUSED_STEPS
-    !    indices (used for sorting and selecting points for gradient computation)
-    INTEGER, DIMENSION(SIZE(AX,2)) :: AX_INDICES
-    INTEGER, DIMENSION(SIZE(X,2)) :: X_INDICES
+    ! ------------------------------------------------------------------
+    !                DEVELOPING BATCHED EVALUATION CODE
+    ! !    measured gradient contribution of all input points
+    ! REAL(KIND=RT), DIMENSION(SIZE(AX,2)) :: AX_CONTRIB
+    ! REAL(KIND=RT), DIMENSION(SIZE(X,2)) :: X_CONTRIB
+    ! !    count of how many steps have been taken since last usage
+    ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_UNUSED_STEPS
+    ! INTEGER, DIMENSION(SIZE(X,2)) :: X_UNUSED_STEPS
+    ! !    indices (used for sorting and selecting points for gradient computation)
+    ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_INDICES
+    ! INTEGER, DIMENSION(SIZE(X,2)) :: X_INDICES
+    ! ------------------------------------------------------------------
     !    "backspace" character array for printing to the same line repeatedly
     CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),27)
     !    temporary holders for overwritten CONFIG attributes
@@ -1910,10 +1830,6 @@ CONTAINS
     IF (INFO .NE. 0) RETURN
     ! Unpack all of the work storage into the expected shapes.
     CALL UNPACKED_MINIMIZE_MSE(&
-         RWORK(CONFIG%SAIM : CONFIG%EAIM), & ! AI_MAX(ADI)
-         RWORK(CONFIG%SASM : CONFIG%EASM), & ! AS_MAX(ADS,ANS-1)
-         RWORK(CONFIG%SMIM : CONFIG%EMIM), & ! MI_MAX(MDI)
-         RWORK(CONFIG%SMSM : CONFIG%EMSM), & ! MS_MAX(MDS,MNS-1)
          RWORK(CONFIG%SMG : CONFIG%EMG), & ! MODEL_GRAD(NUM_VARS,NUM_THREADS)
          RWORK(CONFIG%SMGM : CONFIG%EMGM), & ! MODEL_GRAD_MEAN(NUM_VARS)
          RWORK(CONFIG%SMGC : CONFIG%EMGC), & ! MODEL_GRAD_CURV(NUM_VARS)
@@ -1954,7 +1870,6 @@ CONTAINS
 
     ! Unpack the work arrays into the proper shapes.
     SUBROUTINE UNPACKED_MINIMIZE_MSE(&
-         AI_MAX, AS_MAX, MI_MAX, MS_MAX, &
          MODEL_GRAD, MODEL_GRAD_MEAN, MODEL_GRAD_CURV, BEST_MODEL, &
          Y_GRADIENT, M_STATES, M_GRADS, A_STATES, A_GRADS, &
          AY, AY_GRADIENT, X_RESCALE, XI_SHIFT, XI_RESCALE, &
@@ -1964,10 +1879,6 @@ CONTAINS
          UPDATE_INDICES, BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS, &
          A_ORDER, M_ORDER)
       ! Definition of unpacked work storage.
-      REAL(KIND=RT), DIMENSION(CONFIG%ADI) :: AI_MAX
-      REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: AS_MAX
-      REAL(KIND=RT), DIMENSION(CONFIG%MDI) :: MI_MAX
-      REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: MS_MAX
       REAL(KIND=RT), DIMENSION(CONFIG%NUM_VARS,CONFIG%NUM_THREADS) :: MODEL_GRAD
       REAL(KIND=RT), DIMENSION(CONFIG%NUM_VARS) :: MODEL_GRAD_MEAN, MODEL_GRAD_CURV, BEST_MODEL
       REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADS, CONFIG%ANS+1) :: A_STATES, A_GRADS
@@ -2042,15 +1953,6 @@ CONTAINS
            MODEL(CONFIG%MSEV:CONFIG%MEEV), &
            MODEL(CONFIG%ASOV:CONFIG%AEOV), INFO)
       IF (INFO .NE. 0) RETURN
-      ! Initialize the first singular vectors *_MAX
-      AI_MAX(:) = 0.0_RT
-      IF (CONFIG%ADI .GT. 0) AI_MAX(1) = 1.0_RT
-      AS_MAX(:,:) = 0.0_RT
-      IF (CONFIG%ANS .GT. 1) AS_MAX(1,:) = 1.0_RT
-      MI_MAX(:) = 0.0_RT
-      IF (CONFIG%MDI .GT. 0) MI_MAX(1) = 1.0_RT
-      MS_MAX(:,:) = 0.0_RT
-      IF (CONFIG%MNS .GT. 1) MS_MAX(1,:) = 1.0_RT
       ! Set the configured number of threads to 1 to prevent nested parallelization.
       NUM_THREADS = CONFIG%NUM_THREADS
       CONFIG%NUM_THREADS = 1
@@ -2175,46 +2077,15 @@ CONTAINS
          ! Rescale internal vectors to have a maximum 2-norm of 1.
          ! Center the outputs of the aggregator model about the origin.
          ! Measure the "total rank" of all internal state representations of data.
-         CALL CONDITION_MODEL(CONFIG, MODEL(:), &
-              MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
-              MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
-              MODEL(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
-              MODEL(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
-              MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
-              MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
-              MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
-              MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
-              MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
-              MODEL(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
-              MODEL(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
-              AI_MAX(:), AS_MAX(:,:), MI_MAX(:), MS_MAX(:,:), &
-              MODEL_GRAD_MEAN(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
-              MODEL_GRAD_MEAN(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
-              MODEL_GRAD_MEAN(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
-              MODEL_GRAD_MEAN(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
-              MODEL_GRAD_MEAN(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
-              MODEL_GRAD_MEAN(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
-              MODEL_GRAD_MEAN(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
-              MODEL_GRAD_MEAN(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
-              MODEL_GRAD_MEAN(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
-              MODEL_GRAD_MEAN(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
-              MODEL_GRAD_CURV(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
-              MODEL_GRAD_CURV(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
-              MODEL_GRAD_CURV(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
-              MODEL_GRAD_CURV(CONFIG%ASSS:CONFIG%AESS), & ! A state shift
-              MODEL_GRAD_CURV(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
-              MODEL_GRAD_CURV(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
-              MODEL_GRAD_CURV(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
-              MODEL_GRAD_CURV(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
-              MODEL_GRAD_CURV(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
-              MODEL_GRAD_CURV(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
-              AX(:,:), AXI(:,:), AY(:,:), AY_GRADIENT(:,:), &
+         CALL CONDITION_MODEL(CONFIG, &
+              MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
+              AX(:,:), AXI(:,:), AY(:,:), AY_GRADIENT(:,:), & ! Data.
               X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
-              NUM_THREADS, CONFIG%STEPS_TAKEN, &
-              A_STATES(:,:,:), M_STATES(:,:,:), &
-              A_GRADS(:,:,:), M_GRADS(:,:,:), &
-              A_LENGTHS(:,:), M_LENGTHS(:,:), &
-              A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), &
+              NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
+              A_STATES(:,:,:), M_STATES(:,:,:), & ! State values at basis functions.
+              A_GRADS(:,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.
+              A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
+              A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
               A_ORDER(:,:), M_ORDER(:,:), &
               TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -

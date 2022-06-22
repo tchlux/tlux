@@ -1,2 +1,2 @@
-from .apos import APOS
+from .axy import AXY
 from .delaunay import Delaunay, QHullDelaunay

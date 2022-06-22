@@ -610,9 +610,9 @@ if __name__ == "__main__":
 
     TEST_FIT_SIZE = False
     TEST_WEIGHTING = False
-    TEST_SAVE_LOAD = True
+    TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
-    TEST_AGGREGATE = False
+    TEST_AGGREGATE = True
     TEST_LARGE_MODEL = False
     SHOW_VISUALS = True
 
