@@ -1,5 +1,9 @@
 ! TODO:
 ! 
+! - Run some tests to determine how weights should be updated on conditioning
+!   to not change the output of the model *at all*, and similarly update the
+!   gradient estimates to reflect those changes as well.
+! 
 ! - Verify that the *condition model* operation correctly updates the gradient
 !   related variables (mean and curvature).
 ! 
@@ -674,7 +678,7 @@ CONTAINS
        INFO = -3
        RETURN
     ELSE IF (NUM_BATCHES .LT. 1) THEN
-       PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches is negative.', NUM_BATCHES
+       PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches is not positive.', NUM_BATCHES
        INFO = -4
        RETURN
     END IF
@@ -785,6 +789,8 @@ CONTAINS
     ! Internal values.
     INTEGER :: I, BATCH, NB, BN, BS, BE, BT, GS, GE, NT, E
     INTEGER, DIMENSION(:), ALLOCATABLE :: BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS
+    ! If there are no points to evaluate, then immediately return.
+    IF (SIZE(Y,2,KIND=INT64) .EQ. 0) RETURN
     ! Set up batching for parallelization.
     NB = MIN(SIZE(Y,2), CONFIG%NUM_THREADS)
     NT = MIN(CONFIG%NUM_THREADS, NB)
@@ -800,7 +806,7 @@ CONTAINS
           BS = BATCHA_STARTS(BATCH)
           BE = BATCHA_ENDS(BATCH)
           BT = BE-BS+1
-          IF (BT .EQ. 0) CYCLE batch_evaluation
+          IF (BT .LE. 0) CYCLE batch_evaluation
           ! Apply shift terms to aggregator inputs.
           IF ((CONFIG%APPLY_SHIFT) .AND. (CONFIG%ADN .GT. 0)) THEN
              DO I = BS, BE
@@ -855,7 +861,7 @@ CONTAINS
        BT = BE-BS+1
        ! Positional model forward pass.
        IF (CONFIG%MDO .GT. 0) THEN
-          IF (BT .EQ. 0) CYCLE batch_evaluation
+          IF (BT .LE. 0) CYCLE batch_evaluation
           ! Apply shift terms to numeric model inputs.
           IF ((CONFIG%APPLY_SHIFT) .AND. (CONFIG%MDN .GT. 0)) THEN
              DO I = BS, BE
@@ -1238,6 +1244,8 @@ CONTAINS
     ! Output and optional inputs.
     INTEGER, INTENT(INOUT) :: INFO
     INTEGER :: L, D
+    ! Exit early if there is no data.
+    IF (SIZE(Y,2,KIND=INT64) .EQ. 0) RETURN
     ! Embed all integer inputs into real vector inputs.
     CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     ! Evaluate the model, storing internal states (for gradient calculation).
