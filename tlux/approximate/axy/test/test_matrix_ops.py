@@ -4,33 +4,6 @@ import fmodpy
 # Matrix operations module.
 mops = fmodpy.fimport("../matrix_operations.f90", blas=True, lapack=True).matrix_operations
 
-# --------------------------------------------------------------------
-#                         ORTHOGONALIZE
-
-# Test orthogonalization.
-d = 4
-m = np.random.random(size=(d,d)).astype("float32")
-l = np.zeros(d, dtype="float32")
-
-print("m: ")
-print(m)
-print(m.T @ m)
-print(m @ m.T)
-print()
-
-mops.orthogonalize(m.T, l)
-
-print("m: ")
-print(m)
-print(m.T @ m)
-print(m @ m.T)
-print()
-
-print("l: ")
-print(l)
-print()
-
-exit()
 
 # --------------------------------------------------------------------
 #                        RANDOM_UNIT_VECTORS
@@ -80,6 +53,7 @@ print()
 print("mo_x (scaled to full output):")
 upscale = np.linalg.lstsq(np.matmul(a, mo_x), b, rcond=None)[0]
 print(np.matmul(mo_x, upscale))
+print()
 
 
 # Generate a visiaul.
@@ -103,3 +77,57 @@ if (bd > 0):
     p.show(x_range=[-1.1,1.1], y_range=[-1.1,1.1], z_range=[-1.1,1.1])
 else:
     p.show(x_range=[-2.3,2.3], y_range=[-1.1,1.1])
+print()
+
+# --------------------------------------------------------------------
+#                         RADIALIZE
+
+# TODO: Formalize this test.
+x = np.asarray([
+    [-0.3, 10.0],
+    [-0.1, 10.0],
+    [-0.2, 20.0],
+    [-0.2, 00.0]
+]).astype("float32").T
+
+shift = np.zeros(x.shape[0], dtype="float32")
+vecs = np.zeros((x.shape[0],)*2, dtype="float32", order="F")
+
+a, b, c = mops.radialize(x, shift, vecs)
+
+print("Test RADIALIZE (incomplete)")
+print(a)
+print()
+print(b)
+print()
+print(c)
+exit()
+
+
+# --------------------------------------------------------------------
+#                         ORTHOGONALIZE
+
+# Test orthogonalization.
+d = 4
+m = np.random.random(size=(d,d)).astype("float32")
+l = np.zeros(d, dtype="float32")
+
+print("m: ")
+print(m)
+print(m.T @ m)
+print(m @ m.T)
+print()
+
+mops.orthogonalize(m.T, l)
+
+print("m: ")
+print(m)
+print(m.T @ m)
+print(m @ m.T)
+print()
+
+print("l: ")
+print(l)
+print()
+
+exit()

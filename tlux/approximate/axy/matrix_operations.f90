@@ -53,53 +53,6 @@ CONTAINS
     ! END IF
   END SUBROUTINE GEMM
 
-  ! Generate randomly distributed vectors on the N-sphere.
-  SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: COLUMN_VECTORS
-    ! Local variables.
-    REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS
-    REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
-    REAL(KIND=RT) :: LEN
-    INTEGER :: I, J, K
-    ! Skip empty vector sets.
-    IF (SIZE(COLUMN_VECTORS) .LE. 0) RETURN
-    ! Generate random numbers in the range [0,1].
-    CALL RANDOM_NUMBER(COLUMN_VECTORS(:,:))
-    CALL RANDOM_NUMBER(TEMP_VECS(:,:))
-    ! Map the random uniform numbers to a radial distribution.
-    COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
-    ! Orthogonalize the vectors in (random) order.
-    IF (SIZE(COLUMN_VECTORS,1) .GT. 1) THEN
-       ! Compute the last vector that is part of the orthogonalization.
-       K = MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
-       ! Orthogonalize the "lazy way" without column pivoting.
-       ! Could result in imperfectly orthogonal vectors (because of
-       ! rounding errors being enlarged by upscaling), that is acceptable.
-       DO I = 1, K-1
-          LEN = NORM2(COLUMN_VECTORS(:,I))
-          IF (LEN .GT. 0.0_RT) THEN
-             ! Make this column unit length.
-             COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
-             ! Compute multipliers (store in row of TEMP_VECS) and subtract
-             ! from all remaining columns (doing the orthogonalization).
-             TEMP_VECS(1,I+1:K) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:K))
-             DO J = I+1, K
-                COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(1,J) * COLUMN_VECTORS(:,I)
-             END DO
-          ELSE
-             ! This should not happen (unless the vectors are at least in the
-             !   tens of thousands, in which case a different method should be used).
-             PRINT *, 'ERROR: Random unit vector failed to initialize correctly, rank deficient.'
-          END IF
-       END DO
-       ! Make the rest of the column vectors unit length.
-       DO I = K, SIZE(COLUMN_VECTORS,2)
-          LEN = NORM2(COLUMN_VECTORS(:,I))
-          IF (LEN .GT. 0.0_RT)  COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
-       END DO
-    END IF
-  END SUBROUTINE RANDOM_UNIT_VECTORS
-
   ! Orthogonalize and normalize column vectors of A with pivoting.
   SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER, MULTIPLIERS)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
@@ -176,7 +129,7 @@ CONTAINS
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
-    ! Local variables.
+    ! Local variables. LOCAL ALLOCATION
     REAL(KIND=RT), DIMENSION(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))) :: ATA, Q
     INTEGER :: I, J, K, NUM_STEPS
     REAL(KIND=RT) :: MULTIPLIER
@@ -247,13 +200,12 @@ CONTAINS
     LOGICAL, INTENT(IN), OPTIONAL :: INVERT_RESULT
     LOGICAL, INTENT(IN), OPTIONAL :: FLATTEN
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
-    ! Local variables.
+    ! Local variables. LOCAL ALLOCATION
     LOGICAL :: INVERSE, FLAT
     LOGICAL, DIMENSION(SIZE(X,1), SIZE(X,2)) :: NON_NUMBER_MASK
     REAL(KIND=RT), DIMENSION(SIZE(VECS,1),SIZE(VECS,2)) :: TEMP_VECS
-    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS, RN
+    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS, RN, SCALAR
     REAL(KIND=RT), DIMENSION(SIZE(X,1), SIZE(X,2)) :: X1
-    REAL(KIND=RT) :: SCALAR
     INTEGER :: I, D
     ! Set the default value for "INVERSE".
     IF (PRESENT(INVERT_RESULT)) THEN
@@ -269,19 +221,32 @@ CONTAINS
     END IF
     ! Identify the location of "bad values" (Inf and NaN).
     NON_NUMBER_MASK(:,:) = IS_NAN(X(:,:)) .OR. (.NOT. IS_FINITE(X(:,:)))
+    ! Set all nonnumber values to zero (so they do not affect computed shifts).
     WHERE (NON_NUMBER_MASK(:,:))
        X(:,:) = 0.0_RT
     END WHERE
     ! Shift the data to be be centered about the origin.
     D = SIZE(X,1)
+    ! Count the number of valid numbers in each component.
     RN(:) = MAX(1.0_RT, REAL(SIZE(X,2) - COUNT(NON_NUMBER_MASK(:,:), 2), RT))
-    SCALAR = MAXVAL(X(:,:))
-    IF (SCALAR .EQ. 0.0_RT) THEN
-       SCALAR = 1.0_RT
-    END IF
-    SHIFT(:) = (-SUM(X(:,:) / SCALAR, 2) / RN(:)) * SCALAR
+    ! Invert the mask to select only the valid numbers.
+    NON_NUMBER_MASK(:,:) = .NOT. NON_NUMBER_MASK(:,:)
     DO I = 1, D
-       X(I,:) = X(I,:) + SHIFT(I)
+       ! Rescale the input components individually to have a maximum of 1
+       !  to prevent numerical issues with SVD (will embed in VECS or undo
+       !  this scaling later when storing the inverse transformation).
+       SCALAR(I) = MAXVAL(ABS(X(I,:)))
+       IF (SCALAR(I) .NE. 0.0_RT) THEN
+          X(I,:) = X(I,:) / SCALAR(I)
+       ELSE
+          SCALAR(I) = 1.0_RT
+       END IF
+       ! Shift all valid numbers by the mean.
+       !   NOTE: mask was inverted to capture valid numbers.
+       SHIFT(I) = -SUM(X(I,:), MASK=NON_NUMBER_MASK(I,:)) / RN(I) 
+       WHERE (NON_NUMBER_MASK(I,:))
+          X(I,:) = X(I,:) + SHIFT(I)
+       END WHERE
     END DO
     ! Set the unused portion of the "VECS" matrix to the identity.
     VECS(D+1:,D+1:) = 0.0_RT
@@ -294,7 +259,8 @@ CONTAINS
     ELSE
        CALL SVD(X, VALS, VECS(:D,:D), STEPS=10)
     END IF
-    ! Normalize the values to make the output componentwise unit mean squared magnitude.
+    ! Normalize the values associated with the singular vectors to
+    !  make the output componentwise unit mean squared magnitude.
     IF (FLAT) THEN
        VALS(:) = VALS(:) / SQRT(RN)
        ! For all nonzero vectors, rescale them so that the
@@ -305,14 +271,14 @@ CONTAINS
           END IF
        END DO
     ELSE
-       ! Rescale all vectors by the average magnitude.
+       ! Rescale all vectors by the average singular value.
        VALS(:) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))
        IF (VALS(1) .GT. 0.0_RT) THEN
           VECS(:,:) = VECS(:,:) / VALS(1)
        END IF
     END IF
-    ! Apply the column vectors to the data to make it radially symmetric.
-    X1(:,:) = X(:,:)
+    ! Apply the scaled singular vectors to the data to make it radially symmetric.
+    X1(:,:) = X(:,:) 
     CALL GEMM('T', 'N', D, SIZE(X,2), D, 1.0_RT, &
          VECS(:D,:D), D, &
          X1(:,:), D, &
@@ -324,9 +290,18 @@ CONTAINS
           IF (VALS(I) .GT. 0.0_RT) THEN
              VECS(:D,I) = VECS(:D,I) * VALS(I)
           END IF
+          VECS(I,:D) = VECS(I,:D) * SCALAR(I)
        END DO
        VECS(:D,:D) = TRANSPOSE(VECS(:D,:D))
-       SHIFT(:) = -SHIFT(:)
+       SHIFT(:) = -SHIFT(:) * SCALAR(:)
+    ELSE
+       ! Apply the exact same transformation to the vectors
+       ! that was already applied to X to normalize original
+       ! component scale (maximum absolute values).
+       DO I = 1, D
+          VECS(I,:D) = VECS(I,:D) / SCALAR(I)
+       END DO
+       SHIFT(:) = SHIFT(:) * SCALAR(:)
     END IF
   END SUBROUTINE RADIALIZE
 

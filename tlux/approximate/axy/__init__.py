@@ -3,6 +3,7 @@ import numpy as np
 
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _source_code = os.path.join(_this_dir, "axy.f90")
+_dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -107,7 +108,7 @@ class AXY:
             axy = fmodpy.fimport(_source_code, blas=True,
                                   lapack=True, omp=True, wrap=True,
                                   verbose=False, output_dir=_this_dir,
-                                  dependencies=["matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
+                                  dependencies=_dependencies,
             )
             # Store the Fortran module as an attribute.
             self.AXY = axy.axy
@@ -389,37 +390,16 @@ class AXY:
             _x[:,:] = x[:,:_x.shape[1]]
         if (self.config.ade > 0):
             _ax[:,:] = ax[:,:_ax.shape[1]]
-        # Store the multiplier to be used in embeddings.
+        # Store the multiplier to be used in embeddings (to level the norm contribution).
         if (self.config.mdo > 0):
             last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
         else:
             last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, order="F")            
         self.embedding_transform = np.linalg.norm(last_weights, axis=1)
-
-
-        # # Check that the max vectors are correctly the first singular vectors.
-        # print()
-        # print('-'*70)
-        # print(self)
-        # print()
-        # print(self.config.smsm-1, m.config.emsm, '->', m.config.emsm - self.config.smsm-1)
-        # layer = 1
-        # v = rwork[self.config.smsm-1:self.config.emsm].reshape((m.config.mds,m.config.mns-1), order='F')[:,layer]
-        # print('v', v.shape)
-        # a = self.unpack().m_state_vecs[:,:,layer]
-        # print('a', a.shape)
-        # # TODO: find out why "s" is not a vector from the SVD of the weight matrix...
-        # U, s, V = np.linalg.svd(a)
-        # print('s', s.shape)
-        # print("s: ", s)
-        # print("v.shape: ", v.shape)
-        # print("a.shape: ", a.shape)
-        # print("np.linalg.norm(v): ", np.linalg.norm(v))
-        # print("np.linalg.norm(v @ a): ", np.linalg.norm(v @ a))
-        # print("np.linalg.norm(a, axis=0): ", np.linalg.norm(a, axis=0))
-        # print('-'*70)          
-        # print()
-        # exit()
+        # Normalize the embedding transformation to be unit norm.
+        transform_norm = np.linalg.norm(self.embedding_transform)
+        if (transform_norm > 0):
+            self.embedding_transform /= transform_norm
 
 
     # Calling this model is an alias for 'AXY.predict'.
@@ -488,7 +468,7 @@ class AXY:
         #  of output weights for each component of that last embedding.
         if (embedding):
             # Store the "last_state" representation of data before output,
-            #  as well as the "last_weights" that precede output.
+            #  as well as the "last_weights" that preceed output.
             if (self.config.mdo > 0):
                 if (self.config.mns > 0):
                     last_state = m_states[:,:,-2]
@@ -579,7 +559,7 @@ if __name__ == "__main__":
     # ----------------------------------------------------------------
     #  Enable debugging option "-fcheck=bounds".
     import fmodpy
-    fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+    # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
     # fmodpy.config.link_blas = "-framework Accelerate"
     # fmodpy.config.link_lapack = "-framework Accelerate"
     # fmodpy.config.link_omp = ""
@@ -598,7 +578,6 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
-
     n = 100
     seed = 2
     state_dim = 32
@@ -607,15 +586,15 @@ if __name__ == "__main__":
     num_threads = None
     np.random.seed(seed)
 
-
     TEST_FIT_SIZE = False
     TEST_WEIGHTING = False
     TEST_SAVE_LOAD = False
     TEST_INT_INPUT = False
     TEST_AGGREGATE = True
     TEST_LARGE_MODEL = False
+    TEST_BAD_NUMBERS = False # Nan and Inf
+    TEST_SCALING = False # Very small (10^{-30}) and very large (10^{30}) values at once.
     SHOW_VISUALS = True
-
 
     if TEST_FIT_SIZE:
         # Aggreagtor model settings.
@@ -666,26 +645,43 @@ if __name__ == "__main__":
         m.load("testing_empty_save.json")
         from util.approximate import PLRM
         m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
-                 num_threads=num_threads, steps=steps, 
-                 orthogonalizing_step_frequency=10,
-                 initial_shift_range=0.0,
-                 min_update_ratio=1.0,
-                 faster_rate=1.0,
-                 slower_rate=1.0,
-                 ) # discontinuity=-1000.0) # initial_step=0.01)
+                num_threads=num_threads, steps=steps, 
+                orthogonalizing_step_frequency=10,
+                initial_shift_range=0.0,
+                min_update_ratio=1.0,
+                faster_rate=1.0,
+                slower_rate=1.0,
+        ) # discontinuity=-1000.0) # initial_step=0.01)
         print("Initialized model:")
         print(m)
         print()
         # Create the test plot.
         x = np.asarray(well_spaced_box(n, 2), dtype="float32", order="C")
-        # x[:,0] /= 2
         y = f(x).astype("float32")
+        # Rescale the data to make it cover many orders of magnitude.
+        if TEST_SCALING:
+            x[:,0] *= 10.**30
+            y[:] /= 10.**30
+        # Add some invalid values to the data.
+        if TEST_BAD_NUMBERS:
+            x[len(x)//7 : 2*len(x)//7,0] = float('nan')
+            x[-2:,1] = float('inf')
+            y[len(y)//7 : 2*len(y)//7] = float('nan')
+            y[-2:] = float('inf')
         # Construct weights.
         yw = np.random.random(size=n) ** 5
         yw = np.where(yw > 0.5, yw*2, 0.001)
         if (not TEST_WEIGHTING): yw[:] = 1.0
         # Fit the model.
-        m.fit(x=x.copy(), y=y.copy(), yw=yw)
+        x_normalized = x.copy()
+        y_normalized = y.copy()
+        m.fit(x=x_normalized, y=y_normalized, yw=yw)
+        # Do mean-substitution on the invalid numbers in the dataset.
+        if TEST_BAD_NUMBERS:
+            x = np.where(np.isfinite(x), x, np.nan)
+            x[np.isnan(x)] = (np.nanmean(x, axis=0) * np.ones(x.shape))[np.isnan(x)]
+            y = np.where(np.isfinite(y), y, np.nan)
+            y[np.isnan(y)] = (np.nanmean(y, axis=0) * np.ones(y.shape))[np.isnan(y)]
         # Add the data and the surface of the model to the plot.
         p = Plot()
         x_min_max = np.asarray([x.min(axis=0), x.max(axis=0)]).T
@@ -694,6 +690,11 @@ if __name__ == "__main__":
             p.add("Data (low weight)", *x[yw <= 0.5].T, y[yw <= 0.5], color=3)
         # p.add("Normalized data", *x_fit.T, y_fit)
         p.add_func("Fit", m, *x_min_max, vectorized=True)
+        # Show the normalized data.
+        if TEST_BAD_NUMBERS:
+            q = Plot()
+            q.add("Normalized data", *x_normalized.T, y_normalized, color=4)
+            q.show(append=True)
         # Try saving the trained model and applying it after loading.
         print("Saving model:")
         print(m)
@@ -702,9 +703,10 @@ if __name__ == "__main__":
         m.load("testing_real_save.json")
         print("Loaded model:")
         print(m)
-        # print(str(m)[:str(m).index("\n\n")])
         print()
-        p.add("Loaded values", *x.T, m(x.copy())[:,0]+0.05, color=1, marker_size=4)
+        my = m(x.copy())[:,0]
+        my_lift = (my.max() - my.min()) * 0.025
+        p.add("Loaded values", *x.T, my+my_lift, color=1, marker_size=4)
         p.plot(show=(m.record.size == 0))
         # Remove the save files.
         import os
@@ -762,11 +764,11 @@ if __name__ == "__main__":
             ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
             ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
             num_threads=num_threads, seed=seed,
-            basis_replacement = True,
-            # orthogonalizing_step_frequency = 200,
             early_stop = False,
-            keep_best = False,
-            step_replacement = 0.00,
+            # basis_replacement = True,
+            # orthogonalizing_step_frequency = 200,
+            # keep_best = False,
+            # step_replacement = 0.00,
             # equalize_y = True,
         )
         m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), steps=steps)
@@ -830,9 +832,11 @@ if __name__ == "__main__":
         # Fit model.
         m = AXY(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
                  ans=ans, ads=ads, mns=mns, mds=mds)
+        print()
+        print("Fitting large model..")
         m.fit(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, y=y,
               steps=steps, num_threads=num_threads, early_stop=False)
-
+        print()
 
     # Generate a visual of the loss function.
     if (SHOW_VISUALS and (len(getattr(globals().get("m",None), "record", [])) > 0)):
@@ -858,3 +862,32 @@ if __name__ == "__main__":
 
 
 
+
+
+# 2022-06-26 12:53:18
+# 
+###############################################################################################################
+# # # Check that the max vectors are correctly the first singular vectors.                                    #
+# # print()                                                                                                   #
+# # print('-'*70)                                                                                             #
+# # print(self)                                                                                               #
+# # print()                                                                                                   #
+# # print(self.config.smsm-1, m.config.emsm, '->', m.config.emsm - self.config.smsm-1)                        #
+# # layer = 1                                                                                                 #
+# # v = rwork[self.config.smsm-1:self.config.emsm].reshape((m.config.mds,m.config.mns-1), order='F')[:,layer] #
+# # print('v', v.shape)                                                                                       #
+# # a = self.unpack().m_state_vecs[:,:,layer]                                                                 #
+# # print('a', a.shape)                                                                                       #
+# # # TODO: find out why "s" is not a vector from the SVD of the weight matrix...                             #
+# # U, s, V = np.linalg.svd(a)                                                                                #
+# # print('s', s.shape)                                                                                       #
+# # print("s: ", s)                                                                                           #
+# # print("v.shape: ", v.shape)                                                                               #
+# # print("a.shape: ", a.shape)                                                                               #
+# # print("np.linalg.norm(v): ", np.linalg.norm(v))                                                           #
+# # print("np.linalg.norm(v @ a): ", np.linalg.norm(v @ a))                                                   #
+# # print("np.linalg.norm(a, axis=0): ", np.linalg.norm(a, axis=0))                                           #
+# # print('-'*70)                                                                                             #
+# # print()                                                                                                   #
+# # exit()                                                                                                    #
+###############################################################################################################
