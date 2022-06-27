@@ -28,3 +28,4 @@
 | 0.0.21<br>May 2022 | Cleaning repository and pushing some waiting APOS <br> safeguards. Next step is well founded basis <br> replacement. |
 | 0.0.22<br>June 2022 | Renamed APOS to AXY. Fixed error in aggregator <br> output mean calculation. Refactored CONDITION_MODEL <br> subroutines in preparation for further development. |
 | 0.0.23<br>June 2022 | Added Data module. |
+| 0.0.24<br>June 2022 | Added edge case checks for empty data, updated <br> memory usage patterns to improve model throughput <br> for large amounts of data, temporarily disabled all <br> local allocations that relate to in-development <br> code. Began implementing random pair generation for <br> pairwise batched aggregation. |
