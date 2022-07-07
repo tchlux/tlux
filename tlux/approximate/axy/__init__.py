@@ -560,6 +560,8 @@ if __name__ == "__main__":
     #  Enable debugging option "-fcheck=bounds".
     import fmodpy
     # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+    # fmodpy.config.link_blas = ""
+    # fmodpy.config.link_lapack = ""
     # fmodpy.config.link_blas = "-framework Accelerate"
     # fmodpy.config.link_lapack = "-framework Accelerate"
     # fmodpy.config.link_omp = ""

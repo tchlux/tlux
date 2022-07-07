@@ -1,14 +1,13 @@
 ! TODO:
 ! 
-! - Run some tests to determine how weights should be updated on conditioning
-!   to not change the output of the model *at all*, and similarly update the
-!   gradient estimates to reflect those changes as well.
+! - Update FIT code to allow specifying a subset of points to be evaluated
+!   at a time (i.e., support batched evaluation).
+! - Rotate out the points that have the lowest expected change in error.
 ! 
-! - Verify that the *condition model* operation correctly updates the gradient
-!   related variables (mean and curvature).
-! 
-! - Make sure that the print time actually adheres to the 3-second guidance.
-!   Or optionally write updates to a designated file instead.
+! - Add (PAIRWISE_AGGREGATION, MAX_PAIRS) functionality to the aggregator model input,
+!   where a nonrepeating random number generator is used in conjunction with a mapping
+!   from the integer line to pairs of points. When MAX_PAIRS is less than the total
+!   number of pairs, then do greedy rotation of points identically to above.
 ! 
 ! - Handle NaN and Infinity in the data normalization process, as well
 !   as in model evaluation (controlled through some logical setting).
@@ -18,7 +17,6 @@
 !    multiply the 2-norm of output weights by values before orthogonalization
 !    compress basis weights with linear regression when rank deficiency is detected
 !    reinitialize basis functions randomly at first, metric PCA best
-! 
 !    sum the number of times a component had no rank across threads
 !    swap weights for the no-rank components to the back
 !    swap no-rank state component values into contiguous memory at back
@@ -27,25 +25,26 @@
 !    regress previous layer onto the gradient components
 !    fill any remaining nodes (if not enough from gradient) with "uncaptured" principal components
 !    set new shift terms as the best of 5 well spaced values in [-1,1], or random given no order
-! 
-! - Update FIT code to allow specifying a subset of points to be evaluated at a time.
-! - Rotate out the points that have the smallest gradient (GREEDY_BATCHES, NESTING_RATIO).
-! 
-! - Add (PAIRWISE_AGGREGATION, MAX_PAIRS) functionality to the aggregator model input,
-!   where a nonrepeating random number generator is used in conjunction with a mapping
-!   from the integer line to pairs of points. When MAX_PAIRS is less than the total
-!   number of pairs, then do greedy rotation of points identically to above.
+! - Run some tests to determine how weights should be updated on conditioning
+!   to not change the output of the model *at all*, and similarly update the
+!   gradient estimates to reflect those changes as well.
 ! 
 ! - Update Python testing code to test all combinations of AX, AXI, AY, X, XI, and Y.
 ! - Update Python testing code to attempt different edge-case model sizes
 !    (linear regression, no aggregator, no model).
+! - Start writing a test-case suite that tests all of the basic operations.
+!   Start with end-to-end tests that include "bad" input and output scaling.
+! - Verify that the *condition model* operation correctly updates the gradient
+!   related variables (mean and curvature).
+! - Make sure that the print time actually adheres to the 3-second guidance.
+!   Or optionally write updates to a designated file instead.
 ! 
 ! - Make data normalization use the same work space as the fit procedure
 !   (since these are not needed at the same time).
 ! - Make model conditioning use the same work space as evaluation (where possible).
 ! - Pull normalization code out and have it be called separately from 'FIT'.
-!   Goal is to achieve near-zero losses for doing a few steps at a time in
-!   Python (allowing for easier cancellation, progress updates, ...).
+!   Goal is to achieve near-zero inefficiencies for doing a few steps at a time in
+!   Python (allowing for easier cancellation, progress updates, checkpoints, ...).
 ! 
 ! - Use LAPACK to do linear regression, implement simple SVD + gradient descent method
 !   in MATRIX_OPERATIONS, compare speed of both methodologies.
@@ -69,8 +68,9 @@
 MODULE AXY
   USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, INT64, INT8
   USE IEEE_ARITHMETIC, ONLY: IS_NAN => IEEE_IS_NAN, IS_FINITE => IEEE_IS_FINITE
-  USE MATRIX_OPERATIONS, ONLY: GEMM, RANDOM_UNIT_VECTORS, ORTHOGONALIZE, RADIALIZE, LEAST_SQUARES
+  USE RANDOM, ONLY: RANDOM_UNIT_VECTORS
   USE SORT_AND_SELECT, ONLY: ARGSORT, ARGSELECT
+  USE MATRIX_OPERATIONS, ONLY: GEMM, ORTHOGONALIZE, RADIALIZE, LEAST_SQUARES
 
   IMPLICIT NONE
 
@@ -153,7 +153,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: IWORK_SIZE = 0
      INTEGER(KIND=INT64) :: NA = 0
      INTEGER(KIND=INT64) :: NM = 0
-     ! Optimization work space.
+     ! Optimization real work space.
      INTEGER(KIND=INT64) :: SMG, EMG ! MODEL_GRAD(NUM_VARS,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMGM, EMGM ! MODEL_GRAD_MEAN(NUM_VARS)
      INTEGER(KIND=INT64) :: SMGC, EMGC ! MODEL_GRAD_CURV(NUM_VARS)
@@ -529,7 +529,7 @@ CONTAINS
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
     INTEGER, INTENT(IN), OPTIONAL :: SEED
-    !  Storage for seeding the random number generator (for repeatability).
+    !  Storage for seeding the random number generator (for repeatability). LOCAL ALLOCATION
     INTEGER, DIMENSION(:), ALLOCATABLE :: SEED_ARRAY
     ! Local iterator.
     INTEGER :: I
@@ -567,15 +567,15 @@ CONTAINS
          INPUT_VECS, INPUT_SHIFT, STATE_VECS, STATE_SHIFT, &
          OUTPUT_VECS, EMBEDDINGS)
       INTEGER, INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO, MDE, MNE
-      REAL(KIND=RT), DIMENSION(MDI, MDS) :: INPUT_VECS
-      REAL(KIND=RT), DIMENSION(MDS) :: INPUT_SHIFT
-      REAL(KIND=RT), DIMENSION(MDS, MDS, MAX(0,MNS-1)) :: STATE_VECS
-      REAL(KIND=RT), DIMENSION(MDS, MAX(0,MNS-1)) :: STATE_SHIFT
-      REAL(KIND=RT), DIMENSION(MDSO, MDO) :: OUTPUT_VECS
-      REAL(KIND=RT), DIMENSION(MDE, MNE) :: EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDI, MDS) :: INPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS) :: INPUT_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS, MDS, MAX(0,MNS-1)) :: STATE_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS, MAX(0,MNS-1)) :: STATE_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDSO, MDO) :: OUTPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE, MNE) :: EMBEDDINGS
       ! Local holder for "origin" at each layer.
-      REAL(KIND=RT), DIMENSION(MDS) :: ORIGIN
-      INTEGER,       DIMENSION(MDS) :: ORDER
+      REAL(KIND=RT), DIMENSION(MDS) :: ORIGIN ! LOCAL ALLOCATION
+      INTEGER,       DIMENSION(MDS) :: ORDER  ! LOCAL ALLOCATION
       INTEGER :: I, J
       ! Generate well spaced random unit-length vectors (no scaling biases)
       ! for all initial variables in the input, internal, output, and embedings.
@@ -788,6 +788,7 @@ CONTAINS
     INTEGER, INTENT(INOUT) :: INFO
     ! Internal values.
     INTEGER :: I, BATCH, NB, BN, BS, BE, BT, GS, GE, NT, E
+    ! LOCAL ALLOCATION
     INTEGER, DIMENSION(:), ALLOCATABLE :: BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS
     ! If there are no points to evaluate, then immediately return.
     IF (SIZE(Y,2,KIND=INT64) .EQ. 0) RETURN
@@ -1189,7 +1190,7 @@ CONTAINS
     INTEGER, INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: GRAD
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE,MNE) :: EMBEDDING_GRAD
-    ! Local variables.
+    ! Local variables. LOCAL ALLOCATION
     REAL(KIND=RT), DIMENSION(MDE,MNE) :: TEMP_GRAD
     REAL(KIND=RT), DIMENSION(MNE) :: COUNTS
     INTEGER :: N, D, E
@@ -1219,37 +1220,46 @@ CONTAINS
   ! Compute the gradient of the sum of squared error of this regression
   ! model with respect to its variables given input and output pairs.
   SUBROUTINE MODEL_GRADIENT(CONFIG, MODEL, AX, AXI, AY, SIZES, X, XI, Y, YW, &
-       SUM_SQUARED_GRADIENT, MODEL_GRAD, &
-       AY_GRADIENT, Y_GRADIENT, A_STATES, A_GRADS, M_STATES, M_GRADS, &
-       INFO)
+       SUM_SQUARED_GRADIENT, MODEL_GRAD, INFO, &
+       AY_GRADIENT, Y_GRADIENT, A_GRADS, M_GRADS, A_STATES, M_STATES)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
-    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER,       INTENT(IN), DIMENSION(:,:) :: AXI
+    INTEGER,       INTENT(IN),    DIMENSION(:,:) :: AXI
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY
-    INTEGER,       INTENT(IN), DIMENSION(:) :: SIZES
+    INTEGER,       INTENT(IN),    DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER,       INTENT(IN), DIMENSION(:,:) :: XI
-    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
-    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW
+    INTEGER,       INTENT(IN),    DIMENSION(:,:) :: XI
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: YW
     ! Sum (over all data) squared error (summed over dimensions).
     REAL(KIND=RT), INTENT(INOUT) :: SUM_SQUARED_GRADIENT
     ! Gradient of the model variables.
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: MODEL_GRAD
+    ! Output and optional inputs.
+    INTEGER, INTENT(INOUT) :: INFO
     ! Work space.
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY_GRADIENT
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_GRADIENT
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_STATES, M_GRADS
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_STATES, A_GRADS
-    ! Output and optional inputs.
-    INTEGER, INTENT(INOUT) :: INFO
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_GRADS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_GRADS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:), OPTIONAL :: A_STATES
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:), OPTIONAL :: M_STATES
     INTEGER :: L, D
     ! Exit early if there is no data.
     IF (SIZE(Y,2,KIND=INT64) .EQ. 0) RETURN
     ! Embed all integer inputs into real vector inputs.
     CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     ! Evaluate the model, storing internal states (for gradient calculation).
-    CALL EVALUATE(CONFIG, MODEL, AX, AY, SIZES, X, Y_GRADIENT, A_STATES, M_STATES, INFO)
+    IF (PRESENT(A_STATES) .AND. PRESENT(M_STATES)) THEN
+       CALL EVALUATE(CONFIG, MODEL, AX, AY, SIZES, X, Y_GRADIENT, A_STATES, M_STATES, INFO)
+       ! Copy the state values into holders for the gradients.
+       A_GRADS(:,:,:) = A_STATES(:,:,:)
+       AY_GRADIENT(:,:) = AY(:,:)
+       M_GRADS(:,:,:) = M_STATES(:,:,:)
+    ELSE
+       CALL EVALUATE(CONFIG, MODEL, AX, AY, SIZES, X, Y_GRADIENT, A_GRADS, M_GRADS, INFO)
+    END IF
     ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
     Y_GRADIENT(:,:) = Y_GRADIENT(:,:) - Y(:,:) ! squared error gradient
     ! Apply weights to the computed gradients (if they were provided.
@@ -1262,10 +1272,6 @@ CONTAINS
     END IF
     ! Compute the total squared gradient.
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SUM(Y_GRADIENT(:,:)**2)
-    ! Copy the state values into holders for the gradients.
-    A_GRADS(:,:,:) = A_STATES(:,:,:)
-    AY_GRADIENT(:,:) = AY(:,:)
-    M_GRADS(:,:,:) = M_STATES(:,:,:)
     ! Compute the gradient with respect to the model basis functions.
     CALL BASIS_GRADIENT(CONFIG, MODEL, Y_GRADIENT, X, AX, &
          SIZES, M_GRADS, A_GRADS, AY_GRADIENT, MODEL_GRAD)
@@ -1427,9 +1433,9 @@ CONTAINS
        A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, A_ORDER, M_ORDER, &
        TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
-    REAL(KIND=RT), DIMENSION(:) :: MODEL
-    REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_MEAN
-    REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_CURV
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL_GRAD_MEAN
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL_GRAD_CURV
     ! Data.
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
     INTEGER,       INTENT(IN),    DIMENSION(:,:) :: AXI
@@ -1442,11 +1448,11 @@ CONTAINS
     ! Configuration.
     INTEGER, INTENT(IN) :: NUM_THREADS, FIT_STEP
     ! States, gradients, lengths, temporary storage, and order (of ranks).
-    REAL(KIND=RT), DIMENSION(:,:,:) :: A_STATES, M_STATES
-    REAL(KIND=RT), DIMENSION(:,:,:) :: A_GRADS, M_GRADS
-    REAL(KIND=RT), DIMENSION(:,:) :: A_LENGTHS, M_LENGTHS
-    REAL(KIND=RT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
-    INTEGER, DIMENSION(:,:) :: A_ORDER, M_ORDER
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_STATES, M_STATES
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_GRADS, M_GRADS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_LENGTHS, M_LENGTHS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
+    INTEGER,       INTENT(INOUT), DIMENSION(:,:) :: A_ORDER, M_ORDER
     INTEGER :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     ! 
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
@@ -1523,17 +1529,17 @@ CONTAINS
          M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER, INTENT(IN) :: NUM_THREADS
-      REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADSO, CONFIG%ADO) :: A_OUTPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
       ! Local variables.
       INTEGER :: L
       REAL(KIND=RT) :: SCALAR
@@ -1583,32 +1589,32 @@ CONTAINS
       INTEGER, INTENT(IN) :: DI, DS, NS, DSO, DO, NUM_THREADS
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: X, Y_GRADIENT
       ! Model variables.
-      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS
-      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT
-      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS
-      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT
-      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DI, DS) :: INPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS) :: INPUT_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DSO, DO) :: OUTPUT_VECS
       ! Gradient means for all variables.
-      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_MEAN
-      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_MEAN
-      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_MEAN
-      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_MEAN
-      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_MEAN
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_MEAN
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_MEAN
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_MEAN
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_MEAN
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_MEAN
       ! Gradient curvatures for all variables.
-      REAL(KIND=RT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_CURV
-      REAL(KIND=RT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_CURV
-      REAL(KIND=RT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_CURV
-      REAL(KIND=RT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_CURV
-      REAL(KIND=RT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_CURV
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DI, DS) :: INPUT_VECS_GRAD_CURV
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS) :: INPUT_SHIFT_GRAD_CURV
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, DS, MAX(0,NS-1)) :: STATE_VECS_GRAD_CURV
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DS, MAX(0,NS-1)) :: STATE_SHIFT_GRAD_CURV
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DSO, DO) :: OUTPUT_VECS_GRAD_CURV
       ! Temporary variables.
-      REAL(KIND=RT), DIMENSION(:,:) :: STATE_TEMP
-      REAL(KIND=RT), DIMENSION(:,:,:) :: STATES
-      REAL(KIND=RT), DIMENSION(:,:) :: LENGTHS
-      INTEGER, DIMENSION(:,:) :: ORDER
-      REAL(KIND=RT), DIMENSION(:,:,:) :: GRADS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: STATE_TEMP
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: STATES
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: LENGTHS
+      INTEGER, INTENT(INOUT), DIMENSION(:,:) :: ORDER
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: GRADS
       INTEGER :: BATCH, BS, BE, BN, I, N, NT, TER, TGR
       ! TODO: This allocation should occur at workspace initialization.
-      INTEGER, DIMENSION(DS, NUM_THREADS) :: STATE_USAGE
+      INTEGER, DIMENSION(DS, NUM_THREADS) :: STATE_USAGE ! LOCAL ALLOCATION
       ! 
       ! Batch computation formula.
        IF (NS .GT. 0) THEN
@@ -1705,21 +1711,21 @@ CONTAINS
          IN_VECS, IN_VECS_GRAD_MEAN, IN_VECS_GRAD_CURV, &
          SHIFTS, SHIFTS_GRAD_MEAN, SHIFTS_GRAD_CURV, &
          OUT_VECS, OUT_VECS_GRAD_MEAN, OUT_VECS_GRAD_CURV)
-      INTEGER, DIMENSION(:) :: USAGE
-      REAL(KIND=RT), DIMENSION(:,:) :: PREV_STATE
-      REAL(KIND=RT), DIMENSION(:,:) :: CURR_STATE
-      REAL(KIND=RT), DIMENSION(:,:) :: NEXT_GRADS
+      INTEGER, INTENT(IN), DIMENSION(:) :: USAGE
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: PREV_STATE
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: CURR_STATE
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: NEXT_GRADS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: IN_VECS, IN_VECS_GRAD_MEAN, IN_VECS_GRAD_CURV
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: SHIFTS, SHIFTS_GRAD_MEAN, SHIFTS_GRAD_CURV
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: OUT_VECS, OUT_VECS_GRAD_MEAN, OUT_VECS_GRAD_CURV
       ! Local variables.
-      REAL(KIND=RT), DIMENSION(SIZE(USAGE)) :: VALUES
-      REAL(KIND=RT), DIMENSION(SIZE(PREV_STATE,1), SIZE(PREV_STATE,2)) :: PREV_TEMP
-      REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,1), SIZE(CURR_STATE,2)) :: CURR_TEMP
-      REAL(KIND=RT), DIMENSION(SIZE(NEXT_GRADS,1), SIZE(NEXT_GRADS,2)) :: GRAD_TEMP
-      REAL(KIND=RT), DIMENSION(SIZE(IN_VECS,2), SIZE(IN_VECS,1)) :: VECS_TEMP
-      ! REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,2)) :: VECS_TEMP
-      INTEGER, DIMENSION(SIZE(USAGE)) :: ORDER
+      ! REAL(KIND=RT), DIMENSION(SIZE(USAGE)) :: VALUES ! LOCAL ALLOCATION
+      ! REAL(KIND=RT), DIMENSION(SIZE(PREV_STATE,1), SIZE(PREV_STATE,2)) :: PREV_TEMP ! LOCAL ALLOCATION
+      ! REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,1), SIZE(CURR_STATE,2)) :: CURR_TEMP ! LOCAL ALLOCATION
+      ! REAL(KIND=RT), DIMENSION(SIZE(NEXT_GRADS,1), SIZE(NEXT_GRADS,2)) :: GRAD_TEMP ! LOCAL ALLOCATION
+      ! REAL(KIND=RT), DIMENSION(SIZE(IN_VECS,2), SIZE(IN_VECS,1)) :: VECS_TEMP ! LOCAL ALLOCATION
+      ! REAL(KIND=RT), DIMENSION(SIZE(CURR_STATE,2)) :: VECS_TEMP ! LOCAL ALLOCATION
+      ! INTEGER, DIMENSION(SIZE(USAGE)) :: ORDER ! LOCAL ALLOCATION
       INTEGER :: RANK, I, GRAD_RANK, MISS_RANK
       ! TODO:
       !  - Multiply value columns by the 2-norm of all outgoing
@@ -1744,14 +1750,14 @@ CONTAINS
       !    fill any remaining nodes (if not enough from gradient) with "uncaptured" principal components
       !    set new shift terms as the best of 5 well spaced values in [-1,1], or random given no order
 
-      ! Find the first zero-valued (unused) basis function (after orthogonalization).
-      FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
-      VALUES(:) = -REAL(USAGE,RT)
-      CALL ARGSORT(VALUES(:), ORDER(:))
-      DO RANK = 1, SIZE(ORDER(:))
-         IF (USAGE(ORDER(RANK)) .EQ. 0) EXIT
-      END DO
-      IF (RANK .GT. SIZE(ORDER)) RETURN
+      ! ! Find the first zero-valued (unused) basis function (after orthogonalization).
+      ! FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
+      ! VALUES(:) = -REAL(USAGE,RT)
+      ! CALL ARGSORT(VALUES(:), ORDER(:))
+      ! DO RANK = 1, SIZE(ORDER(:))
+      !    IF (USAGE(ORDER(RANK)) .EQ. 0) EXIT
+      ! END DO
+      ! IF (RANK .GT. SIZE(ORDER)) RETURN
 
       ! Pack the ORDER(:RANK) nodes into the front of the weights:
       !   - update input weights, mean gradient, gradient curvature
@@ -1789,15 +1795,17 @@ CONTAINS
     ! Local variables.
     ! ------------------------------------------------------------------
     !                DEVELOPING BATCHED EVALUATION CODE
-    ! !    measured gradient contribution of all input points
-    ! REAL(KIND=RT), DIMENSION(SIZE(AX,2)) :: AX_CONTRIB
-    ! REAL(KIND=RT), DIMENSION(SIZE(X,2)) :: X_CONTRIB
-    ! !    count of how many steps have been taken since last usage
-    ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_UNUSED_STEPS
-    ! INTEGER, DIMENSION(SIZE(X,2)) :: X_UNUSED_STEPS
-    ! !    indices (used for sorting and selecting points for gradient computation)
-    ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_INDICES
-    ! INTEGER, DIMENSION(SIZE(X,2)) :: X_INDICES
+    !    measured gradient contribution of all input points
+    REAL(KIND=RT), DIMENSION(SIZE(Y,2)) :: Y_ERROR
+    REAL(KIND=RT), DIMENSION(SIZE(Y,2)) :: Y_REDUCTION
+    INTEGER, DIMENSION(SIZE(Y,2)) :: Y_CONSECUTIVE_STEPS
+    INTEGER, DIMENSION(SIZE(Y,2)) :: Y_UNUSED_STEPS
+    !    count of how many steps have been taken since last usage
+    INTEGER, DIMENSION(SIZE(AX,2)) :: AX_UNUSED_STEPS
+    INTEGER, DIMENSION(SIZE(X,2)) :: X_UNUSED_STEPS
+    !    indices (used for sorting and selecting points for gradient computation)
+    INTEGER, DIMENSION(SIZE(AX,2)) :: AX_INDICES
+    INTEGER, DIMENSION(SIZE(X,2)) :: X_INDICES
     ! ------------------------------------------------------------------
     !    "backspace" character array for printing to the same line repeatedly
     CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),27)
@@ -1918,6 +1926,11 @@ CONTAINS
       ! ----------------------------------------------------------------
       !                 Initialization and preparation
       ! 
+      ! Store the start time of this routine (to make sure updates can
+      !  be shown to the user at a reasonable frequency).
+      CALL SYSTEM_CLOCK(LAST_PRINT_TIME, CLOCK_RATE, CLOCK_MAX)
+      WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
+      DID_PRINT = .FALSE.
       ! Cap the "number [of variables] to update" at the model size.
       CONFIG%NUM_TO_UPDATE = MAX(1,MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
       ! Set the "total rank", the number of internal state components.
@@ -1926,30 +1939,12 @@ CONTAINS
       MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
       ! Set the initial "number of steps taken since best" counter.
       NS = 0
-      ! Set the num batches (NB).
-      NB = MIN(CONFIG%NUM_THREADS, SIZE(Y,2))
-      CALL COMPUTE_BATCHES(NB, CONFIG%NA, CONFIG%NM, SIZES, &
-           BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS, INFO)
-      IF (INFO .NE. 0) THEN
-         Y(:,:) = 0.0_RT
-         RETURN
-      END IF
-      ! Store the start time of this routine (to make sure updates can
-      !  be shown to the user at a reasonable frequency).
-      CALL SYSTEM_CLOCK(LAST_PRINT_TIME, CLOCK_RATE, CLOCK_MAX)
-      WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
-      DID_PRINT = .FALSE.
       ! Initial rates of change of mean and variance values.
       STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
       STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
       ! Initial mean squared error is "max representable value".
       PREV_MSE = HUGE(PREV_MSE)
       BEST_MSE = HUGE(BEST_MSE)
-      ! Set the default size start and end indices for when it is absent.
-      IF (SIZE(SIZES) .EQ. 0) THEN
-         SS = 1
-         SE = -1
-      END IF
       ! Disable the application of SHIFT (since data is / will be normalized).
       APPLY_SHIFT = CONFIG%APPLY_SHIFT
       CONFIG%APPLY_SHIFT = .FALSE.
@@ -1961,6 +1956,19 @@ CONTAINS
            MODEL(CONFIG%MSEV:CONFIG%MEEV), &
            MODEL(CONFIG%ASOV:CONFIG%AEOV), INFO)
       IF (INFO .NE. 0) RETURN
+      ! Set the num batches (NB).
+      NB = MIN(CONFIG%NUM_THREADS, SIZE(Y,2))
+      CALL COMPUTE_BATCHES(NB, CONFIG%NA, CONFIG%NM, SIZES, &
+           BATCHA_STARTS, BATCHA_ENDS, BATCHM_STARTS, BATCHM_ENDS, INFO)
+      IF (INFO .NE. 0) THEN
+         Y(:,:) = 0.0_RT
+         RETURN
+      END IF
+      ! Set the default size start and end indices for when it is absent.
+      IF (SIZE(SIZES) .EQ. 0) THEN
+         SS = 1
+         SE = -1
+      END IF
       ! Set the configured number of threads to 1 to prevent nested parallelization.
       NUM_THREADS = CONFIG%NUM_THREADS
       CONFIG%NUM_THREADS = 1
@@ -1986,24 +1994,43 @@ CONTAINS
                SS = BATCHM_STARTS(BATCH)
                SE = BATCHM_ENDS(BATCH)
             END IF
-            ! Sum the gradient over all data batches.
-            CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
-                 AX(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
-                 AXI(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
-                 AY(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
-                 SIZES(SS:SE), &
-                 X(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
-                 XI(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
-                 Y(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
-                 YW(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
-                 SUM_SQUARED_ERROR, MODEL_GRAD(:,BATCH), &
-                 AY_GRADIENT(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
-                 Y_GRADIENT(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
-                 A_STATES(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:,:), &
-                 A_GRADS(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:,:), &
-                 M_STATES(BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH),:,:), &
-                 M_GRADS(BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH),:,:), &
-                 INFO)
+            ! Sum the gradient over all data batches. If a rank check will be
+            !  performed then store the states separate from the gradients.
+            !  Otherwise, only compute the gradients and reuse that memory space.
+            IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
+                 (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
+               CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
+                    AX(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
+                    AXI(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
+                    AY(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
+                    SIZES(SS:SE), &
+                    X(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    XI(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    Y(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    YW(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    SUM_SQUARED_ERROR, MODEL_GRAD(:,BATCH), INFO, &
+                    AY_GRADIENT(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
+                    Y_GRADIENT(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    A_GRADS(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:,:), &
+                    M_GRADS(BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH),:,:), &
+                    A_STATES(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:,:), &
+                    M_STATES(BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH),:,:))
+            ELSE
+               CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
+                    AX(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
+                    AXI(:,BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH)), &
+                    AY(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
+                    SIZES(SS:SE), &
+                    X(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    XI(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    Y(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    YW(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    SUM_SQUARED_ERROR, MODEL_GRAD(:,BATCH), INFO, &
+                    AY_GRADIENT(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:), &
+                    Y_GRADIENT(:,BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH)), &
+                    A_GRADS(BATCHA_STARTS(BATCH):BATCHA_ENDS(BATCH),:,:), &
+                    M_GRADS(BATCHM_STARTS(BATCH):BATCHM_ENDS(BATCH),:,:))
+            END IF
          END DO
          !$OMP END PARALLEL DO
          IF (INFO .NE. 0) RETURN
