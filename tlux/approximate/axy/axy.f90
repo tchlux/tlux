@@ -128,13 +128,13 @@ MODULE AXY
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.05_RT   ! Rate of exponential sliding average over AY (forcing mean to zero).
      REAL(KIND=RT) :: FASTER_RATE = 1.01_RT      ! Rate of increase of optimization factors.
      REAL(KIND=RT) :: SLOWER_RATE = 0.99_RT      ! Rate of decrease of optimization factors.
-     REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.05_RT ! Minimum ratio of model variables to update in any optimizaiton step.
+     REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.1_RT  ! Minimum ratio of model variables to update in any optimizaiton step.
      INTEGER :: MIN_STEPS_TO_STABILITY = 1 ! Minimum number of steps before allowing model saves and curvature approximation.
      INTEGER :: NUM_THREADS = 1 ! Number of parallel threads to use in fit & evaluation.
      INTEGER :: PRINT_DELAY_SEC = 2 ! Delay between output logging during fit.
      INTEGER :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
      INTEGER :: LOGGING_STEP_FREQUENCY = 10 ! Frequency with which to log expensive records (model variable 2-norm step size).
-     INTEGER :: RANK_CHECK_FREQUENCY = 50 ! Frequency with which to orthogonalize internal basis functions.
+     INTEGER :: RANK_CHECK_FREQUENCY = 10 ! Frequency with which to orthogonalize internal basis functions.
      INTEGER :: NUM_TO_UPDATE = HUGE(0) ! Number of model variables to update (initialize to large number).
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE. ! False if AX data needs to be normalized.
      LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE. ! False if AXI embeddings need to be normalized.
@@ -2201,13 +2201,3 @@ CONTAINS
 
 END MODULE AXY
 
-
-!2022-04-25 06:39:01
-!
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      ! !  - Using the computed rank of values and gradients, delete the       !
-      ! !    redundant basis functions and initialize with a combination       !
-      ! !    of uncaptured previous layer values with gradients (first nonzero !
-      ! !    gradient components, then remaining nonzero input components).    !
-      ! !                                                                      !
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

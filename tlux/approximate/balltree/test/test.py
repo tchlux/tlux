@@ -1,7 +1,13 @@
 import numpy as np
 
 
-LARGE_TEST   = True
+# TODO: Something is broken, ball tree is producing incorrect results.
+# TODO: Set the leaf size to be the size of the unbuilt points, query those too
+#       when doing an exact nearest neighbor search.
+# TODO: Make sure the distance measuring code to leaves is as fast as possible
+#       (using matrix multiplication).
+
+LARGE_TEST   = False
 COMPARE_AGAINST_SKLEARN = True
 TEST_TREE    = False
 TEST_APPROX  = False
@@ -18,7 +24,7 @@ if COMPARE_AGAINST_SKLEARN:
     print()
     print("="*70)
 
-    from util.system import Timer
+    from tlux.system import Timer
     t = Timer()
 
     if LARGE_TEST: train, dim = 1000000, 100
@@ -35,7 +41,7 @@ if COMPARE_AGAINST_SKLEARN:
     print("z:", z.shape)
 
     # ----------------------------------------------------------------
-    from balltree import BallTree as BT
+    from tlux.approximate.balltree import BallTree as BT
     print()
     print("Fortran Ball Tree")
     t.start()
@@ -97,7 +103,7 @@ if COMPARE_AGAINST_SKLEARN:
 
 
 if TEST_TREE:
-    from balltree import BallTree
+    from tlux.approximate.balltree import BallTree 
     np.random.seed(0)
 
     # if LARGE_TEST: size = (20000000,10)
@@ -116,7 +122,7 @@ if TEST_TREE:
         print()
 
     print("Building tree..", flush=True)
-    from util.system import Timer
+    from tlux.system import Timer
     t = Timer()
     t.start()
 
@@ -163,7 +169,7 @@ if TEST_TREE:
 
 
 if TEST_APPROX:
-    from balltree import BallTree
+    from tlux.approximate.balltree import BallTree 
     size = (15,1)
     x = np.linspace(0,size[0]-1,size[0]).reshape(size)
     print("x: ",x)
@@ -185,7 +191,7 @@ if TEST_APPROX:
 
 
 if TEST_PRUNE:
-    from balltree import BallTree, prune
+    from tlux.approximate.balltree import BallTree, prune
     
     tree_size = 14
     level = 3
@@ -249,9 +255,9 @@ if TEST_PRUNE:
 if TEST_SORT:
     if LARGE_TEST: N = 1000000
     else:          N = 10
-    from balltree import fast_sort
+    from tlux.approximate.balltree import fast_sort
     # Import a timer.
-    from util.system import Timer
+    from tlux.system import Timer
     t = Timer()
     # Generate test numbers.
     print()

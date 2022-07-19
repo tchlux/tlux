@@ -1,9 +1,6 @@
 import os
 import numpy as np
 
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-_source_code = os.path.join(_this_dir, "axy.f90")
-_dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -104,19 +101,18 @@ class AXY:
     # Initialize a new AXY model.
     def __init__(self, **kwargs):
         try:
-            import fmodpy
-            axy = fmodpy.fimport(_source_code, blas=True,
-                                  lapack=True, omp=True, wrap=True,
-                                  verbose=False, output_dir=_this_dir,
-                                  dependencies=_dependencies,
-            )
             # Store the Fortran module as an attribute.
-            self.AXY = axy.axy
+            from tlux.approximate.axy.axy import axy
+            self.AXY = axy
         except:
-            # TODO:
-            #  - python fallback that supports the basic evaluation of
-            #    a model (but no support for training new models).
-            raise(NotImplementedError("The Fortran source was not loaded successfully."))
+            from tlux.setup import build_axy
+            try:
+                build_axy()
+            except:
+                # TODO:
+                #  - python fallback that supports the basic evaluation of
+                #    a model (but no support for training new models).
+                raise(NotImplementedError("The Fortran source was not loaded successfully."))
         # Set defaults for standard internal parameters.
         self.steps = 1000
         self.seed = None
@@ -127,14 +123,8 @@ class AXY:
         self.embedding_transform = np.zeros(0, dtype="float32")
         # Default descriptors for categorical inputs.
         self.axi_map = []
-        self.axi_sizes = []
-        self.axi_starts = []
         self.xi_map = []
-        self.xi_sizes = []
-        self.xi_starts = []
         self.yi_map = []
-        self.yi_sizes = []
-        self.yi_starts = []
         # Initialize the attributes of the model that can be initialized.
         self._init_model(**kwargs)
 
@@ -201,31 +191,23 @@ class AXY:
             xi_map = [np.unique(xi[n]) for n in xi.dtype.names]
         else:
             xi_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
-        xi_sizes = [len(u) for u in xi_map]
-        xi_starts = (np.cumsum(xi_sizes) - xi_sizes[0] + 1).tolist()
-        return xi_map, xi_sizes, xi_starts
+        return xi_map
 
 
     # Given a categorical input array (either 2D or struct), map this
     #  array to an integer encoding matrix with the same number of
     #  columns, but unique integers assigned to each unique value.
-    def _i_encode(self, xi, xi_map, xi_sizes, xi_starts):
+    def _i_encode(self, xi, xi_map):
         xi_rows = xi.shape[0]
         xi_cols = len(xi.dtype) or xi.shape[1]
         _xi = np.zeros((xi_rows, xi_cols), dtype="int32", order="C")
         for i in range(xi_cols):
-            start_index = xi_starts[i]
-            num_unique = xi_sizes[i]
-            unique_vals = xi_map[i]
+            # Construct the integer map, retrieve the column of unique values.
+            int_map = {xi_map[i][j]:j+1 for j in range(len(xi_map[i]))}
             vals = (xi[:,i:i+1] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
-            eq_val = vals == unique_vals
-            # Add a column to the front that is the default if none match.
-            eq_val = np.concatenate((
-                np.logical_not(eq_val.max(axis=1)).reshape(xi_rows,1),
-                eq_val), axis=1)
-            val_indices = np.ones((xi_rows,num_unique+1), dtype="int32") * np.arange(num_unique+1)
-            val_indices[:,1:] += start_index-1
-            _xi[:,i] = val_indices[eq_val]
+            # Assign all the integers.
+            for j in range(xi_rows):
+                _xi[j,i] = int_map.get(vals[j,0], 0)
         return _xi
 
 
@@ -275,31 +257,31 @@ class AXY:
         xi_cols = len(xi.dtype) or xi.shape[1]
         if (xi_cols > 0):
             if (len(self.xi_map) == 0):
-                self.xi_map, self.xi_sizes, self.xi_starts = self._i_map(xi)
+                self.xi_map = self._i_map(xi)
             else:
                 assert (xi_cols == len(self.xi_map)), f"Bad number of columns in 'xi', {xi_cols}, expected {len(self.xi_map)} columns."
-            xi = self._i_encode(xi, self.xi_map, self.xi_sizes, self.xi_starts)
-            mne = sum(self.xi_sizes)
+            xi = self._i_encode(xi, self.xi_map)
+            mne = sum(map(len, self.xi_map))
         else: mne = 0
         # Handle mapping "axi" into integer encodings.
         axi_cols = len(axi.dtype) or axi.shape[1]
         if (axi_cols > 0):
             if (len(self.axi_map) == 0):
-                self.axi_map, self.axi_sizes, self.axi_starts = self._i_map(axi)
+                self.axi_map = self._i_map(axi)
             else:
                 assert (axi_cols == len(self.axi_map)), f"Bad number of columns in 'axi', {axi_cols}, expected {len(self.axi_map)} columns."
-            axi = self._i_encode(axi, self.axi_map, self.axi_sizes, self.axi_starts)
-            ane = sum(self.axi_sizes)
+            axi = self._i_encode(axi, self.axi_map)
+            ane = sum(map(len, self.axi_map))
         else: ane = 0
         # Handle mapping "yi" into integer encodings.
         yi_cols = len(yi.dtype) or yi.shape[1]
         if (yi_cols > 0):
             if (len(self.yi_map) == 0):
-                self.yi_map, self.yi_sizes, self.yi_starts = self._i_map(yi)
+                self.yi_map = self._i_map(yi)
             else:
                 assert (yi_cols == len(self.yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(self.yi_map)} columns."
-            yi = self._i_encode(yi, self.yi_map, self.yi_sizes, self.yi_starts)
-            yne = sum(self.yi_sizes)
+            yi = self._i_encode(yi, self.yi_map)
+            yne = sum(map(len, self.yi_map))
         else: yne = 0
         # Handle mapping integer encoded "yi" into a single real valued y.
         if (yne > 0):
@@ -409,9 +391,10 @@ class AXY:
 
     # Make predictions for new data.
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
-                embedding=False, save_states=False, **kwargs):
+                embedding=False, save_states=False, raw_scores=False, **kwargs):
         # Evaluate the model at all data.
         assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
+        assert (not (embedding and raw_scores)), "AXY.predict cannot provide both 'embedding=True' *and* 'raw_scores=True'."
         # Make sure that 'sizes' were provided for aggregate inputs.
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregated input sets (ax and axi)."
@@ -486,14 +469,16 @@ class AXY:
             return last_state
         # If there are categorical outputs, then select by taking the max magnitude output.
         # TODO: The max might not have the same meaning for each category, 
-        #       this needs to be considered further.
-        #       Perhaps divide by value occurrence?
-        elif (len(self.yi_map) > 0):
-            yne = sum(self.yi_sizes)
-            _y = [y[:,i] for i in range(y.shape[1]-yne)]
+        #       this needs to be considered further. Perhaps divide by value occurrence?
+        elif ((len(self.yi_map) > 0) and (not raw_scores)):
+            yne = sum(map(len, self.yi_map))
+            ynn = y.shape[1]-yne
+            _y = [y[:,i] for i in range(ynn)]
+            past_indices = ynn
             for i in range(len(self.yi_map)):
-                start = self.yi_starts[i]
-                size = self.yi_sizes[i]
+                start = past_indices
+                size = len(self.yi_map[i])
+                past_indices += size
                 _y.append(
                     self.yi_map[i][np.argmax(y[:,start:start+size], axis=1)]
                 )
@@ -518,14 +503,8 @@ class AXY:
                 "record" : self.record.tolist(),
                 "embedding_transform" : self.embedding_transform.tolist(),
                 "xi_map"    : [l.tolist() for l in self.xi_map],
-                "xi_sizes"  : self.xi_sizes,
-                "xi_starts" : self.xi_starts,
                 "axi_map"    : [l.tolist() for l in self.axi_map],
-                "axi_sizes"  : self.axi_sizes,
-                "axi_starts" : self.axi_starts,
                 "yi_map"    : [l.tolist() for l in self.yi_map],
-                "yi_sizes"  : self.yi_sizes,
-                "yi_starts" : self.yi_starts,
             }))
 
 
@@ -540,8 +519,6 @@ class AXY:
             value = attrs[key]
             if (key[-4:] == "_map"):
                 value = [np.asarray(l) for l in value]
-            elif (key[:3] in {"xi_","yi_"}) or (key[:4] == "axi_"):
-                pass
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
             setattr(self, key, value)
@@ -558,7 +535,7 @@ if __name__ == "__main__":
 
     # ----------------------------------------------------------------
     #  Enable debugging option "-fcheck=bounds".
-    import fmodpy
+    # import fmodpy
     # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
     # fmodpy.config.link_blas = ""
     # fmodpy.config.link_lapack = ""
@@ -591,8 +568,8 @@ if __name__ == "__main__":
     TEST_FIT_SIZE = False
     TEST_WEIGHTING = False
     TEST_SAVE_LOAD = False
-    TEST_INT_INPUT = False
-    TEST_AGGREGATE = True
+    TEST_INT_INPUT = True
+    TEST_AGGREGATE = False
     TEST_LARGE_MODEL = False
     TEST_BAD_NUMBERS = False # Nan and Inf
     TEST_SCALING = False # Very small (10^{-30}) and very large (10^{30}) values at once.

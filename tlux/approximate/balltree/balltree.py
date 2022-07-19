@@ -2,42 +2,28 @@
 
 # TODO: Investigate the correctness of the partial tree traversal
 #       (budget < size(order)) when there are duplicate data points.
+# TODO: Make queries over trees with size > built do a brute-force
+#       search over the unbuilt portion of the tree (when exact).
+# TODO: Set the OMP variables inside of the Fortran code.
+#       OMP_NUM_THREADS -> cpu_count
+#       OMP_MAX_ACTIVE_LEVELS -> ceil(log2(cpu_count))
+# TODO: Move the built procedure to the setup file.
 
 import os 
 import numpy as np
 
-# Allow OpenMP to create nested threads.
+# Count the number of CPUs for setting default parallelism.
 from multiprocessing import cpu_count
-
-# Set OpenMP variables to allow for greatest parallelism when building tree.
-if "OMP_NUM_THREADS" not in os.environ:
-    os.environ["OMP_NUM_THREADS"] = str(cpu_count())
-if "OMP_MAX_ACTIVE_LEVELS" not in os.environ:
-    os.environ["OMP_MAX_ACTIVE_LEVELS"] = str(int(np.ceil(np.log2(cpu_count()))))
-if "OMP_NESTED" not in os.environ:
-    os.environ["OMP_NESTED"] = "TRUE"
 
 # Import the Fortran utilities.
 try:
-    from .ball_tree import ball_tree
-    from .prune import prune
-    from .fast_sort import fast_sort
-    from .fast_select import fast_select
+    from tlux.approximate.balltree.ball_tree import ball_tree
+    from tlux.approximate.balltree.fast_sort import fast_sort
+    from tlux.approximate.balltree.fast_select import fast_select
+    from tlux.approximate.balltree.prune import prune
 except:
-    print("Importing 'fmodpy' and building wrappers..")
-    import fmodpy
-    _PATH_TO_HERE = os.path.dirname(os.path.abspath(__file__))
-    # Define paths to the Fortran utilities.
-    _PATH_TO_BT = os.path.join(_PATH_TO_HERE, "ball_tree.f90")
-    _PATH_TO_PRUNE = os.path.join(_PATH_TO_HERE, "prune.f90")
-    _PATH_TO_SORT   = os.path.join(_PATH_TO_HERE, "fast_sort.f90")
-    _PATH_TO_SELECT = os.path.join(_PATH_TO_HERE, "fast_select.f90")
-    _DEPENDENCIES = ["swap.f90", "prune.f90", "fast_select.f90", "fast_sort.f90", "ball_tree.f90"]
-    ball_tree  = fmodpy.fimport(_PATH_TO_BT, output_dir=_PATH_TO_HERE, omp=True,
-                                verbose=False, dependencies=_DEPENDENCIES).ball_tree
-    prune = fmodpy.fimport(_PATH_TO_PRUNE, output_dir=_PATH_TO_HERE, verbose=False).prune
-    fast_sort = fmodpy.fimport(_PATH_TO_SORT, output_dir=_PATH_TO_HERE, verbose=False).fast_sort
-    fast_select = fmodpy.fimport(_PATH_TO_SELECT, output_dir=_PATH_TO_HERE, verbose=False).fast_select
+    from tlux.setup import build_balltree
+    ball_tree, fast_sort, fast_select, prune = build_balltree()
 
 # ------------------------------------------------------------------
 #                        FastSort method

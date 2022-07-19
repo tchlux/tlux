@@ -2,7 +2,7 @@
 ! Includes routines for orthogonalization, computing the SVD, and
 ! radializing data matrices with the SVD.
 MODULE MATRIX_OPERATIONS
-  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, INT64
   USE IEEE_ARITHMETIC, ONLY: IS_NAN => IEEE_IS_NAN, IS_FINITE => IEEE_IS_FINITE
   IMPLICIT NONE
 
@@ -19,6 +19,8 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: C
     ! Call external single-precision matrix-matrix multiplication
     !  (should be provided by hardware manufacturer, if not use custom).
+
+    ! Standard SGEMM.
     INTERFACE
        SUBROUTINE SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
             AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
@@ -30,27 +32,25 @@ CONTAINS
          REAL, DIMENSION(*) :: C
        END SUBROUTINE SGEMM
     END INTERFACE
-
     CALL SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
        AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
 
-    ! ! Fortran intrinsic version of general matrix multiplication routine,
-    ! !   first compute the initial values in the output matrix,
-    ! C(:,:) = C_MULT * C(:)
-    ! !   then compute the matrix multiplication.
-    ! IF (OP_A .EQ. 'N') THEN
-    !    IF (OP_B .EQ. 'N') THEN
-    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(A(:,:), B(:,:))
-    !    ELSE
-    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(A(:,:), TRANSPOSE(B(:,:)))
-    !    END IF
-    ! ELSE
-    !    IF (OP_B .EQ. 'N') THEN
-    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(TRANSPOSE(A(:,:)), B(:,:))
-    !    ELSE
-    !       C(:,:) = C(:,:) + AB_MULT * MATMUL(TRANSPOSE(A(:,:)), TRANSPOSE(B(:,:)))
-    !    END IF
-    ! END IF
+    ! ! Numpy SGEMM_64 (with 64-bit integer types).
+    ! INTERFACE
+    !    SUBROUTINE SGEMM_64(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
+    !         AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
+    !      USE ISO_FORTRAN_ENV, ONLY: INT64
+    !      CHARACTER :: OP_A, OP_B
+    !      INTEGER(KIND=INT64) :: OUT_ROWS, OUT_COLS, INNER_DIM, A_ROWS, B_ROWS, C_ROWS
+    !      REAL :: AB_MULT, C_MULT
+    !      REAL, DIMENSION(*) :: A
+    !      REAL, DIMENSION(*) :: B
+    !      REAL, DIMENSION(*) :: C
+    !    END SUBROUTINE SGEMM_64
+    ! END INTERFACE
+    ! CALL SGEMM_64(OP_A, OP_B, INT(OUT_ROWS,KIND=INT64), INT(OUT_COLS,KIND=INT64), INT(INNER_DIM,KIND=INT64), &
+    !    AB_MULT, A, INT(A_ROWS,KIND=INT64), B, INT(B_ROWS,KIND=INT64), C_MULT, C, INT(C_ROWS,KIND=INT64))
+
   END SUBROUTINE GEMM
 
   ! Orthogonalize and normalize column vectors of A with pivoting.
@@ -312,32 +312,44 @@ CONTAINS
   !   B must be COLUMN VECTORS of fit output (1 row = 1 point).
   !   X always has a first dimension that is nonpoint axis size of A,
   !     and the second dimension is determined by B's columns (or rank),
-  !     or (if smaller), then B is reduced to its principal components.
+  !     and if X is smaller then B is reduced to its principal components.
   SUBROUTINE LEAST_SQUARES(TRANS, A, B, X)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A, B
     CHARACTER, INTENT(IN) :: TRANS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: X ! MIN(SIZE(A,1),SIZE(A,2)),SIZE(B,2)
     ! Local variables.
-    INTEGER :: M, N, R, NRHS, LDA, LDB, LWORK, INFO
+    INTEGER :: M, N, NRHS, LDA, LDB, LWORK, INFO
     REAL(KIND=RT), DIMENSION(:), ALLOCATABLE :: WORK
     REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: PROJECTION
-    EXTERNAL :: SGELS
+    INTERFACE
+       SUBROUTINE SGELS(TRANS, M, N, NRHS, A, LDA, B, LDB, WORK, LWORK, INFO)
+         USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
+         CHARACTER, INTENT(IN) :: TRANS
+         INTEGER, INTENT(IN) :: M, N, NRHS, LDA, LDB, LWORK
+         REAL(KIND=RT), INTENT(INOUT), DIMENSION(LDA,*) :: A
+         REAL(KIND=RT), INTENT(IN), DIMENSION(LDB,*) :: B
+         REAL(KIND=RT), INTENT(INOUT), DIMENSION(*) :: WORK
+         INTEGER, INTENT(OUT) :: INFO
+       END SUBROUTINE SGELS
+    END INTERFACE
+    ! TODO: Test this function since I redefined the interface and updated some code.
+    ! 
     ! Reduce the rank of B to the desired size, if appropriate.
     IF (SIZE(X,2) .LT. SIZE(B,2)) THEN
-       NRHS = MIN(SIZE(B,1), SIZE(B,2))
+       NRHS = MIN(SIZE(B,1), SIZE(X,2))
        ALLOCATE( WORK(NRHS), PROJECTION(NRHS,NRHS) )
        ! Compute the SVD to use as the projection.
        CALL SVD(B, WORK, PROJECTION, RANK=NRHS, STEPS=10)
        ! Project B down (and zero out the remaining columns).
-       NRHS = MIN(NRHS, SIZE(X,2))
        B(:,:NRHS) = MATMUL(B(:,:), PROJECTION(:,:NRHS))
        IF (SIZE(B,2) .GT. NRHS) B(:,NRHS+1:) = 0.0_RT
        DEALLOCATE(PROJECTION, WORK)
+    ELSE
+       NRHS = MIN(SIZE(B,1), SIZE(B,2))
     END IF
     ! Set variables for calling least squares routine.
     M = SIZE(A,1)
     N = SIZE(A,2)
-    NRHS = R
     LDA = SIZE(A,1)
     LDB = SIZE(B,1)
     ! Allocate the work space for the call.

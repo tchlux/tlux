@@ -5,17 +5,17 @@ from tlux.approximate.base import Approximator
 
 # Wrapper class for using the Delaunay fortran code
 class Delaunay(Approximator):
-    os.environ["OMP_NESTED"] = "TRUE"
     def __init__(self):
-        # from util.approximate.delaunay import delsparse
-        import fmodpy
-        cwd = os.path.dirname(os.path.abspath(__file__))
-        self.delsparse = fmodpy.fimport(os.path.join(cwd,"delsparse.f90"), lapack=True, 
-                                        blas=True, omp=True, output_dir=cwd, verbose=False,
-                                        f_compiler_args="-std=legacy -fPIC -shared -O3",
-        )
         # Set up the algorithm for parallel or serial evaluation.
-        self.delaunay = self.delsparse.delaunaysparses
+        try:
+            # TODO: Enable nested parallization.
+            # os.environ["OMP_NESTED"] = "TRUE"
+            from tlux.approximate.delaunay.delsparse import delaunaysparses
+        except:
+            from tlux.setup import build_delaunay
+            delsparse = build_delaunay()
+            delaunaysparses = delsparse.delaunaysparses
+        self.delaunay = delaunaysparses
         # Initialize containers.
         self.x = None
         self.y = None
