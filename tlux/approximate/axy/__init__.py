@@ -107,7 +107,7 @@ class AXY:
         except:
             from tlux.setup import build_axy
             try:
-                build_axy()
+                self.AXY = build_axy().axy
             except:
                 # TODO:
                 #  - python fallback that supports the basic evaluation of

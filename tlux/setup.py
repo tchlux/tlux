@@ -31,15 +31,15 @@ def build_axy():
     _path = os.path.join(_dir, "axy.f90")
     _axy = fmodpy.fimport(
         _path, dependencies=_dependencies, output_dir=_dir,
-        blas=True, lapack=True, omp=True, wrap=True, # verbose=False, 
-        link_blas="", link_lapack="", link_omp="", 
+        blas=True, lapack=True, omp=True, wrap=True, # verbose=True, 
+        link_blas="", link_lapack="",
         symbols = [
-            ("_sgemm_", "blas"),
-            ("_sgels_", "lapack"),
-            ("_omp_get_max_threads_", "omp")
+            ("sgemm_", "blas"),
+            ("sgels_", "lapack"),
+            ("omp_get_max_threads_", "omp")
         ],
         libraries = [
-            _this_dir, np.__path__[0],
+            _dir, np.__path__[0],
             "/usr/lib",
             "/opt/homebrew/Cellar/openblas",
             "/opt/homebrew/Cellar/libomp",
