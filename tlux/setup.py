@@ -33,16 +33,11 @@ def build_axy():
         _path, dependencies=_dependencies, output_dir=_dir,
         blas=True, lapack=True, omp=True, wrap=True, # verbose=True, 
         link_blas="", link_lapack="",
+        libraries = [_dir] + fmodpy.config.libraries,
         symbols = [
             ("sgemm_", "blas"),
             ("sgels_", "lapack"),
             ("omp_get_max_threads_", "omp")
-        ],
-        libraries = [
-            _dir, np.__path__[0],
-            "/usr/lib",
-            "/opt/homebrew/Cellar/openblas",
-            "/opt/homebrew/Cellar/libomp",
         ],
     )
     return _axy
@@ -56,7 +51,11 @@ def build_balltree():
     # Ball tree.
     _dependencies = ["swap.f90", "prune.f90", "fast_select.f90", "fast_sort.f90", "ball_tree.f90"]
     _path = os.path.join(_dir, "ball_tree.f90")
-    _balltree = fmodpy.fimport(_path, dependencies=_dependencies, output_dir=_dir, omp=True)
+    _balltree = fmodpy.fimport(
+        _path, dependencies=_dependencies, output_dir=_dir, omp=True,
+        libraries = [_dir] + fmodpy.config.libraries,
+        symbols = [("omp_get_max_threads_", "omp")],
+    )
     # Fast sort.
     _dependencies = ["swap.f90", "fast_sort.f90"]
     _path = os.path.join(_dir, "fast_sort.f90")
@@ -69,7 +68,7 @@ def build_balltree():
     _path = os.path.join(_dir, "prune.f90")
     _prune = fmodpy.fimport(_path, output_dir=_dir)
     return _balltree.ball_tree, _fast_sort.fast_sort, _fast_select.fast_select, _prune.prune
-    
+
 
 # Build the Delaunay code.
 def build_delaunay():

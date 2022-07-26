@@ -4,12 +4,8 @@
 #       (budget < size(order)) when there are duplicate data points.
 # TODO: Make queries over trees with size > built do a brute-force
 #       search over the unbuilt portion of the tree (when exact).
-# TODO: Set the OMP variables inside of the Fortran code.
-#       OMP_NUM_THREADS -> cpu_count
-#       OMP_MAX_ACTIVE_LEVELS -> ceil(log2(cpu_count))
-# TODO: Move the built procedure to the setup file.
 
-import os 
+import os
 import numpy as np
 
 # Count the number of CPUs for setting default parallelism.
@@ -104,156 +100,165 @@ def argselect(values, k, indices=None, divisor=None, max_size=None):
 # Class for constructing a ball tree.
 class BallTree:
     # Given points and a leaf size, construct a ball tree.
-    def __init__(self, points=None, dtype=None, transpose=True,
-                 leaf_size=1, reorder=True, root=None):
+    def __init__(self, points=None, transpose=True, build=True,
+                 leaf_size=1, num_threads=None, max_levels=None,
+                 max_copy_bytes=None, **build_kwargs):
+        # Set the internals.
         self.leaf_size = leaf_size
-        # Assign the data type if it was provided.
-        if (dtype is not None):
-            self.ttype = dtype
-            self._set_type_internals()
-        else: self.ttype = None
+        self.built = 0
+        self.size = 0
+        self.tree    = None
+        self.usage   = None
+        self.sq_sums = None
+        self.order   = None
+        self.radii   = None
+        self.medians  = None
         # Assign the various pruning functions.
+        self._balltree = ball_tree
         self._inner = prune.inner
         self._outer = prune.outer
         self._top = prune.top
+        # Configure the OpenMP environment.
+        self._balltree.configure(num_threads, max_levels)
+        # Set the maximum number of bytes 
+        if (max_copy_bytes is not None):
+            self._balltree.max_copy_bytes = max_copy_bytes
         # Assign the points and build the tree, if provided.
         if (points is not None):
             self.add(points, transpose=transpose)
-            self.build(reorder=reorder, root=root)
+            if (build): self.build(**build_kwargs)
 
-    # Given the data type of this class, setup which internal methods
-    # are called (for the appropriate number sizes).
-    def _set_type_internals(self):
-        if ('float32' in str(self.ttype)):
-            self.sstype = np.float32
-            self._build_tree = ball_tree.build_tree
-            self._fix_order  = ball_tree.fix_order
-            self._bt_nearest = ball_tree.nearest
-        else:
-            class UnsupportedType(Exception): pass
-            raise(UnsupportedType(f"The type '{self.ttype.name}' is not supported."))
-
-    # Based on the size and 'built' amount and the 'size' internal: if
-    # searching, return 'built' portion of tree; if building return
-    # the 'size' portion of tree.
-    def _get_order(self, search=False):
-        # For a search, only use the built portion of the tree.
-        if search:
-            if (self.built == self.tree.shape[1]): return self.order
-            else: return self.order[:self.built]
-        # For a build, only use the 'size' kept points in the tree.
-        else:
-            if (self.size == self.tree.shape[1]): return self.order
-            else: return self.order[:self.size]
 
     # Add points to this ball tree, if the type is not yet defined,
     # then initialize the type of this tree to be same as added points.
     def add(self, points, transpose=True):
-        # Assign the data type if it is not set.
-        if (self.ttype is None):
-            self.ttype = np.float32
-            self._set_type_internals()
-        elif (points.dtype != self.ttype):
-            class WrongType(Exception): pass
-            raise(WrongType(f"The points provided were type '{points.dtype.name}', expected '{self.ttype.name}'."))
         # Transpose the points if the are not already column-vectors.
         if transpose: points = points.T
         # If there are existing points, make sure the new ones match.
-        if hasattr(self, "size"):
+        if (self.tree is not None):
             # If possible, pack the points into available space.
             if (points.shape[1] <= self.tree.shape[1] - self.size):
                 self.tree[:,self.size:self.size+point.shape[1]] = points
                 self.size += points.shape[1]
             else:
-                old_tree = self.tree
-                old_points = self.tree[:,:self.size]
-                dim = self.tree.shape[1]
+                # Store the old internal tree-defining attributes.
+                old_tree = self.tree[:,:self.size]
+                old_usage = self.usage[:self.size]
+                old_sq_sums = self.sq_sums[:self.size]
+                old_order = self.order[:self.size]
+                old_radii = self.radii[:self.built]
+                old_medians = self.medians[:self.built]
+                old_size = self.size
+                # Compute the new size and initialize the memory for the new tree.
                 self.size += points.shape[1]
-                self.tree = np.zeros((dim, self.size), dtype=self.ttype, order='F')
+                self.tree = np.zeros(
+                    (self.tree.shape[0], self.size),
+                    dtype='float32', order='F')
                 # Assign the relevant internals for this tree.
-                self.sq_sums = np.zeros(self.tree.shape[1],  dtype=self.sstype)
+                self.usage   = np.zeros(self.tree.shape[1],  dtype='int64')
+                self.sq_sums = np.zeros(self.tree.shape[1],  dtype='float32')
                 self.order   = np.arange(self.tree.shape[1], dtype='int64') + 1
                 self.radii   = np.zeros(self.tree.shape[1],  dtype='float32')
-                self.splits  = np.zeros(self.tree.shape[1],  dtype='float32')
-                # Pack the old points and the new points into a single tree.
-                self.tree[:,:old_points.shape[1]] = old_points
-                self.tree[:,old_points.shape[1]:] = points
-                # Delete the old tree.
-                del old_tree
-                self.built = 0
-                return
+                self.medians  = np.zeros(self.tree.shape[1],  dtype='float32')
+                # Pack the old points and the new points into a single tree
+                #  while ensuring the built parts of the previous tree are still valid.
+                self.tree[:,:old_tree.shape[1]] = old_tree
+                self.tree[:,old_tree.shape[1]:] = points
+                self.usage[:old_size] = old_usage
+                self.sq_sums[:old_size] = old_sq_sums
+                self.order[:self.built] = old_order
+                self.radii[:self.built] = old_radii
+                self.medians[:self.built] = old_medians
+                # Delete the old tree components.
+                del old_tree, old_usage, old_sq_sums, old_order, old_radii, old_medians
         else:
             # Save the points internally as the tree.
-            self.tree    = np.asarray(points, order='F', dtype=self.ttype)
+            self.tree    = np.asarray(points, order='F', dtype='float32')
             # Assign the relevant internals for this tree.
-            self.sq_sums = np.zeros(self.tree.shape[1],  dtype=self.sstype)
+            self.usage   = np.zeros(self.tree.shape[1],  dtype='int64')
+            self.sq_sums = np.zeros(self.tree.shape[1],  dtype='float32')
             self.order   = np.arange(1, self.tree.shape[1]+1, dtype='int64')
             self.radii   = np.zeros(self.tree.shape[1],  dtype='float32')
-            self.splits  = np.zeros(self.tree.shape[1],  dtype='float32')
+            self.medians  = np.zeros(self.tree.shape[1],  dtype='float32')
             # Store BallTree internals for knowing how to evaluate.
             self.built = 0
             self.size = self.tree.shape[1]
+        # Compute the square sums for the new points.
+        self._balltree.compute_square_sums(
+            self.tree[:,self.built:self.size],
+            self.sq_sums[self.built:self.size]
+        )
+
+    # Restructure the ball tree so the points are in locally
+    # contiguous blocks of memory (local by branch + leaf).
+    def reorder(self):
+        self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
 
     # Build a tree out.
-    def build(self, leaf_size=None, reorder=True, has_sq_sums=False, root=None):
+    def build(self, leaf_size=None, root=None, reorder=None):
         # Get the leaf size if it was not given.
-        if (leaf_size is None): leaf_size = self.leaf_size
+        if (leaf_size is not None): self.leaf_size = leaf_size
         # Translate the root from python index to fortran index if provided.
         if (root is not None): root += 1
-        # Automatically set 'reorder' to False if the array is more than
-        # 2 GB in size because this requires a doubling of memory usage.
-        if (reorder is None): reorder = (self.tree.nbytes / 2**30) <= 2
         # Build tree (in-place operation).
         #    .tree     will not be modified
         #    .sq_sums  will contain the squared sums of each point
         #    .radii    will be modified to have the radius of specific
         #              node, or 0.0 if this point is a leaf.
-        #    .splits   will be modified to have the distance to the "split"
+        #    .medians  will be modified to have the distance to the
         #              median child node, or 0.0 if this point is a leaf.
         #    .order    will be the list of indices (1-indexed) that
         #              determine the structure of the ball tree.
-        order = self._get_order(search=False)
-        self._build_tree(self.tree, self.sq_sums, self.radii, self.splits, order,
-                         leaf_size=leaf_size, computed_sq_sums=has_sq_sums, 
-                         root=root)
-        self.built = len(order)
-        # Store the index mapping from the build.
-        if hasattr(self, "index_mapping"): del self.index_mapping
-        self.index_mapping = order.copy() - 1
-        # Restructure the ball tree so the points are in locally
-        # contiguous blocks of memory (local by branch + leaf).
-        if reorder: self._fix_order(self.tree, self.sq_sums, self.radii, self.splits, order)
-
-    # Restructure the ball tree so the points are in locally
-    # contiguous blocks of memory (local by branch + leaf).
-    def reorder(self):
-        order = self._get_order(search=True)
-        self._fix_order(self.tree, self.sq_sums, self.radii, self.splits, order)
-
-    # Find the "k" nearest neighbors to all points in z. Uses the same
-    # interface as the "BallTree.nearest" function, see help for more info.
-    def query(self, *args, **kwargs): return self.nearest(*args, **kwargs)
+        self._balltree.build_tree(
+            self.tree, self.sq_sums,self.radii, self.medians, self.order[:self.size],
+            leaf_size=self.leaf_size, root=root,
+        )
+        self.built = self.size
+        # Restructure the ball tree so the points are in locally contiguous blocks of
+        # memory (local by branch + leaf), as long as allowed (by user or memory).
+        if (reorder or ((reorder is None) and (self.tree.nbytes < self._balltree.max_copy_bytes))):
+            self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
 
     # Find the "k" nearest neighbors to all points in z.
-    def nearest(self, z, k=1, leaf_size=None, return_distance=True,
-                transpose=True, budget=None, randomness=None):
-        # Get the leaf size.
-        if (leaf_size is None): leaf_size = self.leaf_size
+    def nearest(self, z, k=1, return_distance=True, transpose=True,
+                budget=None, randomness=None, include_unbuilt=True):
         # If only a single point was given, convert it to a matrix.
-        if (len(z.shape) == 1): z = np.array([z])
+        if (len(z.shape) == 1): z = z.reshape((1,-1))
         # Transpose the points if appropriate.
         if transpose: z = z.T
         # Make sure the 'k' value isn't bigger than the tree size.
         k = min(k, self.built)
         # Initialize holders for output.
-        points  = np.asarray(z, order='F', dtype=self.ttype)
+        points  = np.asarray(z, order='F', dtype='float32')
         indices = np.ones((k, points.shape[1]), order='F', dtype='int64')
         dists   = np.ones((k, points.shape[1]), order='F', dtype='float32')
-        order = self._get_order(search=True)
         # Compute the nearest neighbors.
-        self._bt_nearest(points, k, self.tree, self.sq_sums, self.radii,
-                         self.splits, order, leaf_size, indices, dists,
-                         to_search=budget, randomness=randomness)
+        self._balltree.nearest(
+            points, k,
+            self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built],
+            self.leaf_size, indices, dists, to_search=budget, randomness=randomness
+        )
+        if (budget is not None):
+            budget = max(0, budget - self.built)
+        # Compute distance to points that have not been built into the tree.
+        if (self.size > self.built):
+            uindices = np.zeros((k, points.shape[1]), order='F', dtype='int64')
+            udists   = np.zeros((k, points.shape[1]), order='F', dtype='float32')
+            uorder   = np.arange(self.size-self.built, dtype='int64') + 1
+            uleaf    = self.size - self.built # The "leaf size" for the unbuilt points.
+            self._balltree.nearest(
+                points, k,
+                self.tree[:,self.built:], self.sq_sums[self.built:], self.radii, self.medians,
+                uorder, uleaf, uindices, udists, to_search=budget,
+            )
+            # Keep the nearest of the provided dists and indices.
+            print("uindices: ", uindices)
+            print("udists:   ", udists)
+            print()
+            raise(NotImplementedError("Need to merge results from ubuilt and built."))
+        # Update the usage statistics for all points referenced in return values.
+        i = (indices-1).flatten()
+        self.usage += np.bincount(i, minlength=self.usage.size)
         # Return the results.
         if return_distance:
             if transpose: return dists.T, indices.T - 1
@@ -262,6 +267,11 @@ class BallTree:
             if transpose: return indices.T - 1
             else:         return indices - 1
 
+    # Find the "k" nearest neighbors to all points in z. Uses the same
+    # interface as the "BallTree.nearest" function, see help for more info.
+    def query(self, *args, **kwargs): return self.nearest(*args, **kwargs)
+    def __call__(self, *args, **kwargs): return self.nearest(*args, **kwargs)
+
     # Summarize this tree.
     def __str__(self):
         if not hasattr(self,"tree"): return "empty BallTree"
@@ -269,12 +279,14 @@ class BallTree:
 
     # Return the usable length of this tree.
     def __len__(self):
-        if not hasattr(self,"built"): return 0
-        else:                         return self.built
+        return self.size
 
     # Get an index point from the tree.
     def __getitem__(self, index):
-        return self.tree[:,self.order[:self.built][index]-1]
+        if (self.tree is not None):
+            return self.tree[:,self.order[:self.built][index]-1]
+        else:
+            raise(IndexError("Attempting to __getitem__ with '[]' from an empty tree."))
 
     # Prune this tree and compact its points into the front of the
     # array, adjust '.size' and '.built' accordingly.
@@ -320,3 +332,39 @@ class BallTree:
         # Rebuild the tree if desired.
         if build: self.build(root=0)
 
+
+if __name__ == "__main__":
+    print("_"*70)
+    print(" TESTING AXY MODULE")
+
+    from tlux.plot import Plot
+    from tlux.random import well_spaced_ball, well_spaced_box
+
+    # A function for testing approximation algorithms.
+    def f(x):
+        x = x.reshape((-1,2))
+        x, y = x[:,0], x[:,1]
+        return (3*x + np.cos(8*x)/2 + np.sin(5*y))
+
+    # Set the number of points, dimension, and random seed for repeatability.
+    n = 10
+    d = 2
+    seed = 2
+    np.random.seed(seed)
+
+    # Create the test plot.
+    x = np.asarray(well_spaced_box(n, d), order="C")
+    y = f(x)
+
+    # Create the tree.
+    tree = BallTree(x, reorder=False)
+
+    # Define a function that reproduces the function via application of nearest neighbor.
+    fy = lambda x: y[tree(x, return_distance=False, k=1)]
+    x_min_max = np.asarray([np.min(x,axis=0), np.max(x,axis=0)]).T
+
+    # Generate a plot to visualize the result.
+    p = Plot()
+    p.add("data", *(x.T), y)
+    p.add_function("balltree", fy, *x_min_max, plot_points=10000, vectorized=True)
+    p.show()

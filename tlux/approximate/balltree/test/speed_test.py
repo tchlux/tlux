@@ -18,31 +18,37 @@ s = time.time(); t = BallTree(x); e = time.time(); print(f"{e-s:.6f} second fit"
 print()
 
 time.sleep(0.1)
-s = time.time(); print(t.query(x[i:i+1])[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (1 nearest)")
+s = time.time(); print(t.query(x[i:i+1])[0][0].tolist()); e = time.time()
+print(f"{e-s:.6f} seconds (1 nearest)")
 print()
 
 time.sleep(0.1)
-s = time.time(); print(t.query(x[i:i+1], k=5)[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (5 nearest)")
+s = time.time(); print(t.query(x[i:i+1], k=5)[0][0].tolist()); e = time.time()
+print(f"{e-s:.6f} seconds (5 nearest)")
 print()
 
 time.sleep(0.1)
-s = time.time(); print(t.query(x[i:i+1], k=100)[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (100 nearest)")
+s = time.time(); print(t.query(x[i:i+1], k=100)[0][0].tolist()); e = time.time()
+print(f"{e-s:.6f} seconds (100 nearest)")
 print()
 print()
 
 try:
     time.sleep(0.1)
-    s = time.time(); print(t.query(x[i:i+1], k=5, budget=100000)[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (100K budget)")
+    s = time.time(); print(t.query(x[i:i+1], k=5, budget=100000)[0][0].tolist()); e = time.time();
+    print(f"{e-s:.6f} seconds (100K budget)")
     print()
 
     time.sleep(0.1)
-    s = time.time(); print(t.query(x[i:i+1], k=5, budget=100)[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (100 budget)")
+    s = time.time(); print(t.query(x[i:i+1], k=5, budget=100)[0][0].tolist()); e = time.time();
+    print(f"{e-s:.6f} seconds (100 budget)")
     print()
     print()
 
     for i in range(10):
         time.sleep(0.01)
-        s = time.time(); print(t.query(x[i:i+1], k=5, budget=10000, randomness=0.2)[0][0].tolist()); e = time.time(); print(f"{e-s:.6f} seconds (10K budget)")
+        s = time.time(); print(t.query(x[i:i+1], k=5, budget=10000, randomness=0.2)[0][0].tolist()); e = time.time();
+        print(f"{e-s:.6f} seconds (10K budget)")
         print()
 except: pass
 

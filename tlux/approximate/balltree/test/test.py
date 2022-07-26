@@ -1,16 +1,9 @@
 import numpy as np
 
 
-# TODO: Something is broken, ball tree is producing incorrect results.
-# TODO: Set the leaf size to be the size of the unbuilt points, query those too
-#       when doing an exact nearest neighbor search.
-# TODO: Make sure the distance measuring code to leaves is as fast as possible
-#       (using matrix multiplication).
-
-LARGE_TEST   = False
+LARGE_TEST   = True
 COMPARE_AGAINST_SKLEARN = True
 TEST_TREE    = False
-TEST_APPROX  = False
 TEST_PRUNE   = False
 TEST_SORT    = False
 
@@ -28,18 +21,17 @@ if COMPARE_AGAINST_SKLEARN:
     t = Timer()
 
     if LARGE_TEST: train, dim = 1000000, 100
-    else:          train, dim = 7, 2
+    else:          train, dim = 5, 2
     test = 1
-    leaf_size = 10
+    leaf_size = 32
     k = 5
     print("Initializing data..", flush=True)
     np.random.seed(0)
-    x = np.random.random(size=(train,dim))
-    z = np.random.random(size=(test,dim))
+    x = np.random.random(size=(train,dim)).astype("float32")
+    z = np.random.random(size=(test,dim)).astype("float32")
     print()
     print("x:", x.shape)
     print("z:", z.shape)
-
     # ----------------------------------------------------------------
     from tlux.approximate.balltree import BallTree as BT
     print()
@@ -70,13 +62,10 @@ if COMPARE_AGAINST_SKLEARN:
     print("d: ",d[0])
     print("i: ",i[0])
     d2, i2 = d[0].copy(), i[0].copy()
-
     # ----------------------------------------------------------------
     print()
     print("Brute Force")
     # Convert to float64 (for regular test this does nothing, for integer...
-    x = x.astype('float64')
-    z = z.astype('float64')
     t.start()
     d = np.sqrt(np.sum(x**2, axis=1) + np.sum(z[0]**2) - 2 * np.dot(x, z[0]))
     i = np.argsort(d)
@@ -87,19 +76,13 @@ if COMPARE_AGAINST_SKLEARN:
     print("d: ",d)
     print("i: ",i)
     d3, i3 = d.copy(), i.copy()
-
     # ----------------------------------------------------------------
     max_diff = max(max(abs(d1 - d2)), max(abs(d1-d3)))
-    ds_match = max_diff < 2**(-26)
+    ds_match = max_diff < 2**(-13) # 2**(-26)
     is_match = np.all(i1 == i2) and np.all(i1 == i3)
     print()
     print(f"Max difference in distance calculations:\n   {max_diff:.3e}")
-    try: assert(ds_match and is_match)
-    except:
-        print()
-        print("ERROR")
-        print( "  is_match: ",is_match)
-        print(f"  ds_match:  {ds_match} {max(abs(d1-d3)):.3e} {max(abs(d1 - d2)):.3e}")
+    assert (ds_match and is_match), f"\nERROR\n  is_match: {is_match}\n  ds_match: {ds_match} {max(abs(d1-d3)):.3e} {max(abs(d1 - d2)):.3e}"
 
 
 if TEST_TREE:
@@ -108,12 +91,12 @@ if TEST_TREE:
 
     # if LARGE_TEST: size = (20000000,10)
     # if LARGE_TEST: size = (100000,1000)
-    if LARGE_TEST: size = (5000000, 100)
+    if LARGE_TEST: size = (50000000, 32)
     else:          size = (4, 2)
     print()
     print(f"Allocating array.. {size}", flush=True)
 
-    x = np.random.random(size=size)
+    x = np.random.random(size=size).astype("float32")
 
     # Handle printout based on test size.
     if len(x) < 20:
@@ -157,37 +140,20 @@ if TEST_TREE:
     t.stop()
     print("ball tree query in",t(),"seconds")
     d,i = d[0], i[0]
-    # i = tree.index_mapping[i]
+    # Do an approximate query.
     t.start()
-    true_dists = np.linalg.norm(np.float64(x) - np.float64(z[0,:]), axis=1)
+    _,_ = tree.query(z, k=k, budget=100)
+    t.stop()
+    print("ball tree constrained query in",t(),"seconds")
+    # Measure the "true" distances between points.
+    t.start()
+    true_dists = np.linalg.norm(x - z[0,:], axis=1)
     t.stop()
     print("linear search in",t(),"seconds")
     print()
     print("Tree/Truth")
     print("i: \n",i,"\n",np.argsort(true_dists)[:k])
     print("d: \n",d,"\n",np.sort(true_dists)[:k])
-
-
-if TEST_APPROX:
-    from tlux.approximate.balltree import BallTree 
-    size = (15,1)
-    x = np.linspace(0,size[0]-1,size[0]).reshape(size)
-    print("x: ",x)
-    # 
-    print("Building tree..", flush=True)
-    k = 5
-    leaf_size = 1
-    tree = BallTree(x, leaf_size=leaf_size)
-    print("tree: ",tree)
-    print("x: ",x)
-    # 
-    z = np.array([[1.0,]])
-    d, i = tree.nearest(z)
-    print("d: ",d)
-    print("i: ",i)
-    print("tree[i[0]]: ",tree[i[0,0]])
-    print()
-    print(tree.nearest(z, look_ahead=3))
 
 
 if TEST_PRUNE:
@@ -294,3 +260,4 @@ if TEST_SORT:
     ids = pts.argsort()
     t.stop()
     print("numpy:   %.6f"%(t.total))
+

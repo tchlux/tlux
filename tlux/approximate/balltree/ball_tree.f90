@@ -1,5 +1,14 @@
+! A nearest neighbor tree structure that picks points on the convex hull and
+!  splits regions in half by the 2-norm distance to the median child.
+!  Construction is parallelized for shared memory architectures with OpenMP,
+!  and querying is parallelized over batched query points (but serial for
+!  a single query). In addition a nearest neighbor query budget can be
+!  provided to generate approximate results, with the guarantee that exact
+!  nearest neighbors will be found given a budget greater than the logarithm
+!  base two of the number of points in the tree.
+
 MODULE BALL_TREE
-  USE ISO_FORTRAN_ENV, ONLY: REAL32, INT64
+  USE ISO_FORTRAN_ENV, ONLY: R32 => REAL32, I64 => INT64
   USE PRUNE,       ONLY: LEVEL
   USE SWAP,        ONLY: SWAP_I64
   USE FAST_SELECT, ONLY: ARGSELECT
@@ -8,48 +17,96 @@ MODULE BALL_TREE
 
   ! Max bytes for which a doubling of memory footprint (during copy)
   !  is allowed to happen (switches to using scratch file instead).
-  INTEGER(KIND=INT64) :: MAX_COPY_BYTES = 2_INT64 ** 32_INT64
+  INTEGER(KIND=I64) :: MAX_COPY_BYTES = 2_I64 ** 33_I64 ! 8GB
+
+  ! Function that is defined by OpenMP.
+  INTERFACE
+     ! Enabling nested parallelization.
+     SUBROUTINE OMP_SET_NESTED(NESTED)
+       LOGICAL :: NESTED
+     END SUBROUTINE OMP_SET_NESTED
+     ! Nested parallelism levels.
+     FUNCTION OMP_GET_MAX_ACTIVE_LEVELS()
+       INTEGER :: OMP_GET_MAX_ACTIVE_LEVELS
+     END FUNCTION OMP_GET_MAX_ACTIVE_LEVELS
+     SUBROUTINE OMP_SET_MAX_ACTIVE_LEVELS(MAX_LEVELS)
+       INTEGER :: MAX_LEVELS
+     END SUBROUTINE OMP_SET_MAX_ACTIVE_LEVELS
+     ! Number of threads.
+     FUNCTION OMP_GET_MAX_THREADS()
+       INTEGER :: OMP_GET_MAX_THREADS
+     END FUNCTION OMP_GET_MAX_THREADS
+     SUBROUTINE OMP_SET_NUM_THREADS(NUM_THREADS)
+       INTEGER :: NUM_THREADS
+     END SUBROUTINE OMP_SET_NUM_THREADS
+  END INTERFACE
 
 CONTAINS
 
-  ! Re-arrange elements of POINTS into a binary ball tree.
-  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, SPLITS, ORDER,&
-       ROOT, LEAF_SIZE, COMPUTED_SQ_SUMS)
-    REAL(KIND=REAL32),   INTENT(INOUT), DIMENSION(:,:) :: POINTS
-    REAL(KIND=REAL32),   INTENT(OUT),   DIMENSION(:) :: SQ_SUMS
-    REAL(KIND=REAL32),   INTENT(OUT),   DIMENSION(:) :: RADII
-    REAL(KIND=REAL32),   INTENT(OUT),   DIMENSION(:) :: SPLITS
-    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: ORDER
-    INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: ROOT, LEAF_SIZE
-    LOGICAL,             INTENT(IN), OPTIONAL :: COMPUTED_SQ_SUMS
+  ! Configure OpenMP parallelism for this ball tree code.
+  SUBROUTINE CONFIGURE(NUM_THREADS, MAX_LEVELS, NESTED)
+    INTEGER, OPTIONAL :: NUM_THREADS, MAX_LEVELS
+    LOGICAL, OPTIONAL :: NESTED
+    ! Nested parallelism.
+    IF (PRESENT(NESTED)) THEN
+       CALL OMP_SET_NESTED(NESTED)
+    ELSE
+       CALL OMP_SET_NESTED(.TRUE.)
+    END IF
+    ! Max nested levels of parallelism.
+    IF (PRESENT(MAX_LEVELS)) THEN
+       CALL OMP_SET_MAX_ACTIVE_LEVELS(MAX_LEVELS)
+    ELSE
+       CALL OMP_SET_MAX_ACTIVE_LEVELS( &
+            1 + INT(CEILING(LOG(REAL(OMP_GET_MAX_THREADS())) / LOG(2.0))) &
+       )
+    END IF
+    ! Number of threads used by default in loops.
+    IF (PRESENT(NUM_THREADS)) THEN
+       CALL OMP_SET_NUM_THREADS(NUM_THREADS)
+    ELSE
+       CALL OMP_SET_NUM_THREADS(OMP_GET_MAX_THREADS())
+    END IF
+  END SUBROUTINE CONFIGURE
+
+  ! Compute the square sums of a bunch of points (with parallelism).
+  SUBROUTINE COMPUTE_SQUARE_SUMS(POINTS, SQ_SUMS)
+    REAL(KIND=R32), INTENT(IN),  DIMENSION(:,:) :: POINTS
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: SQ_SUMS
+    INTEGER :: I
+    !$OMP PARALLEL DO
+    DO I = 1, SIZE(POINTS,2)
+       SQ_SUMS(I) = SUM(POINTS(:,I)**2)
+    END DO
+    !$OMP END PARALLEL DO
+  END SUBROUTINE COMPUTE_SQUARE_SUMS
+
+  ! Re-arrange elements of POINTS into a binary ball tree about medians.
+  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER, ROOT, LEAF_SIZE)
+    REAL(KIND=R32), INTENT(INOUT), DIMENSION(:,:) :: POINTS
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: SQ_SUMS
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: RADII
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: MEDIANS
+    INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: ORDER
+    INTEGER(KIND=I64), INTENT(IN), OPTIONAL :: ROOT, LEAF_SIZE
     ! Local variables
-    INTEGER(KIND=INT64) :: CENTER_IDX, MID, I, J, LS
-    REAL(KIND=REAL32), DIMENSION(SIZE(POINTS,1)) :: PT
-    REAL(KIND=REAL32), DIMENSION(SIZE(ORDER)) :: SQ_DISTS
-    REAL(KIND=REAL32) :: MAX_SQ_DIST, SQ_DIST, SHIFT
-    EXTERNAL :: DGEMM
+    INTEGER(KIND=I64) :: CENTER_IDX, MID, I, J, LS
+    REAL(KIND=R32), DIMENSION(SIZE(POINTS,1)) :: PT
+    REAL(KIND=R32), DIMENSION(SIZE(ORDER)) :: SQ_DISTS ! TODO: Remove allocation, pass as input, share with children.
+    REAL(KIND=R32) :: MAX_SQ_DIST, SQ_DIST, SHIFT
     ! Set the leaf size to 1 by default (most possible work required,
     ! but guarantees successful use with any leaf size).
     IF (PRESENT(LEAF_SIZE)) THEN ; LS = LEAF_SIZE
     ELSE                         ; LS = 1
     END IF
-    ! If no squared sums were provided, compute them.
-    IF (.NOT. PRESENT(COMPUTED_SQ_SUMS) .OR. &
-         .NOT. COMPUTED_SQ_SUMS) THEN
-       !$OMP PARALLEL DO
-       DO I = 1, SIZE(POINTS,2)
-          SQ_SUMS(I) = SUM(POINTS(:,I)**2)
-       END DO
-       !$OMP END PARALLEL DO
-    END IF
     ! Set the index of the 'root' of the tree.
     IF (PRESENT(ROOT)) THEN ; CENTER_IDX = ROOT
     ELSE
        ! 1) Compute distances between first point (random) and all others.
-       ! 2) Pick the furthest point (on conv hull) from first as the center node.
+       ! 2) Pick the furthest point (on convex hull) from first as the center node.
        J = ORDER(1)
        PT(:) = POINTS(:,J)
-       SQ_DISTS(1) = 0.0_REAL32
+       SQ_DISTS(1) = 0.0_R32
        !$OMP PARALLEL DO
        ROOT_TO_ALL : DO I = 2, SIZE(ORDER)
           SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
@@ -65,7 +122,7 @@ CONTAINS
     ! Measure squared distance beween "center" node and all other points.
     J = ORDER(1)
     PT(:) = POINTS(:,J)
-    SQ_DISTS(1) = 0.0_REAL32
+    SQ_DISTS(1) = 0.0_R32
 
     !$OMP PARALLEL DO
     CENTER_TO_ALL : DO I = 2, SIZE(ORDER)
@@ -78,19 +135,19 @@ CONTAINS
     IF (SIZE(ORDER) .LE. LS) THEN
        SQ_DISTS(1) = MAXVAL(SQ_DISTS(:))
        RADII(ORDER(1)) = SQRT(SQ_DISTS(1))
-       SPLITS(ORDER(1)) = RADII(ORDER(1))
+       MEDIANS(ORDER(1)) = RADII(ORDER(1))
        IF (SIZE(ORDER) .GT. 1) THEN
-          RADII(ORDER(2:)) = 0.0_REAL32
-          SPLITS(ORDER(2:)) = 0.0_REAL32
+          RADII(ORDER(2:)) = 0.0_R32
+          MEDIANS(ORDER(2:)) = 0.0_R32
        END IF
        RETURN
     ELSE IF (SIZE(ORDER) .EQ. 2) THEN
        ! If the leaf size is 1 and there are only 2 elements, store
        ! the radius and exit (since there are no further steps.
        RADII(ORDER(1)) = SQRT(SQ_DISTS(2))
-       SPLITS(ORDER(1)) = RADII(ORDER(1))
-       RADII(ORDER(2)) = 0.0_REAL32
-       SPLITS(ORDER(2)) = 0.0_REAL32
+       MEDIANS(ORDER(1)) = RADII(ORDER(1))
+       RADII(ORDER(2)) = 0.0_R32
+       MEDIANS(ORDER(2)) = 0.0_R32
        RETURN
     END IF
 
@@ -98,7 +155,7 @@ CONTAINS
     ! Compute the last index that will belong "inside" this node.
     MID = (SIZE(ORDER) + 2) / 2
     CALL ARGSELECT(SQ_DISTS(2:), ORDER(2:), MID - 1)
-    SPLITS(ORDER(1)) = SQRT(SQ_DISTS(MID))
+    MEDIANS(ORDER(1)) = SQRT(SQ_DISTS(MID))
     ! Now ORDER has been rearranged such that the median distance
     ! element of POINTS is at the median location.
     ! Identify the furthest point (must be in second half of list).
@@ -116,49 +173,48 @@ CONTAINS
     ! Recurisively create this tree.
     !   build a tree with the root being the furthest from this center
     !   for the remaining "interior" points of this center node.
-    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, SPLITS, ORDER(2:MID), 1_INT64, LS, .TRUE.)
+    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER(2:MID), 1_I64, LS)
     !$OMP SECTION
     !   build a tree with the root being the furthest from this center
     !   for the remaining "exterior" points of this center node.
     !   Only perform this operation if there are >0 points available.
     IF (MID < SIZE(ORDER)) &
-         CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, SPLITS, &
-         ORDER(MID+1:), 1_INT64, LS, .TRUE.)
+         CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), 1_I64, LS)
     !$OMP END SECTIONS
     !$OMP END PARALLEL
   END SUBROUTINE BUILD_TREE
 
 
   ! Compute the K nearest elements of TREE to each point in POINTS.
-  SUBROUTINE NEAREST(POINTS, K, TREE, SQ_SUMS, RADII, SPLITS, ORDER, &
+  SUBROUTINE NEAREST(POINTS, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER, &
        LEAF_SIZE, INDICES, DISTS, TO_SEARCH, RANDOMNESS)
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:,:) :: POINTS, TREE
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: SQ_SUMS
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: RADII
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: SPLITS
-    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: ORDER
-    INTEGER(KIND=INT64), INTENT(IN)               :: K, LEAF_SIZE
-    INTEGER(KIND=INT64), INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: INDICES
-    REAL(KIND=REAL32),   INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: DISTS
-    INTEGER(KIND=INT64), INTENT(IN),  OPTIONAL    :: TO_SEARCH
-    REAL(KIND=REAL32),   INTENT(IN),  OPTIONAL    :: RANDOMNESS
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:,:) :: POINTS, TREE
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: SQ_SUMS
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: RADII
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: MEDIANS
+    INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: ORDER
+    INTEGER(KIND=I64), INTENT(IN) :: K, LEAF_SIZE
+    INTEGER(KIND=I64), INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: INDICES
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: DISTS
+    INTEGER(KIND=I64), INTENT(IN),  OPTIONAL :: TO_SEARCH
+    REAL(KIND=R32), INTENT(IN),  OPTIONAL :: RANDOMNESS
     ! Local variables.
-    INTEGER(KIND=INT64) :: I, B, BUDGET
-    INTEGER(KIND=INT64), DIMENSION(K+LEAF_SIZE+2) :: INDS_BUFFER
-    REAL(KIND=REAL32),   DIMENSION(K+LEAF_SIZE+2) :: DISTS_BUFFER
-    REAL(KIND=REAL32) :: RAND_PROB
+    INTEGER(KIND=I64) :: I, B, BUDGET
+    INTEGER(KIND=I64), DIMENSION(K+LEAF_SIZE+2) :: INDS_BUFFER
+    REAL(KIND=R32),   DIMENSION(K+LEAF_SIZE+2) :: DISTS_BUFFER
+    REAL(KIND=R32) :: RAND_PROB
     IF (PRESENT(TO_SEARCH)) THEN ; BUDGET = MAX(K, TO_SEARCH)
     ELSE ; BUDGET = SIZE(ORDER) ; END IF
-    IF (PRESENT(RANDOMNESS)) THEN ; RAND_PROB = MAX(0.0_REAL32, MIN(1.0_REAL32,RANDOMNESS)) / 2.0_REAL32
-    ELSE IF (BUDGET .LT. SIZE(ORDER)) THEN ; RAND_PROB = 0.01_REAL32
-    ELSE ; RAND_PROB = 0.0_REAL32
+    IF (PRESENT(RANDOMNESS)) THEN ; RAND_PROB = MAX(0.0_R32, MIN(1.0_R32,RANDOMNESS)) / 2.0_R32
+    ELSE IF (BUDGET .LT. SIZE(ORDER)) THEN ; RAND_PROB = 0.0_R32
+    ELSE ; RAND_PROB = 0.0_R32
     END IF
     ! For each point in this set, use the recursive branching
     ! algorithm to identify the nearest elements of TREE.
     !$OMP PARALLEL DO PRIVATE(INDS_BUFFER, DISTS_BUFFER, B)
     DO I = 1, SIZE(POINTS,2)
        B = BUDGET
-       CALL PT_NEAREST(POINTS(:,I), K, TREE, SQ_SUMS, RADII, SPLITS, ORDER, &
+       CALL PT_NEAREST(POINTS(:,I), K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER, &
             LEAF_SIZE, INDS_BUFFER, DISTS_BUFFER, RAND_PROB, CHECKS=B)
        ! Sort the first K elements of the temporary arry for return.
        INDICES(:,I) = INDS_BUFFER(:K)
@@ -168,27 +224,26 @@ CONTAINS
   END SUBROUTINE NEAREST
 
   ! Compute the K nearest elements of TREE to each point in POINTS.
-  RECURSIVE SUBROUTINE PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, SPLITS, &
+  RECURSIVE SUBROUTINE PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, &
        ORDER, LEAF_SIZE, INDICES, DISTS, RANDOMNESS, CHECKS, FOUND, PT_SS, D_ROOT)
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: POINT
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:,:) :: TREE
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: SQ_SUMS
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: RADII
-    REAL(KIND=REAL32), INTENT(IN), DIMENSION(:)   :: SPLITS
-    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: ORDER
-    INTEGER(KIND=INT64), INTENT(IN)               :: K, LEAF_SIZE
-    INTEGER(KIND=INT64), INTENT(OUT), DIMENSION(:) :: INDICES
-    REAL(KIND=REAL32),   INTENT(OUT), DIMENSION(:) :: DISTS
-    REAL(KIND=REAL32),   INTENT(IN)                :: RANDOMNESS
-    INTEGER(KIND=INT64), INTENT(INOUT), OPTIONAL   :: CHECKS
-    INTEGER(KIND=INT64), INTENT(INOUT), OPTIONAL   :: FOUND
-    REAL(KIND=REAL32),   INTENT(IN),    OPTIONAL   :: PT_SS
-    REAL(KIND=REAL32),   INTENT(IN),    OPTIONAL   :: D_ROOT
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: POINT
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:,:) :: TREE
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: SQ_SUMS
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: RADII
+    REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: MEDIANS
+    INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: ORDER
+    INTEGER(KIND=I64), INTENT(IN) :: K, LEAF_SIZE
+    INTEGER(KIND=I64), INTENT(OUT), DIMENSION(:) :: INDICES
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: DISTS
+    REAL(KIND=R32), INTENT(IN) :: RANDOMNESS
+    INTEGER(KIND=I64), INTENT(INOUT), OPTIONAL   :: CHECKS
+    INTEGER(KIND=I64), INTENT(INOUT), OPTIONAL   :: FOUND
+    REAL(KIND=R32), INTENT(IN), OPTIONAL :: PT_SS
+    REAL(KIND=R32), INTENT(IN), OPTIONAL :: D_ROOT
     ! Local variables
-    INTEGER(KIND=INT64) :: F, I, I1, I2, MID, ALLOWED_CHECKS
-    REAL(KIND=REAL32)   :: D, D0, D1, D2
-    REAL(KIND=REAL32)   :: PS, R
-    R = 0.0_REAL32 ! Initialize R (random number).
+    INTEGER(KIND=I64) :: F, I, I1, I2, MID, ALLOWED_CHECKS
+    REAL(KIND=R32) :: D, D0, D1, D2, PS, R
+    R = 0.0_R32 ! Initialize R (random number).
     ! Initialize FOUND for first call, if FOUND is present then
     ! this must not be first and all are present.
     INITIALIZE : IF (PRESENT(FOUND)) THEN
@@ -247,37 +302,38 @@ CONTAINS
        ! Store the maximum distance.
        D = MAXVAL(DISTS(:F),1)
        ! Generate a random number for randomized traversal of the tree.
-       IF (RANDOMNESS .GT. 0.0_REAL32) CALL RANDOM_NUMBER(R)
+       IF (RANDOMNESS .GT. 0.0_R32) CALL RANDOM_NUMBER(R)
        ! Determine which child to search (depth-first search) based
        ! on which child region the point lands in from the root.
        INNER_CHILD_CLOSER : IF ((R .LT. RANDOMNESS) .OR. &
-            ((R .LT. 1.0_REAL32-RANDOMNESS) .AND. (D0 .LE. SPLITS(ORDER(1))) )) THEN ! tree heuristic
+            ((R .LT. 1.0_R32-RANDOMNESS) .AND. (D0 .LE. MEDIANS(ORDER(1))))) THEN ! tree heuristic
           ! Search the inner child if it could contain a nearer point.
           SEARCH_INNER1 : IF ((F .LT. K) .OR. (D .GT. D1 - RADII(I1))) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, SPLITS, ORDER(2:MID), &
+             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(2:MID), &
                   LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D1)
           END IF SEARCH_INNER1
           ! Search the outer child if it could contain a nearer point.
           SEARCH_OUTER1 : IF (((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) &
                .AND. (I2 .NE. I1) .AND. (I2 .GT. 0)) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, SPLITS, ORDER(MID+1:), &
+             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
                   LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
           END IF SEARCH_OUTER1
        ELSE
           ! Search the outer child if it could contain a nearer point.
           SEARCH_OUTER2 : IF (((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) &
                .AND. (I2 .NE. I1) .AND. (I2 .GT. 0)) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, SPLITS, ORDER(MID+1:), &
+             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
                   LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
           END IF SEARCH_OUTER2
           ! Search the inner child if it could contain a nearer point.
           SEARCH_INNER2 : IF ((F .LT. K) .OR. (D .GT. D1 - RADII(I1))) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, SPLITS, ORDER(2:MID), &
+             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(2:MID), &
                   LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D1)
           END IF SEARCH_INNER2
        END IF INNER_CHILD_CLOSER
     ! Since this is a leaf node, we measure distance to all children.
     ELSE
+       ! TODO: Refactor this code to use matrix multiplication instead of a loop.
        DIST_TO_CHILDREN : DO I = 2, SIZE(ORDER)
           IF (ALLOWED_CHECKS .LE. 0) EXIT DIST_TO_CHILDREN
           ALLOWED_CHECKS = ALLOWED_CHECKS - 1
@@ -308,16 +364,16 @@ CONTAINS
   END SUBROUTINE PT_NEAREST
 
 
-  ! Re-organize a built tree so that it is more usefully packed in memory.
-  SUBROUTINE FIX_ORDER(POINTS, SQ_SUMS, RADII, SPLITS, ORDER, COPY)
-    REAL(KIND=REAL32),   INTENT(INOUT), DIMENSION(:,:) :: POINTS
-    REAL(KIND=REAL32),   INTENT(INOUT), DIMENSION(:) :: SQ_SUMS
-    REAL(KIND=REAL32),   INTENT(INOUT), DIMENSION(:) :: RADII
-    REAL(KIND=REAL32),   INTENT(INOUT), DIMENSION(:) :: SPLITS
-    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: ORDER
+  ! Reorganize a built tree so that it is packed in order in memory.
+  SUBROUTINE FIX_ORDER(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER, COPY)
+    REAL(KIND=R32),   INTENT(INOUT), DIMENSION(:,:) :: POINTS
+    REAL(KIND=R32),   INTENT(INOUT), DIMENSION(:) :: SQ_SUMS
+    REAL(KIND=R32),   INTENT(INOUT), DIMENSION(:) :: RADII
+    REAL(KIND=R32),   INTENT(INOUT), DIMENSION(:) :: MEDIANS
+    INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: ORDER
     LOGICAL, INTENT(IN), OPTIONAL :: COPY
     LOGICAL :: SHOULD_COPY
-    INTEGER(KIND=INT64) :: I
+    INTEGER(KIND=I64) :: I
     ! Default to copy (in memory) if there is less than 1 GB of data.
     IF (PRESENT(COPY)) THEN ; SHOULD_COPY = COPY
     ELSE ; SHOULD_COPY = SIZEOF(POINTS) .LE. MAX_COPY_BYTES
@@ -337,10 +393,10 @@ CONTAINS
        ! Close scratch file.
        CLOSE(UNIT=1)
     END IF
-    ! Always copy the square sums and the radii in memory (shouldn't be bad).
+    ! Always copy the square sums and the radii in memory (only a problem with many billions of points).
     SQ_SUMS(:) = SQ_SUMS(ORDER)
     RADII(:) = RADII(ORDER)
-    SPLITS(:) = SPLITS(ORDER)
+    MEDIANS(:) = MEDIANS(ORDER)
     ! Reset the order because now it is the expected format.
     FORALL (I=1:SIZE(ORDER)) ORDER(I) = I
   END SUBROUTINE FIX_ORDER
