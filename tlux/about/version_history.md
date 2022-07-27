@@ -32,3 +32,4 @@
 | 0.0.25<br>July 2022 | Cleaning up build code for package, relocating to <br> setup file. Added Timer class from util.system into <br> this package. Removed redundant variables from AXY <br> model for handling categoricals. |
 | 0.0.26<br>July 2022 | Patching AXY build and import bugs. |
 | 0.0.27<br>July 2022 | Updated configuration to include OpenMP symbols for <br> Ball Tree code. Updated ball tree code with slightly <br> better naming convention and removed default <br> randomness for constrained budget approximate <br> searches. |
+| 0.0.28<br>July 2022 | Fixed integer encoding in AXY for yi to have unique <br> integers assigned for different categorical outputs. <br> Enforced correct shape on x and ax provided to AXY <br> models at evaluation time. Set default for rescaling <br> outputs to True. Moved most AXY tests to separate <br> file with only one remaining in the main module. |
