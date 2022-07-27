@@ -142,7 +142,7 @@ MODULE AXY
      LOGICAL(KIND=INT8) :: X_NORMALIZED = .FALSE. ! False if X data needs to be normalized.
      LOGICAL(KIND=INT8) :: XI_NORMALIZED = .FALSE. ! False if XI embeddings need to be normalized.
      LOGICAL(KIND=INT8) :: Y_NORMALIZED = .FALSE. ! False if Y data needs to be normalized.
-     LOGICAL(KIND=INT8) :: EQUALIZE_Y = .FALSE. ! Rescale all Y components to be equally weighted.
+     LOGICAL(KIND=INT8) :: RESCALE_Y = .TRUE. ! Rescale all Y components to be equally weighted.
      LOGICAL(KIND=INT8) :: ENCODE_NORMALIZATION = .TRUE. ! True if input and output weight matrices shuld embed normalization.
      LOGICAL(KIND=INT8) :: APPLY_SHIFT = .TRUE. ! True if shifts should be applied to inputs before processing.
      LOGICAL(KIND=INT8) :: KEEP_BEST = .TRUE. ! True if best observed model should be greedily kept at end of optimization.
@@ -257,9 +257,9 @@ CONTAINS
      ELSE IF (CONFIG%ADI .EQ. 0) THEN
         CONFIG%ADO = 0
      ELSE IF (CONFIG%ANS .EQ. 0) THEN
-        CONFIG%ADO = MIN(32, CONFIG%ADI)
+        CONFIG%ADO = MIN(16, CONFIG%ADI)
      ELSE
-        CONFIG%ADO = MIN(32, CONFIG%ADS)
+        CONFIG%ADO = MIN(16, CONFIG%ADS)
      END IF
      ! ---------------------------------------------------------------
      ! MNE
@@ -667,19 +667,19 @@ CONTAINS
     ! Check for errors.
     IF (NUM_BATCHES .GT. NM) THEN
        PRINT *, 'ERROR (COMPUTE_BATCHES): Requested number of batches is too large.', NUM_BATCHES, NM, NA
-       INFO = -1
+       INFO = -1 ! Number of batches is too large.
        RETURN
     ELSE IF (NUM_BATCHES .NE. SIZE(BATCHA_STARTS)) THEN
        PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches does not match BATCHA.', NUM_BATCHES, SIZE(BATCHA_STARTS)
-       INFO = -2
+       INFO = -2 ! Number of batches does not match BATCHA.
        RETURN
     ELSE IF (NUM_BATCHES .NE. SIZE(BATCHM_STARTS)) THEN
        PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches does not match BATCHM.', NUM_BATCHES, SIZE(BATCHM_STARTS)
-       INFO = -3
+       INFO = -3 ! Number of batches does not match BATCHM.
        RETURN
     ELSE IF (NUM_BATCHES .LT. 1) THEN
        PRINT *, 'ERROR (COMPUTE_BATCHES): Number of batches is not positive.', NUM_BATCHES
-       INFO = -4
+       INFO = -4 ! Number of batches is not positive (is 0 or negative).
        RETURN
     END IF
     ! Construct batches for data sets with aggregator inputs.
@@ -1375,7 +1375,7 @@ CONTAINS
     !$OMP SECTION
     IF (.NOT. CONFIG%Y_NORMALIZED) THEN
        CALL RADIALIZE(Y(:,:), MODEL(CONFIG%MOSS:CONFIG%MOSE), &
-            Y_RESCALE(:,:), INVERT_RESULT=.TRUE., FLATTEN=LOGICAL(CONFIG%EQUALIZE_Y))
+            Y_RESCALE(:,:), INVERT_RESULT=.TRUE., FLATTEN=LOGICAL(CONFIG%RESCALE_Y))
        CONFIG%Y_NORMALIZED = .TRUE.
     ELSE
        MODEL(CONFIG%MOSS:CONFIG%MOSE) = 0.0_RT
@@ -1825,13 +1825,13 @@ CONTAINS
     CALL CHECK_SHAPE(CONFIG, MODEL, AX, AXI, SIZES, X, XI, Y, INFO)
     ! Do shape checks on the work space provided.
     IF (SIZE(RWORK,KIND=INT64) .LT. CONFIG%RWORK_SIZE) THEN
-       INFO = 13
+       INFO = 13 ! Provided RWORK is not large enough.
     ELSE IF (SIZE(IWORK,KIND=INT64) .LT. CONFIG%IWORK_SIZE) THEN
-       INFO = 14
+       INFO = 14 ! Provided IWORK is not large enough.
     ELSE IF ((CONFIG%ADI .GT. 0) .AND. (CONFIG%NA .LT. 1)) THEN
-       INFO = 15
+       INFO = 15 ! Aggregate batch size is zero with nonzero expected aggregate input.
     ELSE IF ((CONFIG%MDI .GT. 0) .AND. (CONFIG%NM .LT. 1)) THEN
-       INFO = 16
+       INFO = 16 ! Model batch size is zero with nonzero expected model input.
     END IF
     ! Do shape checks on the YW (weights for Y's) provided.
     IF (SIZE(YW,2) .NE. SIZE(Y,2)) THEN

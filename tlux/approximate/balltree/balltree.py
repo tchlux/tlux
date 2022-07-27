@@ -335,7 +335,7 @@ class BallTree:
 
 if __name__ == "__main__":
     print("_"*70)
-    print(" TESTING AXY MODULE")
+    print(" TESTING BALL TREE MODULE")
 
     from tlux.plot import Plot
     from tlux.random import well_spaced_ball, well_spaced_box
@@ -347,9 +347,9 @@ if __name__ == "__main__":
         return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
     # Set the number of points, dimension, and random seed for repeatability.
-    n = 10
+    n = 200
     d = 2
-    seed = 2
+    seed = 0
     np.random.seed(seed)
 
     # Create the test plot.
@@ -360,11 +360,11 @@ if __name__ == "__main__":
     tree = BallTree(x, reorder=False)
 
     # Define a function that reproduces the function via application of nearest neighbor.
-    fy = lambda x: y[tree(x, return_distance=False, k=1)]
+    fy = lambda x: y[tree(x, return_distance=False, k=1, budget=200)]
     x_min_max = np.asarray([np.min(x,axis=0), np.max(x,axis=0)]).T
 
     # Generate a plot to visualize the result.
     p = Plot()
     p.add("data", *(x.T), y)
-    p.add_function("balltree", fy, *x_min_max, plot_points=10000, vectorized=True)
+    p.add_function("balltree", fy, *x_min_max, plot_points=5000, vectorized=True)
     p.show()
