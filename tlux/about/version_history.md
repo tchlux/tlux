@@ -35,3 +35,4 @@
 | 0.0.28<br>July 2022 | Fixed integer encoding in AXY for yi to have unique <br> integers assigned for different categorical outputs. <br> Enforced correct shape on x and ax provided to AXY <br> models at evaluation time. Set default for rescaling <br> outputs to True. Moved most AXY tests to separate <br> file with only one remaining in the main module. |
 | 0.0.29<br>July 2022 | Implemented unbuilt ball tree query operation and <br> updated test cases to reflect its new abilities. |
 | 0.0.30<br>July 2022 | Updated MANIFEST to exclude compiled files in <br> distribution since those are designed to be compiled <br> on active hosts executing the code. |
+| 0.0.31<br>July 2022 | Updating MANIFEST again because packager invalidated <br> previous changes. |
