@@ -666,22 +666,28 @@ if __name__ == "__main__":
     # Evaluate the model and compare with the data provided for training.
     # TODO: Add some evaluations of the categorical outputs.
     # fy = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)
-    # yy = np.concatenate((y.astype(object), yi.astype(object)), axis=1)
+    yy = np.concatenate((y.astype(object), yi.astype(object)), axis=1)
 
     # Generate the plot of the results.
     print("Adding to plot..")
     p = Plot()
     p.add("xi=1 true", *x.T, y[:len(y)//2,0], color=0, group=0)
     p.add("xi=2 true", *x.T, y[len(y)//2:,0], color=1, group=1)
+    
+    # from tlux.approximate.balltree import BallTree
+    # tree = BallTree(m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True), build=False)
     def fhat(x, i=1):
         xi = i * np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
         axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
         sizes = np.ones(x.shape[0], dtype="int32") * 2
         return m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes)[:,0]
-        # return m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes)[:,0]
-    p.add_func("xi=1", lambda x: fhat(x, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=3, opacity=0.8, group=0) #, mode="markers", shade=True)
-    p.add_func("xi=2", lambda x: fhat(x, 2), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=2, opacity=0.8, group=1) #, mode="markers", shade=True)
+        # # Use the tree to lookup the nearest neighbor.
+        # emb = m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes, embedding=True)
+        # i = tree(emb, return_distance=False)
+        # return y[i,0]
+    p.add_func("xi=1", lambda x: fhat(x, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=3, opacity=0.8, group=0, plot_points=3000) #, mode="markers", shade=True)
+    p.add_func("xi=2", lambda x: fhat(x, 2), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=2, opacity=0.8, group=1, plot_points=3000) #, mode="markers", shade=True)
 
     # Produce the visual.
     print("Generating surface plot..")

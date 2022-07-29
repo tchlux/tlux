@@ -223,42 +223,62 @@ class BallTree:
     def nearest(self, z, k=1, return_distance=True, transpose=True,
                 budget=None, randomness=None, include_unbuilt=True):
         # If only a single point was given, convert it to a matrix.
-        if (len(z.shape) == 1): z = z.reshape((1,-1))
+        if (len(z.shape) == 1):
+            singleton = True
+            z = z.reshape((1,-1))
+        else:
+            singleton = False
         # Transpose the points if appropriate.
         if transpose: z = z.T
         # Make sure the 'k' value isn't bigger than the tree size.
-        k = min(k, self.built)
+        k = min(k, self.size)
+        n = z.shape[1]
         # Initialize holders for output.
         points  = np.asarray(z, order='F', dtype='float32')
         indices = np.ones((k, points.shape[1]), order='F', dtype='int64')
         dists   = np.ones((k, points.shape[1]), order='F', dtype='float32')
+        iwork   = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='int64')
+        rwork   = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='float32')
         # Compute the nearest neighbors.
         self._balltree.nearest(
             points, k,
             self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built],
-            self.leaf_size, indices, dists, to_search=budget, randomness=randomness
+            self.leaf_size, indices, dists, iwork, rwork, to_search=budget, randomness=randomness
         )
+        del iwork, rwork
         if (budget is not None):
             budget = max(0, budget - self.built)
         # Compute distance to points that have not been built into the tree.
         if (self.size > self.built):
             uindices = np.zeros((k, points.shape[1]), order='F', dtype='int64')
-            udists   = np.zeros((k, points.shape[1]), order='F', dtype='float32')
-            uorder   = np.arange(self.size-self.built, dtype='int64') + 1
-            uleaf    = self.size - self.built # The "leaf size" for the unbuilt points.
+            udists = np.zeros((k, points.shape[1]), order='F', dtype='float32')
+            uorder = np.arange(self.size-self.built, dtype='int64') + 1
+            uleaf = self.size - self.built # The "leaf size" for the unbuilt points.
+            iwork = np.ones((k+uleaf+2, min(n,self._balltree.number_of_threads)), order='F', dtype='int64')
+            rwork = np.ones((k+uleaf+2, min(n,self._balltree.number_of_threads)), order='F', dtype='float32')
             self._balltree.nearest(
                 points, k,
                 self.tree[:,self.built:], self.sq_sums[self.built:], self.radii, self.medians,
-                uorder, uleaf, uindices, udists, to_search=budget,
+                uorder, uleaf, uindices, udists, iwork, rwork, to_search=budget,
             )
+            del iwork, rwork
             # Keep the nearest of the provided dists and indices.
-            print("uindices: ", uindices)
-            print("udists:   ", udists)
-            print()
-            raise(NotImplementedError("Need to merge results from ubuilt and built."))
+            indices = np.concatenate((indices, uindices+self.built), axis=0)
+            dists = np.concatenate((dists, udists), axis=0)
+            to_keep = np.argsort(dists, axis=0)
+            for i in range(points.shape[1]):
+                indices[:k,i] = indices[to_keep[:k,i],i]
+                dists[:k,i] = dists[to_keep[:k,i],i]
+            # Only keep the top k.
+            indices = indices[:k,:]
+            dists = dists[:k,:]
         # Update the usage statistics for all points referenced in return values.
         i = (indices-1).flatten()
         self.usage += np.bincount(i, minlength=self.usage.size)
+        # Revert to singleton if that's what was provided.
+        if singleton:
+            dists = dists[:,0]
+            indices = indices[:,0]
         # Return the results.
         if return_distance:
             if transpose: return dists.T, indices.T - 1

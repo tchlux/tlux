@@ -22,7 +22,7 @@ if COMPARE_AGAINST_SKLEARN:
 
     if LARGE_TEST: train, dim = 1000000, 100
     else:          train, dim = 5, 2
-    test = 1
+    test = 2
     leaf_size = 32
     k = 5
     print("Initializing data..", flush=True)
@@ -37,7 +37,8 @@ if COMPARE_AGAINST_SKLEARN:
     print()
     print("Fortran Ball Tree")
     t.start()
-    tree = BT(x, leaf_size=leaf_size)
+    tree = BT(x[:len(x)//2], leaf_size=leaf_size, build=True) # build=False
+    tree.add(x[len(x)//2:])
     ct = t.stop()
     print("Construction time:", ct)
     t.start()

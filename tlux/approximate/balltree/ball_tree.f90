@@ -8,7 +8,7 @@
 !  base two of the number of points in the tree.
 
 MODULE BALL_TREE
-  USE ISO_FORTRAN_ENV, ONLY: R32 => REAL32, I64 => INT64
+  USE ISO_FORTRAN_ENV, ONLY: R32 => REAL32, I64 => INT64, I32 => INT32
   USE PRUNE,       ONLY: LEVEL
   USE SWAP,        ONLY: SWAP_I64
   USE FAST_SELECT, ONLY: ARGSELECT
@@ -18,6 +18,7 @@ MODULE BALL_TREE
   ! Max bytes for which a doubling of memory footprint (during copy)
   !  is allowed to happen (switches to using scratch file instead).
   INTEGER(KIND=I64) :: MAX_COPY_BYTES = 2_I64 ** 33_I64 ! 8GB
+  INTEGER(KIND=I32) :: NUMBER_OF_THREADS
 
   ! Function that is defined by OpenMP.
   INTERFACE
@@ -39,6 +40,10 @@ MODULE BALL_TREE
      SUBROUTINE OMP_SET_NUM_THREADS(NUM_THREADS)
        INTEGER :: NUM_THREADS
      END SUBROUTINE OMP_SET_NUM_THREADS
+     ! Thread number.
+     FUNCTION OMP_GET_THREAD_NUM()
+       INTEGER :: OMP_GET_THREAD_NUM
+     END FUNCTION OMP_GET_THREAD_NUM
   END INTERFACE
 
 CONTAINS
@@ -63,9 +68,11 @@ CONTAINS
     END IF
     ! Number of threads used by default in loops.
     IF (PRESENT(NUM_THREADS)) THEN
+       NUMBER_OF_THREADS = NUM_THREADS
        CALL OMP_SET_NUM_THREADS(NUM_THREADS)
     ELSE
-       CALL OMP_SET_NUM_THREADS(OMP_GET_MAX_THREADS())
+       NUMBER_OF_THREADS = OMP_GET_MAX_THREADS()
+       CALL OMP_SET_NUM_THREADS(NUMBER_OF_THREADS)
     END IF
   END SUBROUTINE CONFIGURE
 
@@ -187,38 +194,54 @@ CONTAINS
 
   ! Compute the K nearest elements of TREE to each point in POINTS.
   SUBROUTINE NEAREST(POINTS, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER, &
-       LEAF_SIZE, INDICES, DISTS, TO_SEARCH, RANDOMNESS)
+       LEAF_SIZE, INDICES, DISTS, IWORK, RWORK, TO_SEARCH, RANDOMNESS)
     REAL(KIND=R32), INTENT(IN), DIMENSION(:,:) :: POINTS, TREE
     REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: SQ_SUMS
     REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: RADII
     REAL(KIND=R32), INTENT(IN), DIMENSION(:) :: MEDIANS
     INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: ORDER
     INTEGER(KIND=I64), INTENT(IN) :: K, LEAF_SIZE
-    INTEGER(KIND=I64), INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: INDICES
-    REAL(KIND=R32), INTENT(OUT), DIMENSION(K,SIZE(POINTS,2)) :: DISTS
+    INTEGER(KIND=I64), INTENT(OUT), DIMENSION(:,:) :: INDICES ! (K, SIZE(POINTS,2))
+    REAL(KIND=R32), INTENT(OUT), DIMENSION(:,:) :: DISTS ! (K, SIZE(POINTS,2))
+    INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:,:) :: IWORK ! (K+LEAF_SIZE+2, NUMBER_OF_THEADS)
+    REAL(KIND=R32), INTENT(INOUT), DIMENSION(:,:) :: RWORK ! (K+LEAF_SIZE+2, NUMBER_OF_THEADS)
     INTEGER(KIND=I64), INTENT(IN),  OPTIONAL :: TO_SEARCH
     REAL(KIND=R32), INTENT(IN),  OPTIONAL :: RANDOMNESS
     ! Local variables.
-    INTEGER(KIND=I64) :: I, B, BUDGET
-    INTEGER(KIND=I64), DIMENSION(K+LEAF_SIZE+2) :: INDS_BUFFER
-    REAL(KIND=R32),   DIMENSION(K+LEAF_SIZE+2) :: DISTS_BUFFER
+    INTEGER(KIND=I64) :: I, T, B, BUDGET, NT
     REAL(KIND=R32) :: RAND_PROB
-    IF (PRESENT(TO_SEARCH)) THEN ; BUDGET = MAX(K, TO_SEARCH)
-    ELSE ; BUDGET = SIZE(ORDER) ; END IF
-    IF (PRESENT(RANDOMNESS)) THEN ; RAND_PROB = MAX(0.0_R32, MIN(1.0_R32,RANDOMNESS)) / 2.0_R32
-    ELSE IF (BUDGET .LT. SIZE(ORDER)) THEN ; RAND_PROB = 0.0_R32
-    ELSE ; RAND_PROB = 0.0_R32
+    IF (SIZE(ORDER) .LE. 0) THEN
+       INDICES(:,:) = 0
+       DISTS(:,:) = HUGE(DISTS(1,1))
+       RETURN
     END IF
+    ! Set the budget.
+    IF (PRESENT(TO_SEARCH)) THEN
+       BUDGET = MAX(K, TO_SEARCH)
+    ELSE
+       BUDGET = SIZE(ORDER)
+    END IF
+    ! Set the randomness.
+    IF (PRESENT(RANDOMNESS)) THEN
+       RAND_PROB = MAX(0.0_R32, MIN(1.0_R32,RANDOMNESS)) / 2.0_R32
+    ELSE IF (BUDGET .LT. SIZE(ORDER)) THEN
+       RAND_PROB = 0.0_R32
+    ELSE
+       RAND_PROB = 0.0_R32
+    END IF
+    ! Compute the number of threads.
+    NT = MIN(SIZE(IWORK,2), SIZE(RWORK,2))
     ! For each point in this set, use the recursive branching
     ! algorithm to identify the nearest elements of TREE.
-    !$OMP PARALLEL DO PRIVATE(INDS_BUFFER, DISTS_BUFFER, B)
+    !$OMP PARALLEL DO PRIVATE(B,T) NUM_THREADS(NT)
     DO I = 1, SIZE(POINTS,2)
        B = BUDGET
+       T = OMP_GET_THREAD_NUM()+1
        CALL PT_NEAREST(POINTS(:,I), K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER, &
-            LEAF_SIZE, INDS_BUFFER, DISTS_BUFFER, RAND_PROB, CHECKS=B)
+            LEAF_SIZE, IWORK(:,T), RWORK(:,T), RAND_PROB, CHECKS=B)
        ! Sort the first K elements of the temporary arry for return.
-       INDICES(:,I) = INDS_BUFFER(:K)
-       DISTS(:,I) = DISTS_BUFFER(:K)
+       INDICES(:,I) = IWORK(:K,T)
+       DISTS(:,I) = RWORK(:K,T)
     END DO
     !$OMP END PARALLEL DO
   END SUBROUTINE NEAREST
@@ -243,6 +266,7 @@ CONTAINS
     ! Local variables
     INTEGER(KIND=I64) :: F, I, I1, I2, MID, ALLOWED_CHECKS
     REAL(KIND=R32) :: D, D0, D1, D2, PS, R
+    F = 0
     R = 0.0_R32 ! Initialize R (random number).
     ! Initialize FOUND for first call, if FOUND is present then
     ! this must not be first and all are present.
@@ -252,7 +276,7 @@ CONTAINS
        F = FOUND
        PS = PT_SS
        D0 = D_ROOT
-    ELSE
+    ELSE IF (SIZE(ORDER) .GT. 0) THEN ! There is at least one point to check, this is root.
        ! Initialize the remaining checks to search.
        IF (PRESENT(CHECKS)) THEN ; ALLOWED_CHECKS = CHECKS - 1
        ELSE ; ALLOWED_CHECKS = SIZE(ORDER) - 1 ; END IF
@@ -313,17 +337,19 @@ CONTAINS
                   LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D1)
           END IF SEARCH_INNER1
           ! Search the outer child if it could contain a nearer point.
-          SEARCH_OUTER1 : IF (((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) &
-               .AND. (I2 .NE. I1) .AND. (I2 .GT. 0)) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
-                  LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
+          SEARCH_OUTER1 : IF ((I2 .GT. 0) .AND. (I2 .NE. I1)) THEN
+             IF ((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) THEN
+                CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
+                     LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
+             END IF
           END IF SEARCH_OUTER1
        ELSE
           ! Search the outer child if it could contain a nearer point.
-          SEARCH_OUTER2 : IF (((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) &
-               .AND. (I2 .NE. I1) .AND. (I2 .GT. 0)) THEN
-             CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
-                  LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
+          SEARCH_OUTER2 : IF ((I2 .GT. 0) .AND. (I2 .NE. I1)) THEN
+             IF ((F .LT. K) .OR. (D .GT. D2 - RADII(I2))) THEN
+                CALL PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), &
+                     LEAF_SIZE, INDICES, DISTS, RANDOMNESS, ALLOWED_CHECKS, F, PS, D2)
+             END IF
           END IF SEARCH_OUTER2
           ! Search the inner child if it could contain a nearer point.
           SEARCH_INNER2 : IF ((F .LT. K) .OR. (D .GT. D1 - RADII(I1))) THEN
@@ -349,7 +375,6 @@ CONTAINS
        CALL ARGSELECT(DISTS(:F), INDICES(:F), MIN(K,F))
        F = MIN(K, F)
     END IF BRANCH_OR_LEAF
-
     ! Handle closing operations..
     SORT_K : IF (PRESENT(FOUND)) THEN
        ! This is not the root, we need to pass the updated value of
@@ -360,6 +385,9 @@ CONTAINS
        ! This is the root, initial caller. Sort the distances for return.
        CALL ARGSELECT(DISTS(:F), INDICES(:F), K)
        CALL ARGSORT(DISTS(:K), INDICES(:K))
+       ! Set all unused dists and indices to default values.
+       INDICES(F+1:) = 0
+       DISTS(F+1:) = HUGE(DISTS(1))
     END IF SORT_K
   END SUBROUTINE PT_NEAREST
 
