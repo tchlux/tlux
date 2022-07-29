@@ -2,3 +2,4 @@
 *.mod
 __pycache__
 .DS_Store
+*_DEV
