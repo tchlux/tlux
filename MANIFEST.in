@@ -1,1 +1,2 @@
 recursive-include tlux *
+global-exclude *.so *.dylib *.mod *_DEV
