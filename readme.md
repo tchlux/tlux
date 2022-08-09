@@ -6,6 +6,13 @@
 All the things necessary for reproducing work in my <a href="https://tchlux.github.io/research">research blog</a>.
 </p>
 
+## Includes
+ - `tlux.approximate.axy`, a Fortran nonlinear regressor,
+ - `tlux.approximate.balltree`, a Fortran ball tree nearest neighbor code,
+ - `tlux.regex`, a highly optimized and simplified C regular expression engine,
+ - `tlux.data`, a pure Python Data class for columnar data storage,
+ - `tlux.plot`, and a simplified plotting package wrapped around Plotly.
+
 
 ## INSTALLATION:
 

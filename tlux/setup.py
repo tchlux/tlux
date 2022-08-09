@@ -14,6 +14,7 @@ def setup():
         build_axy()
         build_balltree()
         build_delaunay()
+        build_regex()
     except Exception as exc:
         print(f"WARNING: 'tlux' encountered exception while trying to build compiled libraries.")
         print()
@@ -83,3 +84,21 @@ def build_delaunay():
     )
     return _delsparse
     
+
+# Build the regex library.
+def build_regex():
+    import os, ctypes
+    # Configure for the compilation for the C code.
+    _c_compiler = "cc"
+    _clib_source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regex", "regex.c")
+    _clib_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regex", "libregex.so")
+    try:
+        # Import existing compiled library.
+        _regex = ctypes.CDLL(_clib_bin)
+    except:
+        # Compile and import.
+        _compile_command = f"{_c_compiler} -O3 -fPIC -shared -o '{_clib_bin}' '{_clib_source}'"
+        os.system(_compile_command)
+        _regex = ctypes.CDLL(_clib_bin)
+    # Return the compiled module.
+    return _regex

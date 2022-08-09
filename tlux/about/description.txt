@@ -1,1 +1,1 @@
-A package.
+All the things necessary for reproducing work in my research blog. Most notably a Fortran nonlinear regressor, a Fortran ball tree nearest neighbor code, a C regular expression engine, a pure Python Data class for columnar data storage, and a simplified plotting package wrapped around Plotly.
