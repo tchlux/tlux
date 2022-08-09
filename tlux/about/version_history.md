@@ -36,3 +36,4 @@
 | 0.0.29<br>July 2022 | Implemented unbuilt ball tree query operation and <br> updated test cases to reflect its new abilities. |
 | 0.0.30<br>July 2022 | Updated MANIFEST to exclude compiled files in <br> distribution since those are designed to be compiled <br> on active hosts executing the code. |
 | 0.0.31<br>July 2022 | Updating MANIFEST again because packager invalidated <br> previous changes. |
+| 0.0.32<br>August 2022 | Added compiled regular expression library to this <br> repository. Updating some AXY documentation and <br> making random vector creation more robust to prevent <br> the return of zero vectors in high dimension. |
