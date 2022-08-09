@@ -26,10 +26,17 @@ class AxyModel:
 
     # Allow square brackets to access attributes of this model and its configuration.
     def __getitem__(self, attr):
-        if hasattr(self, attr):
-            return getattr(self, attr)
-        elif hasattr(self.config, attr):
+        if hasattr(self.config, attr):
             return getattr(self.config, attr)
+        else:
+            return self.__getattribute__(attr)
+
+    # Allow the "." operator to access attributes of this model and its configuration.
+    def __getattr__(self, attr):
+        if hasattr(self.config, attr):
+            return getattr(self.config, attr)
+        else:
+            return self.__getattribute__(attr)
 
     # Create a summary string for this model.
     def __str__(self, vecs=False):
@@ -473,7 +480,7 @@ class AXY:
         self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
         # Evaluate the model.
         result = self.AXY.evaluate(self.config, self.model, ax.T, ay, sizes,
-                                    x.T, y.T, a_states, m_states, info)
+                                   x.T, y.T, a_states, m_states, info)
         self._check_code(result[-1], "evaluate")
         # Save the states if that's requested.
         if (save_states):
@@ -592,6 +599,7 @@ if __name__ == "__main__":
     num_states = 8
     steps = 1000
     num_threads = None
+    use_x = True
     np.random.seed(seed)
 
     # Genreate source data.
@@ -605,24 +613,26 @@ if __name__ == "__main__":
     ax = x.reshape((-1,1)).copy()
     axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
     sizes = np.ones(x.shape[0], dtype="int32") * 2
+    # Concatenate the two different function outputs.
     y = np.concatenate((base_y, np.cos(np.linalg.norm(base_x,axis=1))), axis=0)
     y = y.reshape((y.shape[0],-1))
+    # Generate classification data that is constructed by binning the existing y values.
     yi = np.asarray([
         np.where(
             y[:,0] <= np.percentile(y[:,0], 50),
-            'b',
-            't'
+            'bottom',
+            'top'
         ),
         np.where(
             y[:,0] <= np.percentile(y[:,0], 20),
-            's',
+            'small',
             np.where(
                 y[:,0] <= np.percentile(y[:,0], 80),
-                'm',
-                'l'
+                'medium',
+                'large'
             )
         ),
-    ]).T
+    ], dtype=object).T
 
     # Train a new model if there is not one saved.
     if (not os.path.exists('temp-model.json')):
@@ -645,7 +655,7 @@ if __name__ == "__main__":
             ax=ax.copy(),
             axi=axi,
             sizes=sizes,
-            x=x.copy(),
+            x=(x.copy() if use_x else None),
             xi=xi,
             y=y.copy(),
             yi=yi,
@@ -681,6 +691,7 @@ if __name__ == "__main__":
         ax = x.reshape((-1,1)).copy()
         axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
         sizes = np.ones(x.shape[0], dtype="int32") * 2
+        if (not use_x): x = None
         return m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes)[:,0]
         # # Use the tree to lookup the nearest neighbor.
         # emb = m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes, embedding=True)

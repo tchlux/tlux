@@ -13,8 +13,11 @@ CONTAINS
     REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
     REAL(KIND=RT) :: LEN
     INTEGER :: I, J, K
+    LOGICAL :: GENERATED_WARNING
     ! Skip empty vector sets.
     IF (SIZE(COLUMN_VECTORS) .LE. 0) RETURN
+    ! Prepare this state variable to prevent redundant messages.
+    GENERATED_WARNING = .FALSE.
     ! Generate random numbers in the range [0,1].
     CALL RANDOM_NUMBER(COLUMN_VECTORS(:,:))
     CALL RANDOM_NUMBER(TEMP_VECS(:,:))
@@ -29,20 +32,27 @@ CONTAINS
        ! rounding errors being enlarged by upscaling), that is acceptable.
        DO I = 1, K-1
           LEN = NORM2(COLUMN_VECTORS(:,I))
-          IF (LEN .GT. 0.0_RT) THEN
-             ! Make this column unit length.
-             COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
-             ! Compute multipliers (store in row of TEMP_VECS) and subtract
-             ! from all remaining columns (doing the orthogonalization).
-             TEMP_VECS(1,I+1:K) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:K))
-             DO J = I+1, K
-                COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(1,J) * COLUMN_VECTORS(:,I)
-             END DO
-          ELSE
-             ! This should not happen (unless the vectors are at least in the
-             !   tens of thousands, in which case a different method should be used).
-             PRINT *, 'ERROR: Random unit vector failed to initialize correctly, rank deficient.'
-          END IF
+          ! Generate a new random vector (that might be linearly dependent on previous)
+          !   when there is nothing remaining of the current vector after orthogonalization.
+          DO WHILE (LEN .LT. EPSILON(LEN))
+             IF (.NOT. GENERATED_WARNING) THEN
+                PRINT *, ' WARNING (random.f90): Encountered length-zero vector during orthogonalization. Forced'
+                PRINT *, '   to generate new random vector. Some vectors are likely to be linearly dependent.'
+                GENERATED_WARNING = .TRUE.
+             END IF
+             CALL RANDOM_NUMBER(COLUMN_VECTORS(:,I))
+             CALL RANDOM_NUMBER(TEMP_VECS(:,I))
+             COLUMN_VECTORS(:,I) = SQRT(-LOG(COLUMN_VECTORS(:,I))) * COS(PI * TEMP_VECS(:,I))
+             LEN = NORM2(COLUMN_VECTORS(:,I))
+          END DO
+          ! Make this column unit length.
+          COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
+          ! Compute multipliers (store in row of TEMP_VECS) and subtract
+          ! from all remaining columns (doing the orthogonalization).
+          TEMP_VECS(1,I+1:K) = MATMUL(COLUMN_VECTORS(:,I), COLUMN_VECTORS(:,I+1:K))
+          DO J = I+1, K
+             COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(1,J) * COLUMN_VECTORS(:,I)
+          END DO
        END DO
        ! Make the rest of the column vectors unit length.
        DO I = K, SIZE(COLUMN_VECTORS,2)

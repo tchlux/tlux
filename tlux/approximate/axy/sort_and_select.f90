@@ -138,7 +138,7 @@ CONTAINS
   ! 
   ! Optional:
   ! 
-  !   MIN_SIZE --  An positive integer that represents the largest
+  !   MIN_SIZE --  A positive integer that represents the largest
   !                sized VALUES for which a partition about a pivot
   !                is used to reduce the size of a an unsorted array.
   !                Any size less than this will result in the use of

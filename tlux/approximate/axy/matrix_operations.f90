@@ -176,7 +176,7 @@ CONTAINS
     ! Do power iterations.
     power_iteration : DO I = 1, NUM_STEPS
        Q(:,:) = VT(1:SIZE(Q,1),1:SIZE(Q,2))
-       ! Q(:,:) = MATMUL(TRANSPOSE(ATA(:,:)), QTEMP(:,:))
+       ! VT(:,:) = MATMUL(ATA(:,:), Q(:,:))
        CALL GEMM('N', 'N', K, K, K, 1.0_RT, &
             ATA(:,:), K, Q(:,:), K, 0.0_RT, &
             VT(:,:), K)

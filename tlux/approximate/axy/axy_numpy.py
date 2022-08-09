@@ -29,8 +29,6 @@ class AxyNumpy:
             value = attrs[key]
             if (key[-4:] == "_map"):
                 value = [np.asarray(l) for l in value]
-            elif (key[:3] in {"xi_","yi_"}) or (key[:4] == "axi_"):
-                pass
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
             attrs[key] = value
@@ -65,6 +63,14 @@ class AxyNumpy:
 
 
     # Allow square brackets to access attributes of this model and its configuration.
+    def __getitem__(self, attr):
+        if (attr in self.config):
+            return self.config[attr]
+        else:
+            return self.__getattribute__(attr)
+
+
+    # Allow the "." operator to access attributes of this model and its configuration.
     def __getattr__(self, attr):
         if (attr in self.config):
             return self.config[attr]
@@ -137,31 +143,29 @@ class AxyNumpy:
             xi_map = [np.unique(xi[n]) for n in xi.dtype.names]
         else:
             xi_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
-        xi_sizes = [len(u) for u in xi_map]
-        xi_starts = (np.cumsum(xi_sizes) - xi_sizes[0] + 1).tolist()
-        return xi_map, xi_sizes, xi_starts
+        return xi_map
 
 
     # Given a categorical input array (either 2D or struct), map this
     #  array to an integer encoding matrix with the same number of
     #  columns, but unique integers assigned to each unique value.
-    def _i_encode(self, xi, xi_map, xi_sizes, xi_starts):
+    # 
+    # TODO: This is very slow and doesn't use any parallelism right now,
+    #       could be much faster for large data by paralellizing.
+    def _i_encode(self, xi, xi_map):
         xi_rows = xi.shape[0]
         xi_cols = len(xi.dtype) or xi.shape[1]
         _xi = np.zeros((xi_rows, xi_cols), dtype="int32", order="C")
+        base = 1
         for i in range(xi_cols):
-            start_index = xi_starts[i]
-            num_unique = xi_sizes[i]
-            unique_vals = xi_map[i]
+            # Construct the integer map, retrieve the column of unique values.
+            # The integer map should not have any numbers shared across yi columns!
+            int_map = {xi_map[i][j]:base+j for j in range(len(xi_map[i]))}
+            base += len(xi_map[i])
             vals = (xi[:,i:i+1] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
-            eq_val = vals == unique_vals
-            # Add a column to the front that is the default if none match.
-            eq_val = np.concatenate((
-                np.logical_not(eq_val.max(axis=1)).reshape(xi_rows,1),
-                eq_val), axis=1)
-            val_indices = np.ones((xi_rows,num_unique+1), dtype="int32") * np.arange(num_unique+1)
-            val_indices[:,1:] += start_index-1
-            _xi[:,i] = val_indices[eq_val]
+            # Assign all the integers.
+            for j in range(xi_rows):
+                _xi[j,i] = int_map.get(vals[j,0], 0)
         return _xi
 
 
@@ -196,7 +200,7 @@ class AxyNumpy:
         assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
         assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
         assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
-        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vectora."
+        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vector."
         # Reshape inputs to all be two dimensional (except sizes).
         if (len(y.shape) == 1): y = y.reshape((-1,1))
         if (len(yi.shape) == 1) and (len(yi.dtype) == 0): yi = yi.reshape((-1,1))
@@ -211,31 +215,31 @@ class AxyNumpy:
         xi_cols = len(xi.dtype) or xi.shape[1]
         if (xi_cols > 0):
             if (len(self.xi_map) == 0):
-                self.xi_map, self.xi_sizes, self.xi_starts = self._i_map(xi)
+                self.xi_map = self._i_map(xi)
             else:
                 assert (xi_cols == len(self.xi_map)), f"Bad number of columns in 'xi', {xi_cols}, expected {len(self.xi_map)} columns."
-            xi = self._i_encode(xi, self.xi_map, self.xi_sizes, self.xi_starts)
-            mne = sum(self.xi_sizes)
+            xi = self._i_encode(xi, self.xi_map)
+            mne = sum(map(len, self.xi_map))
         else: mne = 0
         # Handle mapping "axi" into integer encodings.
         axi_cols = len(axi.dtype) or axi.shape[1]
         if (axi_cols > 0):
             if (len(self.axi_map) == 0):
-                self.axi_map, self.axi_sizes, self.axi_starts = self._i_map(axi)
+                self.axi_map = self._i_map(axi)
             else:
                 assert (axi_cols == len(self.axi_map)), f"Bad number of columns in 'axi', {axi_cols}, expected {len(self.axi_map)} columns."
-            axi = self._i_encode(axi, self.axi_map, self.axi_sizes, self.axi_starts)
-            ane = sum(self.axi_sizes)
+            axi = self._i_encode(axi, self.axi_map)
+            ane = sum(map(len, self.axi_map))
         else: ane = 0
         # Handle mapping "yi" into integer encodings.
         yi_cols = len(yi.dtype) or yi.shape[1]
         if (yi_cols > 0):
             if (len(self.yi_map) == 0):
-                self.yi_map, self.yi_sizes, self.yi_starts = self._i_map(yi)
+                self.yi_map = self._i_map(yi)
             else:
                 assert (yi_cols == len(self.yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(self.yi_map)} columns."
-            yi = self._i_encode(yi, self.yi_map, self.yi_sizes, self.yi_starts)
-            yne = sum(self.yi_sizes)
+            yi = self._i_encode(yi, self.yi_map)
+            yne = sum(map(len, self.yi_map))
         else: yne = 0
         # Handle mapping integer encoded "yi" into a single real valued y.
         if (yne > 0):

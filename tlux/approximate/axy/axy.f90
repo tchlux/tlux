@@ -1749,7 +1749,7 @@ CONTAINS
       !    regress previous layer onto the gradient components
       !    fill any remaining nodes (if not enough from gradient) with "uncaptured" principal components
       !    set new shift terms as the best of 5 well spaced values in [-1,1], or random given no order
-
+      ! 
       ! ! Find the first zero-valued (unused) basis function (after orthogonalization).
       ! FORALL (RANK = 1 :SIZE(ORDER(:))) ORDER(RANK) = RANK
       ! VALUES(:) = -REAL(USAGE,RT)
@@ -1758,7 +1758,7 @@ CONTAINS
       !    IF (USAGE(ORDER(RANK)) .EQ. 0) EXIT
       ! END DO
       ! IF (RANK .GT. SIZE(ORDER)) RETURN
-
+      ! 
       ! Pack the ORDER(:RANK) nodes into the front of the weights:
       !   - update input weights, mean gradient, gradient curvature
       !   - update input shifts, mean gradient, gradient curvature
