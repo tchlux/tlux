@@ -14,6 +14,13 @@ def test_data():
 
     print("Testing Data...", end=" ")
 
+    # Set the max wait to zero and the file to a null output
+    #  (to instigate all loading print statements without showing).
+    _mw = Data.max_wait
+    _pf = Data.print_kwargs.get("file",None)
+    Data.max_wait = 0
+    Data.print_kwargs["file"] = open(os.devnull,"w")
+
     # ----------------------------------------------------------------
     a = Data()
 
@@ -213,6 +220,19 @@ def test_data():
     b["0-str"] = new_col
     assert(tuple(map(str,b["0"])) == tuple(b["0-str"]))
 
+    # Verify new column assignment for empty Data.
+    b = Data()
+    n = a.names[0]
+    b[n] = a[n]
+    assert(all(b[n] == a[n]))
+
+    # Verify that multiple column assignment for empty Data fails (need tests otherwise).
+    b = Data()
+    n = list(a.names)
+    try: b[n] = a[n]
+    except Data.Unsupported: pass
+    else: assert(False)
+
     # Verify copying a data object that has a 'None' in the first row
     b = Data(names=["0","1"], types=[int,str])
     b.append([0,None])
@@ -245,10 +265,13 @@ def test_data():
     os.remove("a-test.pkl")
 
     # Verify load and save of a gzipped dill file
-    a.save("a-test.dill.gz")
-    b = Data().load("a-test.dill.gz")
-    assert(tuple(a["0"]) == tuple(b["0"]))
-    os.remove("a-test.dill.gz")
+    try:
+        a.save("a-test.dill.gz")
+        b = Data().load("a-test.dill.gz")
+        assert(tuple(a["0"]) == tuple(b["0"]))
+        os.remove("a-test.dill.gz")
+    except Data.MissingModule:
+        print("(skipping dill test)")
 
     # Verify load and save of a gzipped csv file
     a.save("a-test.csv.gz")
@@ -490,6 +513,11 @@ Size: (11 x 3)
     assert(all(len(set(list(r1 == r2)) ^ {True,None}) == 0
                for (r1,r2) in zip(d3, out)))
 
+    # Try initializing a data object with a generator (and having print statements).
+    _ = Data(
+        data=((j for j in range(10)) for i in range(100)),
+    )
+
     # ----------------------------------------------------------------
     #     Testing expected exceptions.
 
@@ -658,6 +686,12 @@ Size: (11 x 3)
 
     # Done testing
     print("passed.")
+
+    # Reset the maximum wait and the file argument for printing.
+    Data.max_wait = _mw
+    Data.print_kwargs.pop("file").close()
+    if (_pf is not None):
+        Data.print_kwargs["file"] = _pf
 
 
 

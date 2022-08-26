@@ -3,14 +3,13 @@ from . import DEFAULT_WAIT, DEFAULT_MAX_DISPLAY, \
     DEFAULT_MAX_STR_LEN, FILE_SAMPLE_SIZE, EXTRA_CATEGORY_KEY, \
     GENERATOR_TYPE, MISSING_SAMPLE_SIZE, NP_TYPES, SEPARATORS
 
-# TODO:  Add column to empty data should be allowed.
 # TODO:  Read data that has new lines in the column values.
 # TODO:  Instead of just checking file size, check number of columns too,
 #        use a sample by default if the #columns is large (speed!).
 # TODO:  Warnings or versioning for when the source data is modified
 #        in a way that invalidates a view. Need to track unpropagated
 #        changes somehow. Or make permanent changes disallowed? Or copy?
-#        E.g. view is made, columns are rearranged
+#        E.g. view is made, columns are rearranged, column indices are now invalid.
 # TODO:  Make "to_matrix" automatically consider 'None' a unique value
 #        for categorical columns and add a dimension 'is present' otherwise.
 # TODO:  Make "to_matrix" automatically flatten elements of columns
@@ -136,6 +135,7 @@ class Data:
     max_str_len = DEFAULT_MAX_STR_LEN
     # Define the time waited before displaying progress.
     max_wait = DEFAULT_WAIT
+    print_kwargs = dict(end="\r", flush=True)
 
     # Import all of the exceptions.
     from .exceptions import NameTypeMismatch, \
@@ -165,7 +165,7 @@ class Data:
     # Return True if empty.
     @property
     def empty(self): return ((self.names is None) or (self.types is None) or (len(self) == 0))
-    # Declare the "start" property / function to re-initialized when called.
+    # Declare the shape of this Data object.
     @property
     def shape(self):
         if (len(self) == 0):
@@ -235,10 +235,11 @@ class Data:
             self._col_indices = cols
         # If provided, build this data as a deep copy of provided data.
         elif (data is not None):
+            has_len = hasattr(data, "__len__")
             for i,row in enumerate(data):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(data):.2f}% init", end="\r", flush=True)
+                    print(f" {(100.*i/len(data) if has_len else i):.2f}% init", **self.print_kwargs)
                     start = time.time()
                 self.append(row)
 
@@ -327,7 +328,15 @@ class Data:
     # Given local-specific index, convert to Data index and return value.
     def __setitem__(self, index, value):
         # Special case for being empty.
-        if (self.empty): raise(Data.Empty("Cannot set item for empty data."))
+        if (self.empty):
+            if (type(index) == str):
+                self.add_column(value, name=index)
+            elif (type(index) == int):
+                raise(Data.Empty("Cannot set row for empty data."))
+            elif (type(index) == slice):
+                raise(Data.Empty("Cannot set slice of empty data."))                
+            else:
+                raise(Data.Unsupported(f"Data is empty. No support for setting empty Data with index of type {type(index)}."))
         # Special case assignment of new column (*RETURN* to exit function).
         if ((type(index) == str) and (index not in self.names)):
             # Check to see if this is a data view object.
@@ -569,7 +578,7 @@ class Data:
             for i,row in enumerate(data):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(data):.2f}% in-place add", end="\r", flush=True)
+                    print(f" {100.*i/len(data):.2f}% in-place add", **self.print_kwargs)
                     start = time.time()
                 self.append(row)
         # Add rows to this from the provided Data
@@ -581,7 +590,7 @@ class Data:
             for i,row in enumerate(data):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(data):.2f}% in-place add", end="\r", flush=True)
+                    print(f" {100.*i/len(data):.2f}% in-place add", **self.print_kwargs)
                     start = time.time()
                 self.append(row)
         # Add columns to this from the provided Data (if number of rows is same).
@@ -596,7 +605,7 @@ class Data:
             for i,row in enumerate(data[:,shared_names]):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(data):.2f}% in-place add (new rows)", end="\r", flush=True)
+                    print(f" {100.*i/len(data):.2f}% in-place add (new rows)", **self.print_kwargs)
                     start = time.time()
                 # Fill missing values with "None".
                 if (len(shared_names) < len(self.names)):
@@ -612,13 +621,13 @@ class Data:
             for i,name in enumerate(new_names):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(new_names):.2f}% in-place add (init cols)", end="\r", flush=True)
+                    print(f" {100.*i/len(new_names):.2f}% in-place add (init cols)", **self.print_kwargs)
                     start = time.time()
                 self[name] = None
             for r in range(len(data)):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*i/len(data):.2f}% in-place add (fill cols)", end="\r", flush=True)
+                    print(f" {100.*i/len(data):.2f}% in-place add (fill cols)", **self.print_kwargs)
                     start = time.time()
                 self[r-len(data),new_names] = data[r][new_names]
         else: raise(Data.Unsupported("Not sure how to add given data, no shape or name precedents match."))
@@ -733,7 +742,7 @@ class Data:
         for i,row in enumerate(rows):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% copy", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% copy", **self.print_kwargs)
                 start = time.time()
             # Save time and skip data validation (since we already
             # know that the data was valid inside this object).
@@ -766,7 +775,7 @@ class Data:
             for i,row in enumerate(self):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {100.*row/len(self):.2f}% pop", end="\r", flush=True)
+                    print(f" {100.*i/len(self):.2f}% pop", **self.print_kwargs)
                     start = time.time()
                 values.append( row.pop(col) )
             return values
@@ -1102,7 +1111,7 @@ class Data:
         for row in range(len(self)):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*row/len(self):.2f}% reorder", end="\r", flush=True)
+                print(f" {100.*row/len(self):.2f}% reorder", **self.print_kwargs)
                 start = time.time()
             # Directly update the row (bypassing validation) because
             # we know all values were already validated.
@@ -1138,7 +1147,7 @@ class Data:
         for j,(new_t, c) in enumerate(zip(types, columns)):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*j/len(columns):.2f}% retype", end="\r", flush=True)
+                print(f" {100.*j/len(columns):.2f}% retype", **self.print_kwargs)
                 start = time.time()
             old_t = self.types[c]
             if (new_t == old_t): continue
@@ -1179,7 +1188,7 @@ class Data:
         for i,val in enumerate(column):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% add column", end="\r", flush=True)
+                print(f" {100.*i/max(1,len(self)):.2f}% add column", **self.print_kwargs)
                 start = time.time()
             # Verify valid index first..
             if (self.shape[1] > 1) and (i >= len(self)):
@@ -1244,7 +1253,7 @@ class Data:
         while (empty_elements[0] < len(self)):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {idx} inflating..", end="\r", flush=True)
+                print(f" {idx} inflating..", **self.print_kwargs)
                 start = time.time()
             # Look for the next element in each iterable.
             empty_elements[0] = 0
@@ -1285,7 +1294,7 @@ class Data:
             for i,row in enumerate(zip(*(self.pop(col) for col in to_collapse))):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start[0]) > self.max_wait:
-                    print(f" {i+1}:{len(self)} packing..", end="\r", flush=True)
+                    print(f" {i+1}:{len(self)} packing..", **self.print_kwargs)
                     start[0] = time.time()
                 # Find the location of the last None value in this row.
                 for last_none in range(1,len(row)+1):
@@ -1335,7 +1344,7 @@ class Data:
         for i in range(len(self)):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% stack", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% stack", **self.print_kwargs)
                 start = time.time()
             # Hash the non-stacked columns of this row.
             hashed = hash(list(keep_view[i]))
@@ -1353,7 +1362,7 @@ class Data:
         for i in to_pop[::-1]:
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% stack - pop rows", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% stack - pop rows", **self.print_kwargs)
                 start = time.time()
             self.pop(i)
         # Pop out all of the old columns.
@@ -1363,7 +1372,7 @@ class Data:
         for i,c in enumerate(stacked_columns):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(stacked_columns):.2f}% stack - add stacks", end="\r", flush=True)
+                print(f" {100.*i/len(stacked_columns):.2f}% stack - add stacks", **self.print_kwargs)
                 start = time.time()
             self[c] = (stack[c] for (_,stack) in new_stacks)
 
@@ -1400,7 +1409,7 @@ class Data:
         while (i < len(self)):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% unstack", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% unstack", **self.print_kwargs)
                 start = time.time()
             not_none = lambda v: (v is not None)
             # Retreive the column values in a dictionary.
@@ -1484,7 +1493,7 @@ class Data:
         for i,row in enumerate(data):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(data):.2f}% collect", end="\r", flush=True)
+                print(f" {100.*i/len(data):.2f}% collect", **self.print_kwargs)
                 start = time.time()
             # Convert row into its hash value, lookup storage location.
             hash_value = hash([row[c] for c in other_columns])
@@ -1524,7 +1533,7 @@ class Data:
         for i,row in enumerate(self):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% generating mapping", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% generating mapping", **self.print_kwargs)
                 start = time.time()
             # Update the counts of the unique values.
             for i in cat_cols:
@@ -1614,7 +1623,7 @@ class Data:
         for i,row in enumerate(self):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% to matrix", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% to matrix", **self.print_kwargs)
                 start = time.time()
             # How to handle rows with missing values? Add column for "is missing"?
             numeric[i,:] = numeric.to_real(row)
@@ -1696,7 +1705,7 @@ class Data:
         for i, (col_1, col_2) in enumerate(all_pairs):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(all_pairs):.2f}% effect ({col_1} - {col_2})..  ", end="\r", flush=True)
+                print(f" {100.*i/len(all_pairs):.2f}% effect ({col_1} - {col_2})..  ", **self.print_kwargs)
                 start = time.time()
             # If either column only has 1 unique element, then there is no effect.
             if ((col_1 not in names_with_variance) or
@@ -1762,7 +1771,7 @@ class Data:
         for i,row in enumerate(self):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% unique", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% unique", **self.print_kwargs)
                 start = time.time()
             # Get the hashed value by consecutively hashing all of the
             # values within this row. Hashing the entire row sometimes
@@ -1784,7 +1793,7 @@ class Data:
         for i,row in enumerate(self):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
-                print(f" {100.*i/len(self):.2f}% counts", end="\r", flush=True)
+                print(f" {100.*i/len(self):.2f}% counts", **self.print_kwargs)
                 start = time.time()
             for n,val in zip(columns, row):
                 # If this column has been removed (because it is
