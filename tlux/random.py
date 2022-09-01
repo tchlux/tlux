@@ -177,8 +177,9 @@ def random_range(start, stop=None, step=None, count=float('inf')):
     #   3) ["multiplier" - 1] is divisible by 4 if "modulus" is divisible by 4.
     # 
     offset = int(randint(0,num_steps)) * 2 + 1                 # Pick a random odd-valued offset.
+    modulus = int(2**ceil(log2(num_steps)))                    # Pick a power-of-2 modulus just big enough to generate all numbers.
     multiplier = 4*(num_steps + int(randint(0,num_steps))) + 1 # Pick a multiplier 1 greater than a multiple of 4.
-    modulus = int(2**ceil(log2(num_steps)))                    # Pick a modulus just big enough to generate all numbers (power of 2).
+    if (modulus < 4): multiplier = 1
     # Track how many random numbers have been returned.
     found = 0
     while found < count:

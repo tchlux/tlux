@@ -51,6 +51,13 @@
 # TODO: Adding multiple frames where the first has no edges and the
 #       rest have edges causes all frames to look like first.
 # 
+# 
+# # Uncomment the following to execute this file in place without system path issues.
+# import os, sys
+# _this_dir = os.path.dirname(os.path.realpath(__file__))
+# while (_this_dir in sys.path):
+#     sys.path.remove(_this_dir)
+# 
 # --------------------------------------------------------------------
 
 import random, numbers, os, webbrowser, sys, re, tempfile
@@ -555,7 +562,7 @@ class Plot:
     #                 matrix of points as row-vectors for faster execution.
     # 
     #  ... <standard "add" arguments with adjusted defaults> ...
-    def add_function(self, name, func=None, min_max_x=None, min_max_y=[],
+    def add_function(self, name, func=None, min_max_x=None, min_max_y=tuple(),
                      x_vals=None, y_vals=None,
                      grid_lines=True, plot_points=PLOT_POINTS,
                      vectorized=False, mode=None, plot_type=None,
@@ -1165,10 +1172,10 @@ class Plot:
     # 
     #  ... <any additional plotly.offline.plot keyword arguments> ...
     def plot(self, title=None, x_range=None, y_range=None,
-             z_range=None, fixed=True, show_legend=True, layout={},
-             aspect_mode='cube', legend={}, scene_settings={},
-             axis_settings={}, x_axis_settings={}, y_axis_settings={},
-             z_axis_settings={}, hovermode="closest", 
+             z_range=None, fixed=True, show_legend=True, layout=None,
+             aspect_mode='cube', legend=None, scene_settings=None,
+             axis_settings=None, x_axis_settings=None, y_axis_settings=None,
+             z_axis_settings=None, hovermode="closest", 
              camera_position=DEFAULT_CAMERA_POSITION, html=True,
              file_name=None, show=True, append=False, height=None,
              width=None, loop_duration=5, bounce=False,
@@ -1178,6 +1185,14 @@ class Plot:
              show_slider_labels=True, show_play_pause=True,
              autoplay=False, loop=False, loop_pause=0,
              **kwargs):
+        # Declare default values for dictionary types.
+        if (layout is None): layout = {}
+        if (legend is None): legend = {}
+        if (scene_settings is None): scene_settings = {}
+        if (axis_settings is None): axis_settings = {}
+        if (x_axis_settings is None): x_axis_settings = {}
+        if (y_axis_settings is None): y_axis_settings = {}
+        if (z_axis_settings is None): z_axis_settings = {}
         # Update title, and all plot axis ranges
         if title == None:
             title = self.title
@@ -1916,6 +1931,9 @@ def _animate(data, plot_layout, loop_duration, bounce, transition,
 # ================================================
 
 if __name__ == "__main__":
+    while (os.path.dirname(__file__) in sys.path):
+        sys.path.remove(os.path.dirname(__file__))
+
     print()
     print("Creating a demonstration of most of the available (and useful) features!")
     print()

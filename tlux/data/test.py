@@ -24,6 +24,9 @@ def test_data():
     # ----------------------------------------------------------------
     a = Data()
 
+    # Verify copy of empty data.
+    b = a.copy()
+
     # Verify append
     a.append([1,"a"])
     a.append([2,"b"])
@@ -400,6 +403,13 @@ def test_data():
     b = a[:,:-1]
     assert( tuple(b[:,"0"]) == (1,2,3,1,-1) )
 
+    # Test assigning and updating a list typed column.
+    b = Data(types=[str,list],data=[('a',['1']), ('b',['3'])])
+    b[0,"1"] += [2.]
+    b[1, 1 ] = b[1,1] + [4]
+    assert(tuple(b[:,0]) == ('a', 'b'))
+    assert(tuple(map(tuple,b[:,1])) == (('1',2.), ('3',4)))
+
     # Verify that the printed data set handles edge cases (one more
     # row or equal rows to number desired) correctly.
     b = a[:]
@@ -666,11 +676,6 @@ Size: (11 x 3)
 
     # Try reordering an uninitialized data
     try:   Data().reorder([])
-    except Data.Empty: pass
-    else:  assert(False)
-
-    # Try copying an uninitialized data
-    try:   Data().copy()
     except Data.Empty: pass
     else:  assert(False)
 

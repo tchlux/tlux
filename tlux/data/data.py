@@ -156,7 +156,7 @@ class Data:
     @property
     def types(self): return self._types
     @types.setter
-    def types(self, values): self._types = Data.Descriptor(self, values)
+    def types(self, values): self._types = Data.Descriptor(self, list(values))
     # Alias "names" to also be referenced as "columns".
     @property
     def columns(self): return self._names
@@ -239,7 +239,7 @@ class Data:
             for i,row in enumerate(data):
                 # Update user on progress if too much time has elapsed..
                 if (time.time() - start) > self.max_wait:
-                    print(f" {(100.*i/len(data) if has_len else i):.2f}% init", **self.print_kwargs)
+                    print(f" {(str(round(100.*i/len(data),2))+'%' if has_len else str(i))} init", **self.print_kwargs)
                     start = time.time()
                 self.append(row)
 
@@ -733,12 +733,10 @@ class Data:
     def copy(self):
         import time
         start = time.time()
-        # Special case for being empty.
-        if (self.empty): raise(Data.Empty("Cannot copy empty data."))
         # Construct a new data set that is a copy of the data in this object.
         if self.view: rows, cols = self._row_indices, self._col_indices
-        else:         rows, cols = map(list,map(range,self.shape))
-        data = type(self)(names=list(self.names), types=list(self.types))
+        else:         rows, cols = map(list,map(range,self.shape))        
+        data = type(self)(names=self.names, types=self.types)
         for i,row in enumerate(rows):
             # Update user on progress if too much time has elapsed..
             if (time.time() - start) > self.max_wait:
