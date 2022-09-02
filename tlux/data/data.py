@@ -278,31 +278,21 @@ class Data:
                 num_index = self.names.index(index)
             # Return a mutable "Column" object
             return Data.Column(self, num_index)
-        # Short-circuit for recognizing a column object.
-        elif ((type(index) == tuple) and (len(index) == 2) and
-              (type(index[0]) == slice) and (type(index[1]) in {int, str})):
-            # Handle a string column index.
-            if (type(index[1]) == str):
-                # This index is accessing a column
-                if (index[1] not in self.names):
-                    raise(Data.UnknownName(f"This data does not have a column named '{index[1]}'."))
+        # Short-circuit for recognizing a "Column" object.
+        if ((type(index) == tuple) and (len(index) == 2)
+            and (type(index[0]) != str) and (type(index[1]) in {int, str})):
+            col_index = index[1]
+            if (type(col_index) == str):
                 # If this is a view, make that numerical index relative to this.
                 if (self.view):
-                    col_names = list(self.names)
-                    if index[1] not in col_names:
-                        raise(Data.UnknownName(f"This data does not have a column named '{index[1]}'."))
-                    num_index = col_names.index(index[1])
+                    col_names = list(self.names) # <- use the iterator because it grabs relevant columns
+                    if col_index not in col_names:
+                        raise(Data.UnknownName(f"This data view does not have a column named '{col_index}'."))
+                    col_index = col_names.index(col_index)
                 # Otherwise, retreive the exact numerical column index.
-                else: num_index = self.names.index(index[1])
-            # Handle an integer column index.
-            elif (type(index[1]) == int):
-                if (not (-self.shape[1] <= index[1] < self.shape[1])):
-                    raise(Data.BadIndex(f"The integer column index {index[1]} is out of the valid range."))
-                num_index = index[1]
-            # Get the row indices.
-            indices = list(range(len(self))[index[0]])
-            # Return a mutable "Column" object
-            return Data.Column(self, num_index, indices=indices)
+                else:
+                    col_index = self.names.index(col_index)
+            return Data.Column(self, col_index)[index[0]]
         # If they are extracting the full data then assume a copy is desired.
         elif ((type(index) == slice) and (index == slice(None))):
             return self.copy()
@@ -314,6 +304,7 @@ class Data:
         else:
             # This index is retrieving a sliced subset of self.
             rows, cols = self._index_to_rows_cols(index)
+            # Otherwise, this is a view.
             view = type(self)(data=self.data, names=self.names.values,
                               types=self.types.values, rows=rows, cols=cols)
             # If this is only accessing a single row, return a Row object
@@ -330,7 +321,7 @@ class Data:
         # Special case for being empty.
         if (self.empty):
             if (type(index) == str):
-                self.add_column(value, name=index)
+                return self.add_column(value, name=index)
             elif (type(index) == int):
                 raise(Data.Empty("Cannot set row for empty data."))
             elif (type(index) == slice):
@@ -696,7 +687,7 @@ class Data:
         if (self.view):
             raise(Data.Unsupported("This is a data alias and does not support assignment."))
         # Convert the element into a python list
-        try:    element = list(element)
+        try: element = list(element)
         except: raise(Data.BadValue(f"Invalid element, failed conversion to list."))
         # Check length in case types already exists.
         if (self.types is not None):
@@ -1196,7 +1187,7 @@ class Data:
                 raise(Data.BadData(f"Provided column has at least {i+1} elements, more than the length of this data ({len(self)})."))
             # If this is the first column in the data.
             elif (self.shape[1] == 0):
-                self.append(Data.Row(self, [val]))
+                self.append([val])
             # Append the value to this row for normal operation.
             else: self[i].insert(index, val)
             # Only add to missing values entry if it's not already there

@@ -72,7 +72,6 @@ class Descriptor:
 # Local mutable Column class (for column item assignment,
 # retrieval, and iteration over a column in a data object).
 class Column:
-    _index = 0
     def __init__(self, data, column, indices=None):
         # Generate indices if they were not provided
         if (indices is None): indices = list(range(len(data)))
@@ -110,13 +109,16 @@ class Column:
     # ----------------
     # Define this as an interator
     def __iter__(self):
-        self._index = 0
-        return self
-    def __next__(self):
-        if (self._index >= len(self.indices)):
-            raise(StopIteration)
-        self._index += 1
-        return self.data[self.indices[self._index-1], self.column]
+        class ColIterator:
+            i = 0
+            col = self
+            def __next__(self):
+                if (self.i >= len(self.col.indices)):
+                    self.i = 0
+                    raise(StopIteration)
+                self.i += 1
+                return self.col.data[self.col.indices[self.i-1], self.col.column]
+        return ColIterator()
 
     #    Descriptors
     # -----------------
@@ -172,6 +174,12 @@ class Column:
                 if (equality and (v in other)):             yield True
                 elif ((not equality) and (v not in other)): yield True
                 else:                                       yield False
+        elif (hasattr(other, "__iter__")):
+            # Iterate over both this column and the other, checking elementwise equality.
+            for (i, (v1, v2)) in enumerate(zip(self, other)):
+                yield v1 == v2
+            if (i != len(self)):
+                raise(RuntimeError(f"The other object of type {type(other)} provided an iterator, but had length {i} and does not match expected length {len(self)}. "))
         else:
             raise(self.data.BadData(f"There is no defined equality operator for the provided type {type(other)}, when it does not match expected type {self.data.types[self.column]}."))
 
@@ -261,6 +269,18 @@ class Row:
             raise(self.data.BadValue(f"Index {i} can only accept {self.data.types[i]}, received {type(value)}."))
         # Assign the value if it is allowable.
         self.values[i] = value
+    # Define this as an interator
+    def __iter__(self):
+        class RowIterator:
+            i = 0
+            row = self
+            def __next__(self):
+                if (self.i >= len(self.row)):
+                    self.i = 0
+                    raise(StopIteration)
+                self.i += 1
+                return self.row[self.i-1]
+        return RowIterator()
     # Define a "length" for this row.
     def __len__(self): return self.data.shape[1]
     def __str__(self): return str(list(self))
@@ -282,9 +302,7 @@ class Row:
     # Generic boolean operator function.
     def _gen_operator(self, other, op_name):
         # First check for length.
-        try:    has_len = len(other) or True
-        except: has_len = False
-        if has_len:
+        if hasattr(other, "__len__"):
             # If the length doesn't match, check if it is a singleton.
             if (len(other) != len(self)):
                 # Otherwise return singleton comparison.
@@ -295,7 +313,7 @@ class Row:
             else:
                 for (v1, v2) in zip(self, other):
                     if (v1 is None) or (v2 is None): yield None
-                    else:                            yield getattr(v1, op_name)(v2)
+                    else: yield getattr(v1, op_name)(v2)
         # Without a length, it must be a singleton comparison.
         else:
             for v in self:

@@ -488,6 +488,11 @@ Size: (11 x 3)
     assert("Descriptor" in str(type(a.types)))
     assert("Descriptor" in str(type(a.names)))
 
+    # Make sure that two different methods of column access both return the same column.
+    a1 = a[(i for i in range(len(a))), '1']
+    a2 = a[(i for i in range(len(a)))]['1']
+    assert(type(a1) == type(a2))
+    assert(tuple(a1) == tuple(a2))
 
     # Check the 'flatten' function to make sure it correctly flattens
     # structures with nested, differential depth, and different types.
