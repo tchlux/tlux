@@ -1,12 +1,13 @@
-import os, re
+import os, re, math
 import numpy as np
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
 class AxyModel:
-    def __init__(self, config, model):
+    def __init__(self, config, model, clock_rate=2000000000):
         self.config = config
         self.model = model
+        self.clock_rate = clock_rate
         self.a_embeddings  = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
         self.a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
         self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
@@ -37,6 +38,35 @@ class AxyModel:
             return getattr(self.config, attr)
         else:
             return self.__getattribute__(attr)
+
+    # Create a string summarizing how time has been spent for this model.
+    def _timer_summary_string(self):
+        config = self.config
+        clock_rate = self.clock_rate
+        # Show the summary of time spent on different operations.
+        time_vars = [
+            ("int", "initialize"),
+            ("fit", "fit"),
+            ("nrm", "normalize"),
+            ("emb", "embed"),
+            ("evl", "evaluate"),
+            ("grd", "gradient"),
+            ("rat", "rate update"),
+            ("opt", "step vars"),
+            ("con", "condition"),
+            ("enc", "encode")
+        ]
+        max_p, max_n = max(time_vars, key=lambda pn: getattr(config, "w"+pn[0]))
+        total = getattr(config, "w"+max_p)
+        if (total <= 0): return ""
+        max_len = max((len(n) for (p,n) in time_vars))
+        # Generate a summary line for each item.
+        time_str = f" time category    sec {max_n+'%':>12s}   speedup\n"
+        for (p, n) in time_vars:
+            v = getattr(config, "w"+p)
+            pv = getattr(config, "c"+p)
+            time_str += f"  {n:{max_len}s}   {v / clock_rate:.1e}s   ({100.0*v/(total if total > 0 else 1):5.1f}%)   [{pv/(v if v > 0 else 1):.1f}x]\n"
+        return "\n" + time_str + "\n"
 
     # Create a summary string for this model.
     def __str__(self, vecs=False):
@@ -96,7 +126,7 @@ class AxyModel:
             f"  state shift  {self.m_state_shift.shape} "+to_str(self.m_state_shift)+
             f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
              if (self.m_output_vecs.size > 0) else "")
-        )
+        ) + self._timer_summary_string()
 
 
 # Class for calling the underlying AXY model code.
@@ -108,6 +138,7 @@ class AXY:
     def __init__(self, **kwargs):
         try:
             # Store the Fortran module as an attribute.
+            # from tlux.approximate.axy.old_axy import axy
             from tlux.approximate.axy.axy import axy
             self.AXY = axy
         except:
@@ -188,7 +219,7 @@ class AXY:
         # If there is no model or configuration, return None.
         if (self.config is None) or (self.model is None):
             return None
-        return AxyModel(self.config, self.model)
+        return AxyModel(self.config, self.model, clock_rate=self.AXY.clock_rate)
 
 
     # Given an exit code, check to make sure it is 0 (good), if not then read
@@ -574,10 +605,27 @@ if __name__ == "__main__":
 
     # ----------------------------------------------------------------
     #  Enable debugging option "-fcheck=bounds".
-    # import fmodpy
-    # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -fcheck=bounds"
+    import fmodpy
+    # fmodpy.configure(verbose=True)
+    fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero"
     # fmodpy.config.link_blas = "-framework Accelerate"
     # fmodpy.config.link_lapack = "-framework Accelerate"
+    _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
+    _dir = os.path.dirname(os.path.realpath(__file__))
+    _path = os.path.join(_dir, "axy.f90")
+    _axy = fmodpy.fimport(
+        _path, dependencies=_dependencies, output_dir=_dir,
+        blas=True, lapack=True, omp=True, wrap=True,
+        rebuild=False,
+        # verbose=True, 
+        # link_blas="", link_lapack="",
+        # libraries = [_dir] + fmodpy.config.libraries,
+        # symbols = [
+        #     ("sgemm", "blas"),
+        #     ("sgels", "lapack"),
+        #     ("omp_get_max_threads", "omp")
+        # ],
+    )
     # ----------------------------------------------------------------
 
     from tlux.plot import Plot
@@ -599,7 +647,11 @@ if __name__ == "__main__":
     num_states = 8
     steps = 1000
     num_threads = None
+    new_model = True
     use_x = True
+    use_a = True
+    use_yi = False
+    use_nearest_neighbor = False
     np.random.seed(seed)
 
     # Genreate source data.
@@ -609,13 +661,20 @@ if __name__ == "__main__":
 
     # Create all data.
     x = np.concatenate((base_x, base_x), axis=0)
-    xi = np.concatenate((np.ones(len(base_x)),2*np.ones(len(base_x)))).reshape((-1,1)).astype("int32")
+    xi = np.concatenate(
+        (np.ones(len(base_x)), 2*np.ones(len(base_x)))
+    ).reshape((-1,1)).astype("int32")
     ax = x.reshape((-1,1)).copy()
-    axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
+    axi = np.concatenate((
+        (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1),
+        np.concatenate((np.ones(xi.shape, dtype="int32")*xi,
+                        np.ones(xi.shape, dtype="int32")*xi),
+                       axis=1).reshape(-1,1)
+    ), axis=1)
     sizes = np.ones(x.shape[0], dtype="int32") * 2
     # Concatenate the two different function outputs.
     y = np.concatenate((base_y, np.cos(np.linalg.norm(base_x,axis=1))), axis=0)
-    y = y.reshape((y.shape[0],-1))
+    y = y.reshape((y.shape[0], -1))
     # Generate classification data that is constructed by binning the existing y values.
     yi = np.asarray([
         np.where(
@@ -633,32 +692,42 @@ if __name__ == "__main__":
             )
         ),
     ], dtype=object).T
+    yi_values = [{
+        "bottom": y[y[:,0] <= np.percentile(y[:,0], 50)].mean(),
+        "top": y[y[:,0] > np.percentile(y[:,0], 50)].mean(),
+    }, {
+        "small": y[y[:,0] <= np.percentile(y[:,0], 20)].mean(),
+        "medium": y[(y[:,0] > np.percentile(y[:,0], 20)) *
+                    (y[:,0] < np.percentile(y[:,0], 80))].mean(),
+        "large": y[y[:,0] >= np.percentile(y[:,0], 80)].mean(),
+    }]
 
-    # Train a new model if there is not one saved.
-    if (not os.path.exists('temp-model.json')):
+    # Train a new model or load an existing one.
+    if (new_model or (not os.path.exists('temp-model.json'))):
         # Initialize a new model.
         print("Fitting model..")
         m = AXY(
             ads=state_dim,
-            ans=num_states // 2,
+            ans=math.ceil(num_states / 2),
             mds=state_dim,
-            mns=num_states // 2,
-            num_threads=num_threads, seed=seed,
+            mns=math.ceil(num_states / 2),
+            num_threads=num_threads,
+            seed=seed,
             early_stop = False,
+            logging_step_frequency = 1,
+            rank_check_frequency = 100,
             # basis_replacement = True,
-            # orthogonalizing_step_frequency = 200,
             # keep_best = False,
-            # step_replacement = 0.00,
             # rescale_y = False,
         )
         m.fit(
-            ax=ax.copy(),
-            axi=axi,
-            sizes=sizes,
+            ax=(ax.copy() if use_a else None),
+            axi=(axi if use_a else None),
+            sizes=(sizes if use_a else None),
             x=(x.copy() if use_x else None),
-            xi=xi,
+            xi=(xi if use_x else None),
             y=y.copy(),
-            yi=yi,
+            yi=(yi if use_yi else None),
             steps=steps,
         )
         # Save and load the model.
@@ -667,38 +736,69 @@ if __name__ == "__main__":
     # Load the saved model.
     m = AXY()
     m.load("temp-model.json")
-    os.remove("temp-model.json")
+    # Remove the saved model if only new models are desired.
+    if new_model: os.remove("temp-model.json")
 
     # Print the model.
     print()
-    print(m)
+    print(m, m.config)
+    print()
 
     # Evaluate the model and compare with the data provided for training.
     # TODO: Add some evaluations of the categorical outputs.
     # fy = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)
-    yy = np.concatenate((y.astype(object), yi.astype(object)), axis=1)
+    # yy = np.concatenate((y.astype(object), yi.astype(object)), axis=1)
 
     # Generate the plot of the results.
     print("Adding to plot..")
     p = Plot()
     p.add("xi=1 true", *x.T, y[:len(y)//2,0], color=0, group=0)
     p.add("xi=2 true", *x.T, y[len(y)//2:,0], color=1, group=1)
-    
-    # from tlux.approximate.balltree import BallTree
-    # tree = BallTree(m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True), build=False)
-    def fhat(x, i=1):
+
+    # Build a nearest neighbor tree over the embeddings if preset.
+    if (use_nearest_neighbor):
+        from tlux.approximate.balltree import BallTree
+        tree = BallTree(m(
+            ax=(ax if use_a else None),
+            axi=(axi if use_a else None),
+            sizes=(sizes if use_a else None),
+            x=(x if use_x else None),
+            xi=(xi if use_x else None),
+            embedding=True
+        ), build=False)
+
+    # Define a function that evaluates the model with some different presets.
+    def fhat(x, i=1, yi=None):
         xi = i * np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
-        axi = (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1)
+        axi = np.concatenate((
+            (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1),
+            np.concatenate((np.ones(xi.shape, dtype="int32")*i,
+                            np.ones(xi.shape, dtype="int32")*i),
+                           axis=1).reshape(-1,1)
+        ), axis=1)
         sizes = np.ones(x.shape[0], dtype="int32") * 2
-        if (not use_x): x = None
-        return m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes)[:,0]
-        # # Use the tree to lookup the nearest neighbor.
-        # emb = m(x=x, xi=xi, ax=ax, axi=axi, sizes=sizes, embedding=True)
-        # i = tree(emb, return_distance=False)
-        # return y[i,0]
+        if (not use_a): ax = axi = sizes = None
+        if (not use_x): x = xi = None
+        if (not use_yi): yi = None
+        if (not use_nearest_neighbor):
+            if (yi is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,0]
+            else:            return [yi_values[yi][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,y.shape[1]+yi]]
+        else:
+            # Use the tree to lookup the nearest neighbor.
+            emb = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True)
+            i = tree(emb, return_distance=False)
+            if (yi is None): return y[i,0]
+            else:            return [yi_values[yi][v] for v in yi[i.flatten(),yi]]
+
+    # Add the two functions that are being approximated.
     p.add_func("xi=1", lambda x: fhat(x, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=3, opacity=0.8, group=0, plot_points=3000) #, mode="markers", shade=True)
     p.add_func("xi=2", lambda x: fhat(x, 2), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=2, opacity=0.8, group=1, plot_points=3000) #, mode="markers", shade=True)
+    if (use_yi):
+        p.add_func("xi=1, yi=0", lambda x: fhat(x, 1, 0), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=4, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
+        p.add_func("xi=1, yi=1", lambda x: fhat(x, 1, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=5, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
+        p.add_func("xi=2, yi=0", lambda x: fhat(x, 2, 0), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=6, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
+        p.add_func("xi=2, yi=1", lambda x: fhat(x, 2, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=7, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
 
     # Produce the visual.
     print("Generating surface plot..")

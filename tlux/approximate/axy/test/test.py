@@ -1,3 +1,6 @@
+import numpy as np
+from tlux.approximate.axy import AXY
+
 print("_"*70)
 print(" TESTING AXY MODULE")
 
@@ -32,14 +35,32 @@ num_states = 8
 steps = 1000
 num_threads = None
 np.random.seed(seed)
+axy_kwargs = dict(
+    num_threads = num_threads,
+    seed = seed,
+    logging_step_frequency = 1,
+    rank_check_frequency = 1,
+    min_update_ratio = 0.8,
+    early_stop = False,
+    # initial_shift_range=0.0,
+    # faster_rate=1.0,
+    # slower_rate=1.0,
+    # basis_replacement = True,
+    # orthogonalizing_step_frequency = 200,
+    # keep_best = False,
+    # step_replacement = 0.00,
+    # equalize_y = True,
+    # discontinuity=-1000.0
+    # initial_step=0.01
+)
 
 
 TEST_FIT_SIZE = False
 TEST_WEIGHTING = False
 TEST_SAVE_LOAD = False
-TEST_INT_INPUT = True
+TEST_INT_INPUT = False
 TEST_AGGREGATE = False
-TEST_LARGE_MODEL = False
+TEST_LARGE_MODEL = True
 TEST_BAD_NUMBERS = False # Nan and Inf
 TEST_SCALING = False # Very small (10^{-30}) and very large (10^{30}) values at once.
 SHOW_VISUALS = True
@@ -62,18 +83,19 @@ if TEST_FIT_SIZE:
     # Number of points going into each model.
     na = 100000000
     nm = 100000
-    num_threads = 100
     # Initialize the model and its fit configuration.
     m = AXY(
         adn=dim_a_numeric, ade=dim_a_embedding, ane=num_a_embeddings,
         ads=dim_a_state, ans=num_a_states, ado=dim_a_out,
         mdn=dim_m_numeric, mde=dim_m_embedding, mne=num_m_embeddings,
         mds=dim_m_state, mns=num_m_states, mdo=dim_m_out,
-        num_threads=num_threads, seed=seed,
+        **axy_kwargs
     )
+    print(m.config)    
     m.AXY.new_fit_config(nm, na, m.config)
     print()
     print(m)
+    print(m.config)
 
 
 if (not SHOW_VISUALS):
@@ -91,15 +113,10 @@ if TEST_SAVE_LOAD:
     print()
     m.save("testing_empty_save.json")
     m.load("testing_empty_save.json")
-    from util.approximate import PLRM
-    m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, seed=seed,
-            num_threads=num_threads, steps=steps, 
-            orthogonalizing_step_frequency=10,
-            initial_shift_range=0.0,
-            min_update_ratio=1.0,
-            faster_rate=1.0,
-            slower_rate=1.0,
-    ) # discontinuity=-1000.0) # initial_step=0.01)
+    from tlux.approximate import AXY
+    m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, 
+            steps=steps, **axy_kwargs,
+    )
     print("Initialized model:")
     print(m)
     print()
@@ -170,7 +187,7 @@ if TEST_INT_INPUT:
     x_min_max = np.vstack((np.min(x,axis=0), np.max(x, axis=0))).T
     y = f(x)
     # Initialize a new model.
-    m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, seed=seed, steps=steps, num_threads=num_threads)
+    m = AXY(mdn=2, mds=state_dim, mns=num_states, mdo=1, mde=3, mne=2, steps=steps, **axy_kwargs)
     all_x = np.concatenate((x, x), axis=0)
     all_y = np.concatenate((y, np.cos(np.linalg.norm(x,axis=1))), axis=0)
     all_xi = np.concatenate((np.ones(len(x)),2*np.ones(len(x)))).reshape((-1,1)).astype("int32")
@@ -211,13 +228,7 @@ if TEST_AGGREGATE:
         mdn=0, adn=ax.shape[1], ado=2, mdo=all_y.shape[1], 
         ads=state_dim, ans=num_states, mds=state_dim, mns=num_states,
         ane=len(np.unique(axi.flatten())), mne=len(np.unique(all_xi.flatten())),
-        num_threads=num_threads, seed=seed,
-        early_stop = False,
-        # basis_replacement = True,
-        # orthogonalizing_step_frequency = 200,
-        # keep_best = False,
-        # step_replacement = 0.00,
-        # equalize_y = True,
+        **axy_kwargs,
     )
     m.fit(ax=ax.copy(), axi=axi, sizes=sizes, xi=all_xi, y=all_y.copy(), steps=steps)
     # Create an evaluation set that evaluates the model that was built over two differnt functions.
@@ -246,7 +257,7 @@ if TEST_AGGREGATE:
     p.show(show=False)
 
 
-if (TEST_LARGE_MODEL):
+if (TEST_LARGE_MODEL):  # Takes ~40 seconds on 14" 2021 M1 Pro Macbook Pro, 32GB of RAM
     # Data size.
     nm = 100000
     na = 6000000
@@ -276,14 +287,17 @@ if (TEST_LARGE_MODEL):
     mns = 8
     mds = 64
     steps = 11
-    num_threads = 20
+    kwargs = axy_kwargs.copy()
+    kwargs.update(dict(
+        rank_check_frequency = 0,
+    ))
     # Fit model.
     m = AXY(adn=adn, ane=ane, mdn=mdn, mne=mne, mdo=mdo,
-             ans=ans, ads=ads, mns=mns, mds=mds)
+             ans=ans, ads=ads, mns=mns, mds=mds, **kwargs)
     print()
     print("Fitting large model..")
     m.fit(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, y=y,
-          steps=steps, num_threads=num_threads, early_stop=False)
+          steps=steps, **kwargs)
     print()
 
 # Generate a visual of the loss function.

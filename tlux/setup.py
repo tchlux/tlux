@@ -29,18 +29,34 @@ def build_axy():
     # Get the directory for the AXY compiled source code.
     _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
     _dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approximate", "axy")
+    # _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
+    # _dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approximate", "axy")
     _path = os.path.join(_dir, "axy.f90")
-    _axy = fmodpy.fimport(
-        _path, dependencies=_dependencies, output_dir=_dir,
-        blas=True, lapack=True, omp=True, wrap=True, # verbose=True, 
-        link_blas="", link_lapack="",
-        libraries = [_dir] + fmodpy.config.libraries,
-        symbols = [
-            ("sgemm_", "blas"),
-            ("sgels_", "lapack"),
-            ("omp_get_max_threads_", "omp")
-        ],
+    _kwargs = dict(
+        input_fortran_file = _path,
+        dependencies = _dependencies,
+        output_dir = _dir,
+        blas = True,
+        lapack = True,
+        omp = True,
+        wrap = True,
+        verbose = False,
     )
+    # Try and build using (local) defaults for fmodpy compilation.
+    try:
+        _axy = fmodpy.fimport(**_kwargs)
+        _ = _axy.AXY()
+    # When local default fail, try specifying exactly what shared library functions are needed.
+    except:
+        _axy = fmodpy.fimport( **_kwargs,
+            link_blas="", link_lapack="",
+            libraries = [_dir] + fmodpy.config.libraries,
+            symbols = [
+                ("sgemm", "blas"),
+                ("sgels", "lapack"),
+                ("omp_get_max_threads", "omp")
+            ],
+        )
     return _axy
 
 
@@ -55,7 +71,7 @@ def build_balltree():
     _balltree = fmodpy.fimport(
         _path, dependencies=_dependencies, output_dir=_dir, omp=True,
         libraries = [_dir] + fmodpy.config.libraries,
-        symbols = [("omp_get_max_threads_", "omp")],
+        symbols = [("omp_get_max_threads", "omp")],
     )
     # Fast sort.
     _dependencies = ["swap.f90", "fast_sort.f90"]
