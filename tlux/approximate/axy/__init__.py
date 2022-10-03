@@ -65,7 +65,7 @@ class AxyModel:
         for (p, n) in time_vars:
             v = getattr(config, "w"+p)
             pv = getattr(config, "c"+p)
-            time_str += f"  {n:{max_len}s}   {v / clock_rate:.1e}s   ({100.0*v/(total if total > 0 else 1):5.1f}%)   [{pv/(v if v > 0 else 1):.1f}x]\n"
+            time_str += f"  {n:{max_len}s}   {v/(clock_rate if clock_rate > 0 else 1):.1e}s   ({100.0*v/(total if total > 0 else 1):5.1f}%)   [{pv/(v if v > 0 else 1):.1f}x]\n"
         return "\n" + time_str + "\n"
 
     # Create a summary string for this model.
@@ -605,35 +605,31 @@ if __name__ == "__main__":
 
     # ----------------------------------------------------------------
     #  Enable debugging option "-fcheck=bounds".
-    import fmodpy
-    # fmodpy.configure(verbose=True)
-    fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero"
-    # fmodpy.config.link_blas = "-framework Accelerate"
-    # fmodpy.config.link_lapack = "-framework Accelerate"
-    _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
-    _dir = os.path.dirname(os.path.realpath(__file__))
-    _path = os.path.join(_dir, "axy.f90")
-    _axy = fmodpy.fimport(
-        _path, dependencies=_dependencies, output_dir=_dir,
-        blas=True, lapack=True, omp=True, wrap=True,
-        rebuild=False,
-        # verbose=True, 
-        # link_blas="", link_lapack="",
-        # libraries = [_dir] + fmodpy.config.libraries,
-        # symbols = [
-        #     ("sgemm", "blas"),
-        #     ("sgels", "lapack"),
-        #     ("omp_get_max_threads", "omp")
-        # ],
-    )
+    # import fmodpy
+    # # fmodpy.configure(verbose=True)
+    # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero"
+    # # fmodpy.config.link_blas = "-framework Accelerate"
+    # # fmodpy.config.link_lapack = "-framework Accelerate"
+    # _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
+    # _dir = os.path.dirname(os.path.realpath(__file__))
+    # _path = os.path.join(_dir, "axy.f90")
+    # _axy = fmodpy.fimport(
+    #     _path, dependencies=_dependencies, output_dir=_dir,
+    #     blas=True, lapack=True, omp=True, wrap=True,
+    #     rebuild=False,
+    #     # verbose=True, 
+    #     # link_blas="", link_lapack="",
+    #     # libraries = [_dir] + fmodpy.config.libraries,
+    #     # symbols = [
+    #     #     ("sgemm", "blas"),
+    #     #     ("sgels", "lapack"),
+    #     #     ("omp_get_max_threads", "omp")
+    #     # ],
+    # )
     # ----------------------------------------------------------------
 
     from tlux.plot import Plot
     from tlux.random import well_spaced_ball, well_spaced_box
-
-    # TODO: test saving and loading with unique value maps
-    # TODO: design concise test function that has meaningful signal
-    #       in each of "ax", "axi", "x", "xi", test all combinations
 
     # A function for testing approximation algorithms.
     def f(x):
@@ -641,7 +637,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
-    n = 100
+    n = 2**6
     seed = 2
     state_dim = 32
     num_states = 8
@@ -651,7 +647,7 @@ if __name__ == "__main__":
     use_x = True
     use_a = True
     use_yi = False
-    use_nearest_neighbor = False
+    use_nearest_neighbor = True
     np.random.seed(seed)
 
     # Genreate source data.
@@ -768,7 +764,7 @@ if __name__ == "__main__":
         ), build=False)
 
     # Define a function that evaluates the model with some different presets.
-    def fhat(x, i=1, yi=None):
+    def fhat(x, i=1, yii=None):
         xi = i * np.ones((len(x),1),dtype="int32")
         ax = x.reshape((-1,1)).copy()
         axi = np.concatenate((
@@ -780,16 +776,16 @@ if __name__ == "__main__":
         sizes = np.ones(x.shape[0], dtype="int32") * 2
         if (not use_a): ax = axi = sizes = None
         if (not use_x): x = xi = None
-        if (not use_yi): yi = None
+        if (not use_yi): yii = None
         if (not use_nearest_neighbor):
-            if (yi is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,0]
-            else:            return [yi_values[yi][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,y.shape[1]+yi]]
+            if (yii is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,0]
+            else:             return [yi_values[yii][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,y.shape[1]+yii]]
         else:
             # Use the tree to lookup the nearest neighbor.
             emb = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True)
             i = tree(emb, return_distance=False)
-            if (yi is None): return y[i,0]
-            else:            return [yi_values[yi][v] for v in yi[i.flatten(),yi]]
+            if (yii is None): return y[i,0]
+            else:             return [yi_values[yii][v] for v in yi[i.flatten(),yii]]
 
     # Add the two functions that are being approximated.
     p.add_func("xi=1", lambda x: fhat(x, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=3, opacity=0.8, group=0, plot_points=3000) #, mode="markers", shade=True)

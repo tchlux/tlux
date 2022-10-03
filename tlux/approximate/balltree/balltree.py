@@ -148,7 +148,6 @@ class BallTree:
                 old_order = self.order[:self.size]
                 old_radii = self.radii[:self.built]
                 old_medians = self.medians[:self.built]
-                old_size = self.size
                 # Compute the new size and initialize the memory for the new tree.
                 self.size += points.shape[1]
                 self.tree = np.zeros(
@@ -164,11 +163,11 @@ class BallTree:
                 #  while ensuring the built parts of the previous tree are still valid.
                 self.tree[:,:old_tree.shape[1]] = old_tree
                 self.tree[:,old_tree.shape[1]:] = points
-                self.usage[:old_size] = old_usage
-                self.sq_sums[:old_size] = old_sq_sums
-                self.order[:self.built] = old_order
-                self.radii[:self.built] = old_radii
-                self.medians[:self.built] = old_medians
+                self.usage[:old_usage.size] = old_usage
+                self.sq_sums[:old_sq_sums.size] = old_sq_sums
+                self.order[:old_order.size] = old_order
+                self.radii[:old_radii.size] = old_radii
+                self.medians[:old_medians.size] = old_medians
                 # Delete the old tree components.
                 del old_tree, old_usage, old_sq_sums, old_order, old_radii, old_medians
         else:

@@ -74,12 +74,14 @@ if __name__ == "__main__":
     from tlux.random import well_spaced_box, well_spaced_ball
 
     # Generate some data.
-    x = well_spaced_box(40, 2)
+    x = well_spaced_box(400, 2)
     y = np.cos(10*np.linalg.norm(x, axis=1))
 
     # Fit a nearest neighbor model.
     m = Delaunay()
-    m.fit(x, y)
+    # from tlux.approximate.axy import AXY
+    # m = AXY()
+    m.fit(x=x, y=y)
 
     # Create a visual.
     p = Plot()

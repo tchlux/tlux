@@ -1674,7 +1674,7 @@ def multiplot(plots, x_domains=None, y_domains=None, html=True,
             # Extract the annotations for this plot
             plot_annotations = plot['layout'].pop('annotations',[])
             # Handle 3D and 2D differently
-            if specs[r][c]['is_3d']:
+            if specs[r][c].get('is_3d',False):
                 counter_3d += 1
                 scene_name = 'scene' + str(counter_3d)
                 fig['layout'][scene_name].update(plot['layout']['scene'])
@@ -1706,7 +1706,7 @@ def multiplot(plots, x_domains=None, y_domains=None, html=True,
             if len(plot_annotations) > 0:
                 plot['layout']['annotations'] = plot_annotations
             # Remove the 'scene' if there is one left over
-            if specs[r][c]['is_3d']: fig['layout'].pop('scene','')
+            if specs[r][c].get('is_3d',False): fig['layout'].pop('scene','')
     # Set the height and width properties, compensate for plotly spacing aroung SVG
     if type(width) != type(None):  
         width += 139
