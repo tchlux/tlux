@@ -2358,23 +2358,38 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(:,:) :: MODEL_GRAD
       REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_MEAN, MODEL_GRAD_CURV
       INTEGER, DIMENSION(:) :: UPDATE_INDICES
+      INTEGER(KIND=INT64) :: I, NT, NP, MS, S, E
       REAL :: CPU_TIME_START, CPU_TIME_END
       INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
       CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
       CALL CPU_TIME(CPU_TIME_START)
-      ! Aggregate over computed batches and compute average gradient.
-      MODEL_GRAD(:,1) = SUM(MODEL_GRAD(:,:),2) / REAL(SIZE(MODEL_GRAD,2),RT)
-      MODEL_GRAD_MEAN(:) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(:) &
-           + CONFIG%STEP_MEAN_CHANGE * MODEL_GRAD(:,1)
-      MODEL_GRAD_CURV(:) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(:) &
-           + CONFIG%STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(:) - MODEL_GRAD(:,1))**2
-      MODEL_GRAD_CURV(:) = MAX(MODEL_GRAD_CURV(:), EPSILON(CONFIG%STEP_FACTOR))
-      ! Set the step as the mean direction (over the past few steps).
-      MODEL_GRAD(:,1) = MODEL_GRAD_MEAN(:)
-      ! Start scaling by step magnitude by curvature once enough data is collected.
-      IF (STEP .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
-         MODEL_GRAD(:,1) = MODEL_GRAD(:,1) / SQRT(MODEL_GRAD_CURV(:))
-      END IF
+      NT = MIN(CONFIG%NUM_VARS, CONFIG%NUM_THREADS)
+      NP = MAX(1, CONFIG%NUM_VARS / NT)
+      ! TODO: Parallelize the most expensive parts of the update.
+      !       - the argselect for model parameters.
+      ! 
+      !$OMP PARALLEL DO PRIVATE(S, E)
+      DO I = 0, NT-1
+         S = 1_INT64+I*NP
+         E = MIN((I+1_INT64)*MP, CONFIG%NUM_VARS)
+         ! Aggregate over computed batches and compute average gradient.
+         MODEL_GRAD(S:E) = SUM(MODEL_GRAD(S:E,:),2) / REAL(SIZE(MODEL_GRAD,2),RT)
+         MODEL_GRAD_MEAN(S:E) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(S:E) &
+              + CONFIG%STEP_MEAN_CHANGE * MODEL_GRAD(S:E,1)
+         MODEL_GRAD_CURV(S:E) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(S:E) &
+              + CONFIG%STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(S:E) - MODEL_GRAD(S:E,1))**2
+         MODEL_GRAD_CURV(S:E) = MAX(MODEL_GRAD_CURV(S:E), EPSILON(CONFIG%STEP_FACTOR))
+         ! Set the step as the mean direction (over the past few steps).
+         MODEL_GRAD(S:E,1) = MODEL_GRAD_MEAN(S:E)
+         ! Start scaling by step magnitude by curvature once enough data is collected.
+         IF (STEP .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
+            MODEL_GRAD(S:E,1) = MODEL_GRAD(S:E,1) / SQRT(MODEL_GRAD_CURV(S:E))
+         END IF
+         IF (CONFIG%NUM_TO_UPDATE .EQ. CONFIG%NUM_VARS) THEN
+            ! Take the gradient steps (based on the computed "step" above).
+            MODEL(S:E) = MODEL(S:E) - MODEL_GRAD(S:E,1) * CONFIG%STEP_FACTOR
+         END IF
+      END DO
       ! Update as many variables as it seems safe to update (and still converge).
       IF (CONFIG%NUM_TO_UPDATE .LT. CONFIG%NUM_VARS) THEN
          ! Identify the subset of components that will be updapted this step.
@@ -2386,10 +2401,6 @@ CONTAINS
               MODEL(UPDATE_INDICES(1:CONFIG%NUM_TO_UPDATE)) &
               - MODEL_GRAD(UPDATE_INDICES(1:CONFIG%NUM_TO_UPDATE),1) &
               * CONFIG%STEP_FACTOR
-      ELSE
-         ! Take the gradient steps (based on the computed "step" above).
-         MODEL(1:CONFIG%NUM_VARS) = MODEL(1:CONFIG%NUM_VARS) &
-              - MODEL_GRAD(:,1) * CONFIG%STEP_FACTOR
       END IF
       CONFIG%STEPS_TAKEN = CONFIG%STEPS_TAKEN + 1
       ! Record the end of the total time.

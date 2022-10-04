@@ -245,10 +245,20 @@ class AXY:
     # Given a categorical input array, construct a dictionary for
     #  mapping the unique values in the columns of the array to integers.
     def _i_map(self, xi):
+        # Generate the map (ordered list of unique values).
         if (len(xi.dtype) > 0):
-            xi_map = [np.unique(xi[n]) for n in xi.dtype.names]
+            xi_list = [np.unique(xi[n]).tolist() for n in xi.dtype.names]
         else:
-            xi_map = [np.unique(xi[:,i]) for i in range(xi.shape[1])]
+            xi_list = [np.unique(xi[:,i]).tolist() for i in range(xi.shape[1])]
+        # Generate the lookup table (value -> integer index).
+        base = 1
+        xi_map = []
+        for i, xij_list in enumerate(xi_list):
+            xi_map.append(
+                {v:base+j for j,v in enumerate(xij_list)}
+            )
+            base += len(xij_list)
+        # Return the map and the lookup.
         return xi_map
 
 
@@ -262,16 +272,11 @@ class AXY:
         xi_rows = xi.shape[0]
         xi_cols = len(xi.dtype) or xi.shape[1]
         _xi = np.zeros((xi_rows, xi_cols), dtype="int32", order="C")
-        base = 1
-        for i in range(xi_cols):
-            # Construct the integer map, retrieve the column of unique values.
-            # The integer map should not have any numbers shared across yi columns!
-            int_map = {xi_map[i][j]:base+j for j in range(len(xi_map[i]))}
-            base += len(xi_map[i])
-            vals = (xi[:,i:i+1] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
-            # Assign all the integers.
-            for j in range(xi_rows):
-                _xi[j,i] = int_map.get(vals[j,0], 0)
+        for i, i_map in enumerate(xi_map):
+            # Assign all the integer embeddings.
+            values = (xi[:,i].tolist() if len(xi.dtype) == 0 else xi[xi.dtype.names[i]].tolist())
+            for j,v in enumerate(values):
+                _xi[j,i] = i_map.get(v, 0)
         return _xi
 
 
@@ -572,23 +577,24 @@ class AXY:
                 "model"  : self.model.tolist(),
                 "record" : self.record.tolist(),
                 "embedding_transform" : self.embedding_transform.tolist(),
-                "xi_map"    : [l.tolist() for l in self.xi_map],
-                "axi_map"    : [l.tolist() for l in self.axi_map],
-                "yi_map"    : [l.tolist() for l in self.yi_map],
+                "xi_map" : [list(m.items()) for m in self.xi_map],
+                "axi_map" : [list(m.items()) for m in self.axi_map],
+                "yi_map" : [list(m.items()) for m in self.yi_map],
             }))
 
 
     # Load this model from a path (after having been saved).
     def load(self, path):
         # Read the file.
-        import json
+        import builtins, json
         with open(path, "r") as f:
             attrs = json.loads(f.read())
         # Load the attributes of the model.
-        for key in attrs:
-            value = attrs[key]
-            if (key[-4:] == "_map"):
-                value = [np.asarray(l) for l in value]
+        for key, value in attrs.items():
+            # Convert the categorical map keys to the appropriate type.
+            if (key.endswith("_map")):
+                value = list(map(dict, value))
+            # Otherwise all lists are actually numpy arrays (weights).
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
             setattr(self, key, value)
@@ -639,15 +645,15 @@ if __name__ == "__main__":
 
     n = 2**6
     seed = 2
-    state_dim = 32
+    state_dim = 64
     num_states = 8
     steps = 1000
     num_threads = None
     new_model = True
     use_x = True
-    use_a = True
+    use_a = False
     use_yi = False
-    use_nearest_neighbor = True
+    use_nearest_neighbor = False
     np.random.seed(seed)
 
     # Genreate source data.
