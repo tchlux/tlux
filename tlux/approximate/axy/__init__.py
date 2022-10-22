@@ -1,5 +1,6 @@
 import os, re, math
 import numpy as np
+from memory_profiler import profile
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -245,11 +246,12 @@ class AXY:
     # Given a categorical input array, construct a dictionary for
     #  mapping the unique values in the columns of the array to integers.
     def _i_map(self, xi):
+        sort_key = lambda i: i if isinstance(i,str) else str(i))
         # Generate the map (ordered list of unique values).
         if (len(xi.dtype) > 0):
-            xi_list = [np.unique(xi[n]).tolist() for n in xi.dtype.names]
+            xi_list = [sorted(set(xi[n]), key=sort_key) for n in xi.dtype.names]
         else:
-            xi_list = [np.unique(xi[:,i]).tolist() for i in range(xi.shape[1])]
+            xi_list = [sorted(set(xi[:,i]), key=sort_key) for i in range(xi.shape[1])]
         # Generate the lookup table (value -> integer index).
         base = 1
         xi_map = []
@@ -370,6 +372,7 @@ class AXY:
     # Fit this model.
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
+    @profile
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
@@ -429,8 +432,8 @@ class AXY:
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
         self.AXY.new_fit_config(nm, na, self.config)
-        rwork = np.zeros(self.config.rwork_size, dtype="float32")
-        iwork = np.zeros(self.config.iwork_size, dtype="int32")
+        rwork = np.ones(self.config.rwork_size, dtype="float32")
+        iwork = np.ones(self.config.iwork_size, dtype="int32")
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         result = self.AXY.minimize_mse(self.config, self.model, rwork, iwork,
@@ -461,6 +464,7 @@ class AXY:
 
 
     # Make predictions for new data.
+    @profile
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, raw_scores=False, **kwargs):
         # Evaluate the model at all data.
@@ -606,6 +610,23 @@ class AXY:
 
 
 if __name__ == "__main__":
+
+    n = 10000
+    an = 300
+    axi = np.random.randint(0,10000, (an*n,1)).astype("int32")
+    sizes = np.zeros(n, dtype="int32") + an
+    y = np.zeros(n, dtype="float32")
+    print("Fitting model..")
+    m = AXY()
+    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
+    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
+    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
+    print()
+    print("Evaluating model..")
+    e = m.predict(axi=axi, sizes=sizes, embeddings=True)
+    print("Done.")
+    exit()
+
     print("_"*70)
     print(" TESTING AXY MODULE")
 
