@@ -1,7 +1,7 @@
 import os, re, math
 import numpy as np
 
-# from memory_profiler import profile
+from memory_profiler import profile
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -378,7 +378,7 @@ class AXY:
     # Fit this model.
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
-    # @profile
+    @profile
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
@@ -440,6 +440,9 @@ class AXY:
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
+        # TODO: HACK
+        # nm = 100
+        # na = 1000
         self.AXY.new_fit_config(nm, na, self.config)
         rwork = np.ones(self.config.rwork_size, dtype="float32")
         iwork = np.ones(self.config.iwork_size, dtype="int32")
@@ -474,7 +477,7 @@ class AXY:
 
 
     # Make predictions for new data.
-    # @profile
+    @profile
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, raw_scores=False, **kwargs):
         # Evaluate the model at all data.
@@ -624,30 +627,30 @@ if __name__ == "__main__":
 
     # Remove the compiled object if modifications have been made to sources.
     import os
-    f9 = os.path.expanduser("~/Git/tlux/tlux/approximate/axy")
+    f9 = os.path.dirname(os.path.abspath(__file__))
     f9 = [os.path.join(f9,p) for p in os.listdir(f9) if p.endswith(".f90")]
     so = os.path.expanduser("~/Git/tlux/tlux/approximate/axy/axy/axy.arm64.so")
     if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
         os.remove(so)
 
-    # v = 200000
-    # n = 50000
-    # an = 300
-    # print("Allocating data..", flush=True)
-    # axi = np.random.randint(0,v, (an*n,1)).astype("int32")
-    # sizes = np.zeros(n, dtype="int32") + an
-    # y = np.zeros(n, dtype="float32")
-    # print("Building model..", flush=True)
-    # m = AXY()
-    # print("Fitting model..", flush=True)
-    # m.fit(axi=axi, sizes=sizes, y=y, steps=10, num_threads=None)
-    # # m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1) # repeated call to see memory changes
-    # print()
-    # print("Evaluating model..")
-    # e = m.predict(axi=axi, sizes=sizes, embeddings=True)
-    # print(m)
-    # print("Done.")
-    # exit()
+    v = 200000
+    n = 50000
+    an = 300
+    print("Allocating data..", flush=True)
+    axi = np.random.randint(0,v, (an*n,1)).astype("int32")
+    sizes = np.zeros(n, dtype="int32") + an
+    y = np.zeros(n, dtype="float32")
+    print("Building model..", flush=True)
+    m = AXY()
+    print("Fitting model..", flush=True)
+    m.fit(axi=axi, sizes=sizes, y=y, steps=10, num_threads=None)
+    # m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1) # repeated call to see memory changes
+    print()
+    print("Evaluating model..")
+    e = m.predict(axi=axi, sizes=sizes, embeddings=True)
+    print(m)
+    print("Done.")
+    exit()
 
     print("_"*70)
     print(" TESTING AXY MODULE")
@@ -697,13 +700,13 @@ if __name__ == "__main__":
     n = 2**8
     d = 2
     new_model = True
-    use_a = True
-    agg_dim = 128
+    use_a = False
+    agg_dim = 64
     agg_states = 4
-    use_x = False
-    model_dim = 32
-    model_states = 8
-    model_dim_output = 0
+    use_x = True
+    model_dim = 64
+    model_states = 4
+    model_dim_output = None # 0
     use_yi = False
     steps = 1000
     num_threads = None
