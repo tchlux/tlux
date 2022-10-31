@@ -838,16 +838,14 @@ CONTAINS
     ! If there is AXInteger input, unpack it into X.
     IF (CONFIG%ADE .GT. 0) THEN
        CALL UNPACK_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
-            CONFIG%ADN+1, SIZE(AX,1), &
             MODEL(CONFIG%ASEV:CONFIG%AEEV), &
-            AXI, AX)
+            AXI(:,:), AX(CONFIG%ADN+1:SIZE(AX,1),:))
     END IF
     ! If there is XInteger input, unpack it into end of X.
     IF (CONFIG%MDE .GT. 0) THEN
        CALL UNPACK_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
-            CONFIG%MDN+1, CONFIG%MDN+CONFIG%MDE, &
             MODEL(CONFIG%MSEV:CONFIG%MEEV), &
-            XI, X)
+            XI(:,:), X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:))
     END IF
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
@@ -858,31 +856,26 @@ CONTAINS
   CONTAINS
     ! Given integer inputs and embedding vectors, put embeddings in
     !  place of integer inputs inside of a real matrix.
-    SUBROUTINE UNPACK_EMBEDDINGS(MDE, MNE, SS, SE, EMBEDDINGS, INT_INPUTS, EMBEDDED)
-      INTEGER, INTENT(IN) :: MDE, MNE, SS, SE
+    SUBROUTINE UNPACK_EMBEDDINGS(MDE, MNE, EMBEDDINGS, INT_INPUTS, EMBEDDED)
+      INTEGER, INTENT(IN) :: MDE, MNE
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDE, MNE) :: EMBEDDINGS
       INTEGER, INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
-      REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: EMBEDDED
-      INTEGER :: I, N, D, E
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: EMBEDDED
+      INTEGER :: N, D, E
       REAL(KIND=RT) :: RD
       RD = REAL(SIZE(INT_INPUTS,1,INT64),RT)
       ! Add together appropriate embedding vectors based on integer inputs.
+      EMBEDDED(:,:) = 0.0_RT
+      !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(N, D, E)
       DO N = 1, SIZE(INT_INPUTS,2,KIND=INT64)
-         DO I = SS, SE
-            EMBEDDED(I,N) = 0.0_RT
-         END DO
          DO D = 1, SIZE(INT_INPUTS,1,KIND=INT64)
             E = INT_INPUTS(D,N)
             IF (E .GT. 0) THEN
-               DO I = SS, SE
-                  EMBEDDED(I,N) = EMBEDDED(I,N) + EMBEDDINGS(I-SS+1,E)
-               END DO
+               EMBEDDED(:,N) = EMBEDDED(:,N) + EMBEDDINGS(:,E)
             END IF
          END DO
          IF (SIZE(INT_INPUTS,1,KIND=INT64) > 1) THEN
-            DO I = SS, SE
-               EMBEDDED(I,N) = EMBEDDED(I,N) / RD
-            END DO
+            EMBEDDED(:,N) = EMBEDDED(:,N) / RD
          END IF
       END DO
     END SUBROUTINE UNPACK_EMBEDDINGS
