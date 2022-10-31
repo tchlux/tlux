@@ -85,7 +85,6 @@ CONTAINS
     DO I = 1, SIZE(POINTS,2)
        SQ_SUMS(I) = SUM(POINTS(:,I)**2)
     END DO
-    !$OMP END PARALLEL DO
   END SUBROUTINE COMPUTE_SQUARE_SUMS
 
   ! Re-arrange elements of POINTS into a binary ball tree about medians.
@@ -119,7 +118,6 @@ CONTAINS
           SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
                2 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
        END DO ROOT_TO_ALL
-       !$OMP END PARALLEL DO
        CENTER_IDX = MAXLOC(SQ_DISTS(:),1)
        ! Now CENTER_IDX is the selected center for this node in tree.
     END IF
@@ -136,7 +134,6 @@ CONTAINS
        SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
             2 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
     END DO CENTER_TO_ALL
-    !$OMP END PARALLEL DO
 
     ! Base case for recursion, once we have few enough points, exit.
     IF (SIZE(ORDER) .LE. LS) THEN
@@ -243,7 +240,6 @@ CONTAINS
        INDICES(:,I) = IWORK(:K,T)
        DISTS(:,I) = RWORK(:K,T)
     END DO
-    !$OMP END PARALLEL DO
   END SUBROUTINE NEAREST
 
   ! Compute the K nearest elements of TREE to each point in POINTS.

@@ -6,7 +6,7 @@ from sklearn.neighbors import KDTree
 
 print("Initializing data..")
 np.random.seed(1)
-x = np.random.random(size=(10000000, 16))
+x = np.random.random(size=(10000000, 32))
 x[x.shape[0]//2:,:] = x[:x.shape[0]//2,:]
 i = np.random.randint(x.shape[0])
 print()

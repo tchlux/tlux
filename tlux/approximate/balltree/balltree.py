@@ -199,24 +199,27 @@ class BallTree:
         if (leaf_size is not None): self.leaf_size = leaf_size
         # Translate the root from python index to fortran index if provided.
         if (root is not None): root += 1
-        # Build tree (in-place operation).
-        #    .tree     will not be modified
-        #    .sq_sums  will contain the squared sums of each point
-        #    .radii    will be modified to have the radius of specific
-        #              node, or 0.0 if this point is a leaf.
-        #    .medians  will be modified to have the distance to the
-        #              median child node, or 0.0 if this point is a leaf.
-        #    .order    will be the list of indices (1-indexed) that
-        #              determine the structure of the ball tree.
-        self._balltree.build_tree(
-            self.tree, self.sq_sums,self.radii, self.medians, self.order[:self.size],
-            leaf_size=self.leaf_size, root=root,
-        )
+        # After this function completes, all points will be built.
         self.built = self.size
-        # Restructure the ball tree so the points are in locally contiguous blocks of
-        # memory (local by branch + leaf), as long as allowed (by user or memory).
-        if (reorder or ((reorder is None) and (self.tree.nbytes < self._balltree.max_copy_bytes))):
-            self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
+        # Only call the routines if the tree has positive size.
+        if (self.size > 0):
+            # Build tree (in-place operation).
+            #    .tree     will not be modified
+            #    .sq_sums  will contain the squared sums of each point
+            #    .radii    will be modified to have the radius of specific
+            #              node, or 0.0 if this point is a leaf.
+            #    .medians  will be modified to have the distance to the
+            #              median child node, or 0.0 if this point is a leaf.
+            #    .order    will be the list of indices (1-indexed) that
+            #              determine the structure of the ball tree.
+            self._balltree.build_tree(
+                self.tree, self.sq_sums,self.radii, self.medians, self.order[:self.size],
+                leaf_size=self.leaf_size, root=root,
+            )
+            # Restructure the ball tree so the points are in locally contiguous blocks of
+            # memory (local by branch + leaf), as long as allowed (by user or memory).
+            if (reorder or ((reorder is None) and (self.tree.nbytes < self._balltree.max_copy_bytes))):
+                self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
 
     # Find the "k" nearest neighbors to all points in z.
     def nearest(self, z, k=1, return_distance=True, transpose=True,
