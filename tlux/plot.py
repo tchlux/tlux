@@ -94,11 +94,13 @@ DEFAULT_GRADIENT = np.array([[  94.,   79.,  162.],
 
 # PALETTE SOURCE: colorlover as cl
 # PALETTE SOURCE: np.array(cl.to_numeric(cl.scales['5']['qual']['Set2']))
-PALETTE = np.array([[ 102.,  194.,  165.],
-                    [ 252.,  141.,   98.],
-                    [ 141.,  160.,  203.],
-                    [ 231.,  138.,  195.],
-                    [ 166.,  216.,   84.]])
+PALETTE = np.array([
+    [ 102.,  194.,  165.],
+    [ 252.,  141.,   98.],
+    [ 141.,  160.,  203.],
+    [ 166.,  216.,   84.],
+    [ 231.,  138.,  195.],
+])
 PALETTE = PALETTE**2
 PALETTE = PALETTE / np.max(PALETTE) * 255
 # Re-order the palette so that the colors appear better
