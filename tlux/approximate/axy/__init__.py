@@ -1,6 +1,7 @@
 import os, re, math
 import numpy as np
-from memory_profiler import profile
+
+# from memory_profiler import profile
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -98,7 +99,7 @@ class AxyModel:
         return (
             f"AXY model ({self.config.total_size} parameters) [{byte_size}]\n"+
             (" aggregator model\n"+
-            f"  input dimension  {self.config.adn}\n"+
+            f"  input dimension  {self.config.adn}{' + '+str(self.config.ade) if self.config.ade > 0 else ''}\n"+
             f"  output dimension {self.config.ado}\n"+
             f"  state dimension  {self.config.ads}\n"+
             f"  number of states {self.config.ans}\n"+
@@ -113,7 +114,7 @@ class AxyModel:
             f"  output vecs  {self.a_output_vecs.shape} "+to_str(self.a_output_vecs)+
              "\n" if (self.a_output_vecs.size > 0) else "") +
             (" model\n"+
-            f"  input dimension  {self.config.mdn}\n"+
+            f"  input dimension  {self.config.mdn}{' + '+str(self.config.mde) if self.config.mde > 0 else ''}{' + '+str(self.config.ado) if self.config.ado > 0 else ''}\n"+
             f"  output dimension {self.config.mdo}\n"+
             f"  state dimension  {self.config.mds}\n"+
             f"  number of states {self.config.mns}\n"+
@@ -246,20 +247,25 @@ class AXY:
     # Given a categorical input array, construct a dictionary for
     #  mapping the unique values in the columns of the array to integers.
     def _i_map(self, xi):
-        sort_key = lambda i: i if isinstance(i,str) else str(i))
+        sort_key = lambda i: i if isinstance(i,str) else str(i)
         # Generate the map (ordered list of unique values).
         if (len(xi.dtype) > 0):
-            xi_list = [sorted(set(xi[n]), key=sort_key) for n in xi.dtype.names]
+            xi_list = [sorted(set(xi[n].tolist()), key=sort_key) for n in xi.dtype.names]
         else:
-            xi_list = [sorted(set(xi[:,i]), key=sort_key) for i in range(xi.shape[1])]
+            xi_list = [sorted(set(xi[:,i].tolist()), key=sort_key) for i in range(xi.shape[1])]
         # Generate the lookup table (value -> integer index).
         base = 1
         xi_map = []
         for i, xij_list in enumerate(xi_list):
-            xi_map.append(
-                {v:base+j for j,v in enumerate(xij_list)}
-            )
-            base += len(xij_list)
+            # If a categorical input has no variance, it will have no embedding.
+            if (len(xij_list) <= 1):
+                xi_map.append({})
+            # Otherwise, add entries for mapping the unique values to integers.
+            else:
+                xi_map.append(
+                    {v:base+j for j,v in enumerate(xij_list)}
+                )
+                base += len(xij_list)
         # Return the map and the lookup.
         return xi_map
 
@@ -372,7 +378,7 @@ class AXY:
     # Fit this model.
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
-    @profile
+    # @profile
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
@@ -399,10 +405,10 @@ class AXY:
             kwargs.update({
                 "adn":adn,
                 "ane":max(ane, kwargs.get("ane",0)),
-                "ado":kwargs.get("ado", (mdo if max(adn,ane) > 0 else 0)),
+                "ado":kwargs.get("ado", (mdo if (kwargs.get("mdo",None) == 0) else None)),
                 "mdn":mdn,
                 "mne":max(mne, kwargs.get("mne",0)),
-                "mdo":mdo,
+                "mdo":kwargs.get("mdo", mdo),
             })
             self._init_model(**kwargs)
         else:
@@ -416,10 +422,13 @@ class AXY:
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
             _ax[:,:ax.shape[1]] = ax
             ax, _ax = _ax, ax
-        if (self.config.mde > 0) or (self.config.ado > 0):
+        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
             _x = np.zeros((x.shape[0],self.config.mdi), dtype="float32", order="C")
             _x[:,:x.shape[1]] = x
             x, _x = _x, x
+        # Make sure some silly user error didn't happen.
+        if (x.shape[1] > 0):
+            assert (self.config.mdo > 0), f"Found disabled model (mdo=0) with positive number of 'x' inputs. Either do not provide 'x', 'xi', or do not set 'mdo=0'."
         # ------------------------------------------------------------
         # If a random seed is provided, then only 2 threads can be used
         #  because nondeterministic behavior comes from reordered addition.
@@ -442,7 +451,7 @@ class AXY:
         # Check for a nonzero exit code.
         self._check_code(result[-1], "minimize_mse")
         # Copy the updated values back into the input arrays (for transparency).
-        if (self.config.mde > 0):
+        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
             _x[:,:] = x[:,:_x.shape[1]]
         if (self.config.ade > 0):
             _ax[:,:] = ax[:,:_ax.shape[1]]
@@ -456,6 +465,7 @@ class AXY:
         transform_norm = np.linalg.norm(self.embedding_transform)
         if (transform_norm > 0):
             self.embedding_transform /= transform_norm
+        
 
 
     # Calling this model is an alias for 'AXY.predict'.
@@ -464,7 +474,7 @@ class AXY:
 
 
     # Make predictions for new data.
-    @profile
+    # @profile
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, raw_scores=False, **kwargs):
         # Evaluate the model at all data.
@@ -499,18 +509,18 @@ class AXY:
             _ax[:,:ax.shape[1]] = ax
             ax = _ax
         ay = np.zeros((na, ado), dtype="float32", order="F")
-        if (self.config.mde > 0) or (self.config.ado > 0):
+        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
             _x = np.zeros((x.shape[0],x.shape[1]+self.config.mde+self.config.ado),
                           dtype="float32", order="C")
             _x[:,:x.shape[1]] = x
             x = _x
         y = np.zeros((nm, mdo), dtype="float32", order="C")
         if (save_states):
-            m_states = np.zeros((nm, mds, self.config.mns), dtype="float32", order="F")
             a_states = np.zeros((na, ads, self.config.ans), dtype="float32", order="F")
+            m_states = np.zeros((nm, mds, self.config.mns), dtype="float32", order="F")
         else:
-            m_states = np.zeros((nm, mds, 2), dtype="float32", order="F")
             a_states = np.zeros((na, ads, 2), dtype="float32", order="F")
+            m_states = np.zeros((nm, mds, 2), dtype="float32", order="F")
         # ------------------------------------------------------------
         # Call the unerlying library.
         info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
@@ -524,8 +534,9 @@ class AXY:
         self._check_code(result[-1], "evaluate")
         # Save the states if that's requested.
         if (save_states):
-            self.m_states = m_states
             self.a_states = a_states
+            self.ay = ay
+            self.m_states = m_states
         # If embeddings are desired, multiply the last state by the 2-norm
         #  of output weights for each component of that last embedding.
         if (embedding):
@@ -611,21 +622,32 @@ class AXY:
 
 if __name__ == "__main__":
 
-    n = 10000
-    an = 300
-    axi = np.random.randint(0,10000, (an*n,1)).astype("int32")
-    sizes = np.zeros(n, dtype="int32") + an
-    y = np.zeros(n, dtype="float32")
-    print("Fitting model..")
-    m = AXY()
-    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
-    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
-    m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1)
-    print()
-    print("Evaluating model..")
-    e = m.predict(axi=axi, sizes=sizes, embeddings=True)
-    print("Done.")
-    exit()
+    # Remove the compiled object if modifications have been made to sources.
+    import os
+    f9 = os.path.expanduser("~/Git/tlux/tlux/approximate/axy")
+    f9 = [os.path.join(f9,p) for p in os.listdir(f9) if p.endswith(".f90")]
+    so = os.path.expanduser("~/Git/tlux/tlux/approximate/axy/axy/axy.arm64.so")
+    if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
+        os.remove(so)
+
+    # v = 200000
+    # n = 50000
+    # an = 300
+    # print("Allocating data..", flush=True)
+    # axi = np.random.randint(0,v, (an*n,1)).astype("int32")
+    # sizes = np.zeros(n, dtype="int32") + an
+    # y = np.zeros(n, dtype="float32")
+    # print("Building model..", flush=True)
+    # m = AXY()
+    # print("Fitting model..", flush=True)
+    # m.fit(axi=axi, sizes=sizes, y=y, steps=10, num_threads=None)
+    # # m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1) # repeated call to see memory changes
+    # print()
+    # print("Evaluating model..")
+    # e = m.predict(axi=axi, sizes=sizes, embeddings=True)
+    # print(m)
+    # print("Done.")
+    # exit()
 
     print("_"*70)
     print(" TESTING AXY MODULE")
@@ -656,48 +678,84 @@ if __name__ == "__main__":
     # ----------------------------------------------------------------
 
     from tlux.plot import Plot
-    from tlux.random import well_spaced_ball, well_spaced_box
+    from tlux.random import well_spaced_box
+
+    seed = 0
+    np.random.seed(seed)
+
+    ONLY_SGD = dict(
+        faster_rate = 1.0,
+        slower_rate = 1.0,
+        update_ratio_step = 0.0,
+        step_factor = 0.001,
+        step_mean_change = 0.1,
+        step_curv_change = 0.01,
+        keep_best = True,
+        basis_replacement = False,
+    )
+
+    n = 2**8
+    d = 2
+    new_model = True
+    use_a = True
+    agg_dim = 128
+    agg_states = 4
+    use_x = False
+    model_dim = 32
+    model_states = 8
+    model_dim_output = 0
+    use_yi = False
+    steps = 1000
+    num_threads = None
+    use_nearest_neighbor = False
+
+    settings = dict(
+        seed=seed,
+        early_stop = False,
+        logging_step_frequency = 1,
+        rank_check_frequency = 100,
+        **({"mdo":model_dim_output} if model_dim_output is not None else {}),
+        normalize_x = True,
+        normalize_y = True,
+        # **ONLY_SGD
+    )
 
     # A function for testing approximation algorithms.
-    def f(x):
+    def f1(x):
         x = x.reshape((-1,2))
         x, y = x[:,0], x[:,1]
         return (3*x + np.cos(8*x)/2 + np.sin(5*y))
 
-    n = 2**6
-    seed = 2
-    state_dim = 64
-    num_states = 8
-    steps = 1000
-    num_threads = None
-    new_model = True
-    use_x = True
-    use_a = False
-    use_yi = False
-    use_nearest_neighbor = False
-    np.random.seed(seed)
+    # A second function for testing approximation algorithms.
+    def f2(x):
+        x = x.reshape((-1,2))
+        return np.cos(np.linalg.norm(x,axis=1))
 
-    # Genreate source data.
-    base_x = well_spaced_box(n, 2)
-    x_min_max = np.vstack((np.min(base_x,axis=0), np.max(base_x, axis=0))).T
-    base_y = f(base_x)
+    # A third function that is the trigonometric shift of the first.
+    def f3(x):
+        x = x.reshape((-1,2))
+        x, y = x[:,0], x[:,1]
+        return (3*x + np.sin(8*x)/2 + np.cos(5*y))
+
+
+    functions = [f1, f2] # , f3]
+
+    # Generate data bounds.
+    x_min_max = [[-.1, 1.1], [-.1, 1.1]]
 
     # Create all data.
-    x = np.concatenate((base_x, base_x), axis=0)
-    xi = np.concatenate(
-        (np.ones(len(base_x)), 2*np.ones(len(base_x)))
-    ).reshape((-1,1)).astype("int32")
+    points = [well_spaced_box(n, d) for _ in functions]
+    x =  np.concatenate(points, axis=0).astype("float32")
+    xi = np.asarray([n*[f.__name__] for f in functions], dtype=object).reshape((-1,1))
     ax = x.reshape((-1,1)).copy()
-    axi = np.concatenate((
-        (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1),
-        np.concatenate((np.ones(xi.shape, dtype="int32")*xi,
-                        np.ones(xi.shape, dtype="int32")*xi),
-                       axis=1).reshape(-1,1)
-    ), axis=1)
-    sizes = np.ones(x.shape[0], dtype="int32") * 2
+    axi = np.asarray(list(zip(
+        [f.__name__ for f in functions for _ in range(n*d)],
+        [i+1 for _ in range(n*len(functions)) for i in range(d)]
+    )), dtype=object)
+    sizes = np.ones(n*len(functions), dtype="int32") * d
+
     # Concatenate the two different function outputs.
-    y = np.concatenate((base_y, np.cos(np.linalg.norm(base_x,axis=1))), axis=0)
-    y = y.reshape((y.shape[0], -1))
+    y = np.concatenate([f(p) for (f,p) in zip(functions, points)], axis=0).reshape((len(functions)*n,1))
     # Generate classification data that is constructed by binning the existing y values.
     yi = np.asarray([
         np.where(
@@ -715,6 +773,7 @@ if __name__ == "__main__":
             )
         ),
     ], dtype=object).T
+    # Compute the numeric values associated with each Y group (mean of values in group).
     yi_values = [{
         "bottom": y[y[:,0] <= np.percentile(y[:,0], 50)].mean(),
         "top": y[y[:,0] > np.percentile(y[:,0], 50)].mean(),
@@ -730,18 +789,12 @@ if __name__ == "__main__":
         # Initialize a new model.
         print("Fitting model..")
         m = AXY(
-            ads=state_dim,
-            ans=math.ceil(num_states / 2),
-            mds=state_dim,
-            mns=math.ceil(num_states / 2),
+            ads=agg_dim,
+            ans=agg_states,
+            mds=model_dim,
+            mns=model_states,
             num_threads=num_threads,
-            seed=seed,
-            early_stop = False,
-            logging_step_frequency = 1,
-            rank_check_frequency = 100,
-            # basis_replacement = True,
-            # keep_best = False,
-            # rescale_y = False,
+            **settings,
         )
         m.fit(
             ax=(ax.copy() if use_a else None),
@@ -760,7 +813,8 @@ if __name__ == "__main__":
     m = AXY()
     m.load("temp-model.json")
     # Remove the saved model if only new models are desired.
-    if new_model: os.remove("temp-model.json")
+    if new_model:
+        os.remove("temp-model.json")
 
     # Print the model.
     print()
@@ -771,12 +825,6 @@ if __name__ == "__main__":
     # TODO: Add some evaluations of the categorical outputs.
     # fy = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)
     # yy = np.concatenate((y.astype(object), yi.astype(object)), axis=1)
-
-    # Generate the plot of the results.
-    print("Adding to plot..")
-    p = Plot()
-    p.add("xi=1 true", *x.T, y[:len(y)//2,0], color=0, group=0)
-    p.add("xi=2 true", *x.T, y[len(y)//2:,0], color=1, group=1)
 
     # Build a nearest neighbor tree over the embeddings if preset.
     if (use_nearest_neighbor):
@@ -790,17 +838,42 @@ if __name__ == "__main__":
             embedding=True
         ), build=False)
 
+
+    # def obj(params):
+    #     m.model[:] = np.asarray(params, dtype="float32")
+    #     # Evaluate the model at all training data.
+    #     _ax = ax.copy()
+    #     _axi = axi
+    #     _sizes = sizes
+    #     _x = x.copy()
+    #     _xi = xi
+    #     if (not use_a): _ax = _axi = _sizes = None
+    #     if (not use_x): _x = _xi = None
+    #     output = m.predict(ax=_ax, axi=_axi, sizes=_sizes, x=_x, xi=_xi)
+    #     error = ((y - output)**2).sum()
+    #     return float(error)
+
+    # from util.optimize import minimize
+    # sol = minimize(
+    #     obj,
+    #     solution=m.model.tolist(),
+    #     bounds=[(-10,10)]*len(m.model),
+    #     display=True,
+    #     max_time=2,
+    # )
+    # m.model[:] = sol[:]
+
+
     # Define a function that evaluates the model with some different presets.
-    def fhat(x, i=1, yii=None):
-        xi = i * np.ones((len(x),1),dtype="int32")
+    def fhat(x, f=functions[0].__name__, yii=None):
+        n = x.shape[0]
+        xi = np.asarray([f]*n, dtype=object).reshape((-1,1))
         ax = x.reshape((-1,1)).copy()
-        axi = np.concatenate((
-            (np.ones(x.shape, dtype="int32") * (np.arange(x.shape[1])+1)).reshape(-1,1),
-            np.concatenate((np.ones(xi.shape, dtype="int32")*i,
-                            np.ones(xi.shape, dtype="int32")*i),
-                           axis=1).reshape(-1,1)
-        ), axis=1)
-        sizes = np.ones(x.shape[0], dtype="int32") * 2
+        axi = np.asarray(list(zip(
+            [f for _ in range(n*d)],
+            [i+1 for _ in range(n) for i in range(d)]
+        )), dtype=object)
+        sizes = np.ones(x.shape[0], dtype="int32") * d
         if (not use_a): ax = axi = sizes = None
         if (not use_x): x = xi = None
         if (not use_yi): yii = None
@@ -814,14 +887,43 @@ if __name__ == "__main__":
             if (yii is None): return y[i,0]
             else:             return [yi_values[yii][v] for v in yi[i.flatten(),yii]]
 
+    # Generate the plot of the results.
+    print("Adding to plot..")
+    p = Plot()
+    
+    # # Save the internal states.
+    # m.predict(
+    #     ax=(ax.copy() if use_a else None),
+    #     axi=(axi if use_a else None),
+    #     sizes=(sizes if use_a else None),
+    #     x=(x.copy() if use_x else None),
+    #     xi=(xi if use_x else None),
+    #     save_states=True,
+    # )
+    # print("m.a_states.shape: ", m.a_states.shape)
+    # print("m.ay.shape: ", m.ay.shape)
+    # print("m.m_states.shape: ", m.m_states.shape)
+    # p.add("ay", *m.ay.T)
+    # p.show()
+    # exit()
+    # # p.add(f"embeddings", m.m_states)
+
+    # Add the provided points.
+    for i, (f, xf) in enumerate(zip(functions, points)):
+        p.add(f"xi={f.__name__}", *xf.T, f(xf), color=i, group=i)
+
     # Add the two functions that are being approximated.
-    p.add_func("xi=1", lambda x: fhat(x, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=3, opacity=0.8, group=0, plot_points=3000) #, mode="markers", shade=True)
-    p.add_func("xi=2", lambda x: fhat(x, 2), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=2, opacity=0.8, group=1, plot_points=3000) #, mode="markers", shade=True)
+    for i,f in enumerate(functions):
+        f = f.__name__
+        p.add_func(f"xi={f}", lambda x: fhat(x, f=f), *x_min_max,
+                   group=i,  vectorized=True, color=i, opacity=0.8,
+                   plot_points=3000) # , mode="markers", marker_size=2)
     if (use_yi):
-        p.add_func("xi=1, yi=0", lambda x: fhat(x, 1, 0), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=4, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
-        p.add_func("xi=1, yi=1", lambda x: fhat(x, 1, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=5, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
-        p.add_func("xi=2, yi=0", lambda x: fhat(x, 2, 0), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=6, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
-        p.add_func("xi=2, yi=1", lambda x: fhat(x, 2, 1), [-0.1,1.1], [-0.1,1.1], vectorized=True, color=7, opacity=0.8, plot_points=3000, mode="markers", shade=True, marker_size=4)
+        for f in functions:
+            for i in range(yi.shape[1]):
+                p.add_func(f"xi={f.__name__}, yi={i}", lambda x: fhat(x, f=f.__name__, yii=i),
+                           *x_min_max, opacity=0.8, plot_points=3000,
+                           mode="markers", shade=True, marker_size=4)
 
     # Produce the visual.
     print("Generating surface plot..")

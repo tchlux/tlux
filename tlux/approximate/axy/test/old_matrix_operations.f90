@@ -20,52 +20,6 @@ CONTAINS
     ! Call external single-precision matrix-matrix multiplication
     !  (should be provided by hardware manufacturer, if not use custom).
 
-    ! INTEGER(KIND=INT64) :: I, J, K
-    ! C(:,:) = C(:,:) * C_MULT
-    ! IF (OP_A .EQ. 'N') THEN
-    !    IF (OP_B .EQ. 'N') THEN
-    !       DO I = 1, OUT_ROWS
-    !          DO J = 1, OUT_COLS
-    !             DO K = 1, INNER_DIM
-    !                C(I,J) = C(I,J) + A(I,K) * B(K,J) * AB_MULT
-    !             END DO
-    !          END DO
-    !       END DO
-    !    ELSE IF (OP_B .EQ. 'T') THEN
-    !       DO I = 1, OUT_ROWS
-    !          DO J = 1, OUT_COLS
-    !             DO K = 1, INNER_DIM
-    !                C(I,J) = C(I,J) + A(I,K) * B(J,K) * AB_MULT
-    !             END DO
-    !          END DO
-    !       END DO
-    !    ELSE
-    !       PRINT *, 'ERROR: Bad OP_B value:', OP_B
-    !    END IF
-    ! ELSE IF (OP_A .EQ. 'T') THEN
-    !    IF (OP_B .EQ. 'N') THEN
-    !       DO I = 1, OUT_ROWS
-    !          DO J = 1, OUT_COLS
-    !             DO K = 1, INNER_DIM
-    !                C(I,J) = C(I,J) + A(K,I) * B(J,K) * AB_MULT
-    !             END DO
-    !          END DO
-    !       END DO
-    !    ELSE IF (OP_B .EQ. 'T') THEN
-    !       DO I = 1, OUT_ROWS
-    !          DO J = 1, OUT_COLS
-    !             DO K = 1, INNER_DIM
-    !                C(I,J) = C(I,J) + A(K,I) * B(K,J) * AB_MULT
-    !             END DO
-    !          END DO
-    !       END DO
-    !    ELSE
-    !       PRINT *, 'ERROR: Bad OP_B value:', OP_B
-    !    END IF
-    ! ELSE
-    !    PRINT *, 'ERROR: Bad OP_A value:', OP_A
-    ! END IF
-
     ! Standard SGEMM.
     INTERFACE
        SUBROUTINE SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
@@ -98,30 +52,6 @@ CONTAINS
     !    AB_MULT, A, INT(A_ROWS,KIND=INT64), B, INT(B_ROWS,KIND=INT64), C_MULT, C, INT(C_ROWS,KIND=INT64))
 
   END SUBROUTINE GEMM
-
-  
-  ! Convenience wrapper routine for calling symmetric matrix multiplication.
-  SUBROUTINE SYRK(UPLO, TRANS, N, K, ALPHA, A, LDA, BETA, C, LDC)
-    CHARACTER, INTENT(IN) :: UPLO, TRANS
-    INTEGER, INTENT(IN) :: N, K, LDA, LDC
-    REAL(KIND=RT), INTENT(IN) :: ALPHA, BETA
-    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: C
-
-    ! Standard SSYRK.
-    INTERFACE
-       SUBROUTINE SSYRK(UPLO, TRANS, N, K, ALPHA, A, LDA, BETA, C, LDC)
-         CHARACTER, INTENT(IN) :: UPLO, TRANS
-         INTEGER, INTENT(IN) :: N, K, LDA, LDC
-         REAL, INTENT(IN) :: ALPHA, BETA
-         REAL, INTENT(IN), DIMENSION(LDA,*) :: A
-         REAL, INTENT(INOUT), DIMENSION(LDC,*) :: C
-       END SUBROUTINE SSYRK
-    END INTERFACE
-    CALL SSYRK(UPLO, TRANS, N, K, ALPHA, A, LDA, BETA, C, LDC)
-
-  END SUBROUTINE SYRK
-
 
   ! Orthogonalize and normalize column vectors of A with pivoting.
   SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER, MULTIPLIERS)
@@ -199,20 +129,16 @@ CONTAINS
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
-    ! Local variables.
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: ATA, Q
+    ! Local variables. LOCAL ALLOCATION
+    REAL(KIND=RT), DIMENSION(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))) :: ATA, Q
     INTEGER :: I, J, K, NUM_STEPS
     REAL(KIND=RT) :: MULTIPLIER
-    ! LOCAL ALLOCATION
-    ALLOCATE( &
-         ATA(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))), &
-         Q(MIN(SIZE(A,1),SIZE(A,2)),MIN(SIZE(A,1),SIZE(A,2))) &
-    )
+    EXTERNAL :: SSYRK
     ! Set the number of steps.
     IF (PRESENT(STEPS)) THEN
        NUM_STEPS = STEPS
     ELSE
-       NUM_STEPS = 10
+       NUM_STEPS = 1
     END IF
     ! Set "K" (the number of components).
     K = MIN(SIZE(A,1),SIZE(A,2))
@@ -228,11 +154,11 @@ CONTAINS
     ! Compute ATA.
     IF (SIZE(A,1) .LE. SIZE(A,2)) THEN
        ! ATA(:,:) = MATMUL(AT(:,:), TRANSPOSE(AT(:,:)))
-       CALL SYRK('U', 'N', K, SIZE(A,2), MULTIPLIER**2, A(:,:), &
+       CALL SSYRK('U', 'N', K, SIZE(A,2), MULTIPLIER**2, A(:,:), &
             SIZE(A,1), 0.0_RT, ATA(:,:), K)
     ELSE
        ! ATA(:,:) = MATMUL(TRANSPOSE(A(:,:)), A(:,:))
-       CALL SYRK('U', 'T', K, SIZE(A,1), MULTIPLIER**2, A(:,:), &
+       CALL SSYRK('U', 'T', K, SIZE(A,1), MULTIPLIER**2, A(:,:), &
             SIZE(A,1), 0.0_RT, ATA(:,:), K)
     END IF
     ! Copy the upper diagnoal portion into the lower diagonal portion.
@@ -267,28 +193,20 @@ CONTAINS
   ! projecting onto those and rescaling so that each component has
   ! identical singular values (this makes the data more "radially
   ! symmetric").
-  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERT_RESULT, FLATTEN, STEPS, MAX_TO_SQUARE)
+  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERT_RESULT, FLATTEN, STEPS)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: SHIFT
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VECS
     LOGICAL, INTENT(IN), OPTIONAL :: INVERT_RESULT
     LOGICAL, INTENT(IN), OPTIONAL :: FLATTEN
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
-    INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: MAX_TO_SQUARE
-    ! Local variables.
+    ! Local variables. LOCAL ALLOCATION
     LOGICAL :: INVERSE, FLAT
-    LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: NON_NUMBER_MASK
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: TEMP_VECS
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, SCALAR
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: X1
+    LOGICAL, DIMENSION(SIZE(X,1), SIZE(X,2)) :: NON_NUMBER_MASK
+    REAL(KIND=RT), DIMENSION(SIZE(VECS,1),SIZE(VECS,2)) :: TEMP_VECS
+    REAL(KIND=RT), DIMENSION(SIZE(X,1)) :: VALS, RN, SCALAR
+    REAL(KIND=RT), DIMENSION(SIZE(X,1), SIZE(X,2)) :: X1
     INTEGER :: I, D
-    INTEGER(KIND=INT64) :: NMAX
-    ! LOCAL ALLOCATION
-    ALLOCATE( &
-         NON_NUMBER_MASK(SIZE(X,1,KIND=INT64), SIZE(X,2,KIND=INT64)), &
-         TEMP_VECS(SIZE(VECS,1,KIND=INT64),SIZE(VECS,2,KIND=INT64)), &
-         VALS(SIZE(X,1,KIND=INT64)), RN(SIZE(X,1,KIND=INT64)), SCALAR(SIZE(X,1,KIND=INT64)), &
-         X1(SIZE(X,1,KIND=INT64), SIZE(X,2,KIND=INT64)))
     ! Set the default value for "INVERSE".
     IF (PRESENT(INVERT_RESULT)) THEN
        INVERSE = INVERT_RESULT
@@ -301,26 +219,19 @@ CONTAINS
     ELSE
        FLAT = .TRUE.
     END IF
-    ! Set default "NMAX".
-    IF (PRESENT(MAX_TO_SQUARE)) THEN
-       NMAX = MIN(MAX_TO_SQUARE, SIZE(X,2,KIND=INT64))
-    ELSE
-       NMAX = MIN(10000000_INT64, SIZE(X,2,KIND=INT64))
-    END IF
+    ! Identify the location of "bad values" (Inf and NaN).
+    NON_NUMBER_MASK(:,:) = IS_NAN(X(:,:)) .OR. (.NOT. IS_FINITE(X(:,:)))
+    ! Set all nonnumber values to zero (so they do not affect computed shifts).
+    WHERE (NON_NUMBER_MASK(:,:))
+       X(:,:) = 0.0_RT
+    END WHERE
     ! Shift the data to be be centered about the origin.
-    D = SIZE(X,1,KIND=INT64)
-    !$OMP PARALLEL DO
+    D = SIZE(X,1)
+    ! Count the number of valid numbers in each component.
+    RN(:) = MAX(1.0_RT, REAL(SIZE(X,2) - COUNT(NON_NUMBER_MASK(:,:), 2), RT))
+    ! Invert the mask to select only the valid numbers.
+    NON_NUMBER_MASK(:,:) = .NOT. NON_NUMBER_MASK(:,:)
     DO I = 1, D
-       ! Identify the location of "bad values" (Inf and NaN).
-       NON_NUMBER_MASK(I,:) = IS_NAN(X(I,:)) .OR. (.NOT. IS_FINITE(X(I,:)))
-       ! Set all nonnumber values to zero (so they do not affect computed shifts).
-       WHERE (NON_NUMBER_MASK(I,:))
-          X(I,:) = 0.0_RT
-       END WHERE
-       ! Count the number of valid numbers in each component.
-       RN(I) = MAX(1.0_RT, REAL(SIZE(X,2,KIND=INT64) - COUNT(NON_NUMBER_MASK(I,:), KIND=INT64), KIND=RT))
-       ! Invert the mask to select only the valid numbers.
-       NON_NUMBER_MASK(I,:) = .NOT. NON_NUMBER_MASK(I,:)
        ! Rescale the input components individually to have a maximum of 1
        !  to prevent numerical issues with SVD (will embed in VECS or undo
        !  this scaling later when storing the inverse transformation).
@@ -339,11 +250,15 @@ CONTAINS
     END DO
     ! Set the unused portion of the "VECS" matrix to the identity.
     VECS(D+1:,D+1:) = 0.0_RT
-    DO I = D+1, SIZE(VECS,1,KIND=INT64)
+    DO I = D+1, SIZE(VECS,1)
        VECS(I,I) = 1.0_RT
     END DO
     ! Find the directions along which the data is most elongated.
-    CALL SVD(X(:,:NMAX), VALS, VECS(:D,:D), STEPS=STEPS)
+    IF (PRESENT(STEPS)) THEN
+       CALL SVD(X, VALS, VECS(:D,:D), STEPS=STEPS)
+    ELSE
+       CALL SVD(X, VALS, VECS(:D,:D), STEPS=10)
+    END IF
     ! Normalize the values associated with the singular vectors to
     !  make the output componentwise unit mean squared magnitude.
     IF (FLAT) THEN
@@ -388,8 +303,6 @@ CONTAINS
        END DO
        SHIFT(:) = SHIFT(:) * SCALAR(:)
     END IF
-    ! Deallocate local memory.
-    DEALLOCATE(NON_NUMBER_MASK, TEMP_VECS, VALS, RN, SCALAR, X1)
   END SUBROUTINE RADIALIZE
 
   ! Perform least squares with LAPACK.
@@ -443,7 +356,7 @@ CONTAINS
     LWORK = MAX(1, MIN(M,N) + MAX(MIN(M,N), NRHS))
     ALLOCATE(WORK(LWORK))
     ! Make the call to the least squares routine.
-    CALL SGELS( TRANS, M, N, INT(NRHS), A, LDA, B, LDB, WORK, LWORK, INFO )
+    CALL SGELS( TRANS, M, N, NRHS, A, LDA, B, LDB, WORK, LWORK, INFO )
     ! Store the result.
     IF (SIZE(X,2) .LE. SIZE(B,2)) THEN
        X(:,:) = B(:SIZE(X,1),:SIZE(X,2))
