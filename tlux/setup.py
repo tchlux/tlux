@@ -49,7 +49,7 @@ def build_axy():
     # When local default fail, try specifying exactly what shared library functions are needed.
     except:
         _axy = fmodpy.fimport( **_kwargs,
-            link_blas="", link_lapack="",
+            link_blas="", link_lapack="", rebuild=True,
             libraries = [_dir] + fmodpy.config.libraries,
             symbols = [
                 ("sgemm", "blas"),
