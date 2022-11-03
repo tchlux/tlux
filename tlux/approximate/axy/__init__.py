@@ -1,7 +1,6 @@
 import os, re, math
 import numpy as np
 
-from memory_profiler import profile
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -355,6 +354,7 @@ class AXY:
         if (yi_cols > 0):
             if (len(self.yi_map) == 0):
                 self.yi_map = self._i_map(yi)
+                self.yi_inv_map = [{v:k for (k,v) in m.items()} for m in self.yi_map]
             else:
                 assert (yi_cols == len(self.yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(self.yi_map)} columns."
             yi = self._i_encode(yi, self.yi_map)
@@ -362,15 +362,18 @@ class AXY:
         else: yne = 0
         # Handle mapping integer encoded "yi" into a single real valued y.
         if (yne > 0):
+            # Use a regular simplex to construct equally spaced embeddings for the categories.
+            from tlux.math import regular_simplex
             embedded = np.concatenate((
-                np.zeros((1,yne), dtype="float32"),
-                np.identity(yne, dtype="float32")), axis=0)
-            _y = np.zeros((nm, mdo+yne), dtype="float32")
+                np.zeros((1,yne-1), dtype="float32"),
+                regular_simplex(yne).astype("float32")), axis=0)
+            _y = np.zeros((nm, mdo+yne-1), dtype="float32")
             _y[:,:mdo] = y[:,:]
             for i in range(yi.shape[1]):
                 _y[:,mdo:] += embedded[yi[:,i]]
             y = _y
-            mdo += yne
+            mdo += yne-1
+            self.yi_embeddings = embedded[1:]
         # Return all the shapes and numpy formatted inputs.
         return nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes
 
@@ -378,7 +381,6 @@ class AXY:
     # Fit this model.
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
-    @profile
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, **kwargs):
         # Ensure that 'y' values were provided.
@@ -477,7 +479,6 @@ class AXY:
 
 
     # Make predictions for new data.
-    @profile
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
                 embedding=False, save_states=False, raw_scores=False, **kwargs):
         # Evaluate the model at all data.
@@ -552,27 +553,33 @@ class AXY:
                     last_state = x
             else:
                 if (self.config.ans > 0):
-                    last_state = a_states[:,:,-2]
+                    state = a_states[:,:,-2]
                 else:
-                    last_state = ax
+                    state = ax
+                # Collapse the aggregate embeddings into their mean.
+                last_state = np.zeros((sizes.shape[0], state.shape[1]), dtype="float32")
+                set_start = set_end = 0
+                for i in range(sizes.shape[0]):
+                    set_end += sizes[i]
+                    last_state[i,:] = state[set_start:set_end].mean(axis=0)
+                    set_start = set_end
             # Rescale the last state to linearly level according to outputs.
             if (self.embedding_transform.size > 0):
                 last_state = last_state * self.embedding_transform
             # Return the last state.
             return last_state
         # If there are categorical outputs, then select by taking the max magnitude output.
-        # TODO: The max might not have the same meaning for each category, instead
-        #       do a sliding window k-nearest-neighbor probability assignment for outcomes.
         elif ((len(self.yi_map) > 0) and (not raw_scores)):
             yne = sum(map(len, self.yi_map))
-            ynn = y.shape[1]-yne
+            ynn = y.shape[1]-(yne-1)
             _y = [y[:,i] for i in range(ynn)]
-            past_indices = ynn
+            y = np.matmul(y[:,ynn:], self.yi_embeddings.T)
+            past_indices = 0
             for i in range(len(self.yi_map)):
                 start = past_indices
                 size = len(self.yi_map[i])
                 _y.append(
-                    self.yi_map[i][np.argmax(y[:,start:start+size], axis=1)]
+                    [self.yi_inv_map[i][start+j] for j in 1+np.argmax(y[:,start:start+size], axis=1)]
                 )
                 past_indices += size
             return np.asarray(_y, dtype=object).T
@@ -598,6 +605,8 @@ class AXY:
                 "xi_map" : [list(m.items()) for m in self.xi_map],
                 "axi_map" : [list(m.items()) for m in self.axi_map],
                 "yi_map" : [list(m.items()) for m in self.yi_map],
+                "yi_inv_map" : [list(m.items()) for m in getattr(self, "yi_inv_map", [])],
+                "yi_embeddings" : getattr(self, "yi_embeddings", np.asarray([])).tolist(),
             }))
 
 
@@ -624,6 +633,8 @@ class AXY:
 
 
 if __name__ == "__main__":
+    print("_"*70)
+    print(" TESTING AXY MODULE")
 
     # Remove the compiled object if modifications have been made to sources.
     import os
@@ -633,58 +644,28 @@ if __name__ == "__main__":
     if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
         os.remove(so)
 
-    v = 200000
-    n = 50000
-    an = 300
-    print("Allocating data..", flush=True)
-    axi = np.random.randint(0,v, (an*n,1)).astype("int32")
-    sizes = np.zeros(n, dtype="int32") + an
-    y = np.zeros(n, dtype="float32")
-    print("Building model..", flush=True)
-    m = AXY()
-    print("Fitting model..", flush=True)
-    m.fit(axi=axi, sizes=sizes, y=y, steps=10, num_threads=None)
-    # m.fit(axi=axi, sizes=sizes, y=y, steps=1, num_threads=1) # repeated call to see memory changes
-    print()
-    print("Evaluating model..")
-    e = m.predict(axi=axi, sizes=sizes, embeddings=True)
-    print(m)
-    print("Done.")
-    exit()
-
-    print("_"*70)
-    print(" TESTING AXY MODULE")
-
-    # ----------------------------------------------------------------
-    #  Enable debugging option "-fcheck=bounds".
-    # import fmodpy
-    # # fmodpy.configure(verbose=True)
-    # fmodpy.config.f_compiler_args = "-fPIC -shared -O3 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero"
-    # # fmodpy.config.link_blas = "-framework Accelerate"
-    # # fmodpy.config.link_lapack = "-framework Accelerate"
-    # _dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"]
-    # _dir = os.path.dirname(os.path.realpath(__file__))
-    # _path = os.path.join(_dir, "axy.f90")
-    # _axy = fmodpy.fimport(
-    #     _path, dependencies=_dependencies, output_dir=_dir,
-    #     blas=True, lapack=True, omp=True, wrap=True,
-    #     rebuild=False,
-    #     # verbose=True, 
-    #     # link_blas="", link_lapack="",
-    #     # libraries = [_dir] + fmodpy.config.libraries,
-    #     # symbols = [
-    #     #     ("sgemm", "blas"),
-    #     #     ("sgels", "lapack"),
-    #     #     ("omp_get_max_threads", "omp")
-    #     # ],
-    # )
-    # ----------------------------------------------------------------
-
+    # Import codes that will be used for testing.
     from tlux.plot import Plot
     from tlux.random import well_spaced_box
 
     seed = 0
     np.random.seed(seed)
+
+    n = 2**7
+    d = 2
+    new_model = True
+    use_a = True
+    agg_dim = 64
+    agg_states = 2
+    use_x = False
+    model_dim = 64
+    model_states = 2
+    model_dim_output = 0
+    use_y = True
+    use_yi = False
+    steps = 1000
+    num_threads = None
+    use_nearest_neighbor = False
 
     ONLY_SGD = dict(
         faster_rate = 1.0,
@@ -696,21 +677,6 @@ if __name__ == "__main__":
         keep_best = True,
         basis_replacement = False,
     )
-
-    n = 2**8
-    d = 2
-    new_model = True
-    use_a = False
-    agg_dim = 64
-    agg_states = 4
-    use_x = True
-    model_dim = 64
-    model_states = 4
-    model_dim_output = None # 0
-    use_yi = False
-    steps = 1000
-    num_threads = None
-    use_nearest_neighbor = False
 
     settings = dict(
         seed=seed,
@@ -741,7 +707,7 @@ if __name__ == "__main__":
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
 
-    functions = [f1, f2] # , f3]
+    functions = [f1, f2,] # f3]
 
     # Generate data bounds.
     x_min_max = [[-.1, 1.1], [-.1, 1.1]]
@@ -776,6 +742,17 @@ if __name__ == "__main__":
             )
         ),
     ], dtype=object).T
+
+    print()
+    print("ax.shape:    ", ax.shape)
+    print("axi.shape:   ", axi.shape)
+    print("sizes.shape: ", sizes.shape)
+    print("x.shape:     ", x.shape)
+    print("xi.shape:    ", xi.shape)
+    print("y.shape:     ", y.shape)
+    print("yi.shape:    ", yi.shape)
+    print()
+
     # Compute the numeric values associated with each Y group (mean of values in group).
     yi_values = [{
         "bottom": y[y[:,0] <= np.percentile(y[:,0], 50)].mean(),
@@ -805,7 +782,7 @@ if __name__ == "__main__":
             sizes=(sizes if use_a else None),
             x=(x.copy() if use_x else None),
             xi=(xi if use_x else None),
-            y=y.copy(),
+            y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
             steps=steps,
         )
@@ -832,43 +809,23 @@ if __name__ == "__main__":
     # Build a nearest neighbor tree over the embeddings if preset.
     if (use_nearest_neighbor):
         from tlux.approximate.balltree import BallTree
-        tree = BallTree(m(
+        embeddings = m(
             ax=(ax if use_a else None),
             axi=(axi if use_a else None),
             sizes=(sizes if use_a else None),
             x=(x if use_x else None),
             xi=(xi if use_x else None),
             embedding=True
-        ), build=False)
-
-
-    # def obj(params):
-    #     m.model[:] = np.asarray(params, dtype="float32")
-    #     # Evaluate the model at all training data.
-    #     _ax = ax.copy()
-    #     _axi = axi
-    #     _sizes = sizes
-    #     _x = x.copy()
-    #     _xi = xi
-    #     if (not use_a): _ax = _axi = _sizes = None
-    #     if (not use_x): _x = _xi = None
-    #     output = m.predict(ax=_ax, axi=_axi, sizes=_sizes, x=_x, xi=_xi)
-    #     error = ((y - output)**2).sum()
-    #     return float(error)
-
-    # from util.optimize import minimize
-    # sol = minimize(
-    #     obj,
-    #     solution=m.model.tolist(),
-    #     bounds=[(-10,10)]*len(m.model),
-    #     display=True,
-    #     max_time=2,
-    # )
-    # m.model[:] = sol[:]
+        )
+        print("embeddings.shape: ", embeddings.shape)
+        tree = BallTree(embeddings, build=False)
+        print("Tree:")
+        print(tree)
 
 
     # Define a function that evaluates the model with some different presets.
     def fhat(x, f=functions[0].__name__, yii=None):
+        x = np.asarray(x, dtype="float32").reshape((-1,d))
         n = x.shape[0]
         xi = np.asarray([f]*n, dtype=object).reshape((-1,1))
         ax = x.reshape((-1,1)).copy()
@@ -882,7 +839,7 @@ if __name__ == "__main__":
         if (not use_yi): yii = None
         if (not use_nearest_neighbor):
             if (yii is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,0]
-            else:             return [yi_values[yii][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,y.shape[1]+yii]]
+            else:             return [yi_values[yii][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,(y.shape[1] if use_y else 0)+yii]]
         else:
             # Use the tree to lookup the nearest neighbor.
             emb = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True)
@@ -893,35 +850,26 @@ if __name__ == "__main__":
     # Generate the plot of the results.
     print("Adding to plot..")
     p = Plot()
-    
-    # # Save the internal states.
-    # m.predict(
-    #     ax=(ax.copy() if use_a else None),
-    #     axi=(axi if use_a else None),
-    #     sizes=(sizes if use_a else None),
-    #     x=(x.copy() if use_x else None),
-    #     xi=(xi if use_x else None),
-    #     save_states=True,
-    # )
-    # print("m.a_states.shape: ", m.a_states.shape)
-    # print("m.ay.shape: ", m.ay.shape)
-    # print("m.m_states.shape: ", m.m_states.shape)
-    # p.add("ay", *m.ay.T)
-    # p.show()
-    # exit()
-    # # p.add(f"embeddings", m.m_states)
-
-    # Add the provided points.
-    for i, (f, xf) in enumerate(zip(functions, points)):
-        p.add(f"xi={f.__name__}", *xf.T, f(xf), color=i, group=i)
 
     # Add the two functions that are being approximated.
-    for i,f in enumerate(functions):
-        f = f.__name__
-        p.add_func(f"xi={f}", lambda x: fhat(x, f=f), *x_min_max,
-                   group=i,  vectorized=True, color=i, opacity=0.8,
-                   plot_points=3000) # , mode="markers", marker_size=2)
+    if (use_y):
+        # Add the provided points.
+        for i, (f, xf) in enumerate(zip(functions, points)):
+            p.add(f"xi={f.__name__}", *xf.T, f(xf), color=i, group=i)
+
+        # Add the function approximations.
+        for i,f in enumerate(functions):
+            f = f.__name__
+            p.add_func(f"xi={f}", lambda x: fhat(x, f=f), *x_min_max,
+                       group=i,  vectorized=True, color=i, opacity=0.8,
+                       plot_points=3000) # , mode="markers", marker_size=2)
     if (use_yi):
+        # Add the provided points.
+        for i, (f, xf) in enumerate(zip(functions, points)):
+            for j in range(2):
+                p.add(f"xi={f.__name__} yi={j}", *xf.T, [yi_values[j][v] for v in yi[:,j]],
+                      color=j, group=j, shade=True, marker_size=5)
+        # Add the function approximations.
         for f in functions:
             for i in range(yi.shape[1]):
                 p.add_func(f"xi={f.__name__}, yi={i}", lambda x: fhat(x, f=f.__name__, yii=i),

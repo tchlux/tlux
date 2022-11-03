@@ -260,6 +260,7 @@ CONTAINS
     WHERE (S(:) .NE. 0.0_RT)
        S(:) = SQRT(S(:)) / MULTIPLIER
     END WHERE
+    DEALLOCATE(ATA, Q)
   END SUBROUTINE SVD
 
   ! If there are at least as many data points as dimension, then
