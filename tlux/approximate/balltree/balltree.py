@@ -154,11 +154,11 @@ class BallTree:
                     (self.tree.shape[0], self.size),
                     dtype='float32', order='F')
                 # Assign the relevant internals for this tree.
-                self.usage   = np.zeros(self.tree.shape[1],  dtype='int64')
+                self.usage = np.zeros(self.tree.shape[1],  dtype='int64')
                 self.sq_sums = np.zeros(self.tree.shape[1],  dtype='float32')
-                self.order   = np.arange(self.tree.shape[1], dtype='int64') + 1
-                self.radii   = np.zeros(self.tree.shape[1],  dtype='float32')
-                self.medians  = np.zeros(self.tree.shape[1],  dtype='float32')
+                self.order = np.arange(self.tree.shape[1], dtype='int64') + 1
+                self.radii = np.zeros(self.tree.shape[1],  dtype='float32')
+                self.medians = np.zeros(self.tree.shape[1],  dtype='float32')
                 # Pack the old points and the new points into a single tree
                 #  while ensuring the built parts of the previous tree are still valid.
                 self.tree[:,:old_tree.shape[1]] = old_tree
@@ -212,9 +212,10 @@ class BallTree:
             #              median child node, or 0.0 if this point is a leaf.
             #    .order    will be the list of indices (1-indexed) that
             #              determine the structure of the ball tree.
+            sq_dists = np.zeros(self.size, dtype='float32')
             self._balltree.build_tree(
-                self.tree, self.sq_sums,self.radii, self.medians, self.order[:self.size],
-                leaf_size=self.leaf_size, root=root,
+                self.tree, self.sq_sums,self.radii, self.medians, sq_dists,
+                self.order[:self.size], leaf_size=self.leaf_size, root=root,
             )
             # Restructure the ball tree so the points are in locally contiguous blocks of
             # memory (local by branch + leaf), as long as allowed (by user or memory).
@@ -236,11 +237,11 @@ class BallTree:
         k = min(k, self.size)
         n = z.shape[1]
         # Initialize holders for output.
-        points  = np.asarray(z, order='F', dtype='float32')
+        points = np.asarray(z, order='F', dtype='float32')
         indices = np.ones((k, points.shape[1]), order='F', dtype='int64')
-        dists   = np.ones((k, points.shape[1]), order='F', dtype='float32')
-        iwork   = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='int64')
-        rwork   = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='float32')
+        dists = np.ones((k, points.shape[1]), order='F', dtype='float32')
+        iwork = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='int64')
+        rwork = np.ones((k+self.leaf_size+2, min(n,self._balltree.number_of_threads)), order='F', dtype='float32')
         # Compute the nearest neighbors.
         self._balltree.nearest(
             points, k,
@@ -275,8 +276,7 @@ class BallTree:
             indices = indices[:k,:]
             dists = dists[:k,:]
         # Update the usage statistics for all points referenced in return values.
-        i = (indices-1).flatten()
-        self.usage += np.bincount(i, minlength=self.usage.size)
+        self._balltree.bincount(indices.flatten(), self.usage)
         # Revert to singleton if that's what was provided.
         if singleton:
             dists = dists[:,0]

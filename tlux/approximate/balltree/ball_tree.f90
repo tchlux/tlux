@@ -88,22 +88,23 @@ CONTAINS
   END SUBROUTINE COMPUTE_SQUARE_SUMS
 
   ! Re-arrange elements of POINTS into a binary ball tree about medians.
-  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER, ROOT, LEAF_SIZE)
+  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS, ORDER, ROOT, LEAF_SIZE)
     REAL(KIND=R32), INTENT(INOUT), DIMENSION(:,:) :: POINTS
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: SQ_SUMS
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: RADII
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: MEDIANS
+    REAL(KIND=R32), INTENT(INOUT), DIMENSION(:) :: SQ_DISTS
     INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: ORDER
     INTEGER(KIND=I64), INTENT(IN), OPTIONAL :: ROOT, LEAF_SIZE
     ! Local variables
     INTEGER(KIND=I64) :: CENTER_IDX, MID, I, J, LS
-    REAL(KIND=R32), DIMENSION(SIZE(POINTS,1)) :: PT
-    REAL(KIND=R32), DIMENSION(SIZE(ORDER)) :: SQ_DISTS ! TODO: Remove allocation, pass as input, share with children.
     REAL(KIND=R32) :: MAX_SQ_DIST, SQ_DIST, SHIFT
+    REAL(KIND=R32), ALLOCATABLE, DIMENSION(:) :: PT
+    ALLOCATE(PT(1:SIZE(POINTS,1,KIND=I64)))
     ! Set the leaf size to 1 by default (most possible work required,
     ! but guarantees successful use with any leaf size).
     IF (PRESENT(LEAF_SIZE)) THEN ; LS = LEAF_SIZE
-    ELSE                         ; LS = 1
+    ELSE                         ; LS = 1_I64
     END IF
     ! Set the index of the 'root' of the tree.
     IF (PRESENT(ROOT)) THEN ; CENTER_IDX = ROOT
@@ -114,9 +115,9 @@ CONTAINS
        PT(:) = POINTS(:,J)
        SQ_DISTS(1) = 0.0_R32
        !$OMP PARALLEL DO
-       ROOT_TO_ALL : DO I = 2, SIZE(ORDER)
+       ROOT_TO_ALL : DO I = 2_I64, SIZE(ORDER,KIND=I64)
           SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
-               2 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
+               2.0_R32 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
        END DO ROOT_TO_ALL
        CENTER_IDX = MAXLOC(SQ_DISTS(:),1)
        ! Now CENTER_IDX is the selected center for this node in tree.
@@ -130,22 +131,22 @@ CONTAINS
     SQ_DISTS(1) = 0.0_R32
 
     !$OMP PARALLEL DO
-    CENTER_TO_ALL : DO I = 2, SIZE(ORDER)
+    CENTER_TO_ALL : DO I = 2_I64, SIZE(ORDER,KIND=I64)
        SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
-            2 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
+            2.0_R32 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
     END DO CENTER_TO_ALL
 
     ! Base case for recursion, once we have few enough points, exit.
-    IF (SIZE(ORDER) .LE. LS) THEN
+    IF (SIZE(ORDER,KIND=I64) .LE. LS) THEN
        SQ_DISTS(1) = MAXVAL(SQ_DISTS(:))
        RADII(ORDER(1)) = SQRT(SQ_DISTS(1))
        MEDIANS(ORDER(1)) = RADII(ORDER(1))
-       IF (SIZE(ORDER) .GT. 1) THEN
+       IF (SIZE(ORDER,KIND=I64) .GT. 1_I64) THEN
           RADII(ORDER(2:)) = 0.0_R32
           MEDIANS(ORDER(2:)) = 0.0_R32
        END IF
        RETURN
-    ELSE IF (SIZE(ORDER) .EQ. 2) THEN
+    ELSE IF (SIZE(ORDER,KIND=I64) .EQ. 2_I64) THEN
        ! If the leaf size is 1 and there are only 2 elements, store
        ! the radius and exit (since there are no further steps.
        RADII(ORDER(1)) = SQRT(SQ_DISTS(2))
@@ -157,19 +158,19 @@ CONTAINS
 
     ! Rearrange "SQ_DISTS" about the median value.
     ! Compute the last index that will belong "inside" this node.
-    MID = (SIZE(ORDER) + 2) / 2
-    CALL ARGSELECT(SQ_DISTS(2:), ORDER(2:), MID - 1)
+    MID = (SIZE(ORDER,KIND=I64) + 2_I64) / 2_I64
+    CALL ARGSELECT(SQ_DISTS(2:), ORDER(2:), MID - 1_I64)
     MEDIANS(ORDER(1)) = SQRT(SQ_DISTS(MID))
     ! Now ORDER has been rearranged such that the median distance
     ! element of POINTS is at the median location.
     ! Identify the furthest point (must be in second half of list).
-    I = MID + MAXLOC(SQ_DISTS(MID+1:),1)
+    I = MID + MAXLOC(SQ_DISTS(MID+1_I64:),1)
     ! Store the "radius" of this ball, the furthest point.
     RADII(ORDER(1)) = SQRT(SQ_DISTS(I))
     ! Move the median point (furthest "interior") to the front (inner root).
     CALL SWAP_I64(ORDER(2), ORDER(MID))
     ! Move the furthest point into the spot after the median (outer root).
-    CALL SWAP_I64(ORDER(MID+1), ORDER(I))
+    CALL SWAP_I64(ORDER(MID+1_I64), ORDER(I))
 
     !$OMP PARALLEL NUM_THREADS(2)
     !$OMP SECTIONS
@@ -177,15 +178,17 @@ CONTAINS
     ! Recurisively create this tree.
     !   build a tree with the root being the furthest from this center
     !   for the remaining "interior" points of this center node.
-    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER(2:MID), 1_I64, LS)
+    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(2_I64:MID), ORDER(2_I64:MID), 1_I64, LS)
     !$OMP SECTION
     !   build a tree with the root being the furthest from this center
     !   for the remaining "exterior" points of this center node.
     !   Only perform this operation if there are >0 points available.
-    IF (MID < SIZE(ORDER)) &
-         CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, ORDER(MID+1:), 1_I64, LS)
+    IF (MID < SIZE(ORDER,KIND=I64)) THEN
+       CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(MID+1_I64:), ORDER(MID+1_I64:), 1_I64, LS)
+    END IF
     !$OMP END SECTIONS
     !$OMP END PARALLEL
+    DEALLOCATE(PT)
   END SUBROUTINE BUILD_TREE
 
 
@@ -424,6 +427,21 @@ CONTAINS
     ! Reset the order because now it is the expected format.
     FORALL (I=1:SIZE(ORDER)) ORDER(I) = I
   END SUBROUTINE FIX_ORDER
+
+  ! Increment the counts for the number of times various indices are referenced.
+  !   Example:
+  !     usage = [0, 0, 0, 0, 0]  ! counters for ball tree over 5 points
+  !     indices = [1, 4, 2, 1]   ! indices of points to increment
+  !     CALL BINCOUNT(indices, usage)
+  !     usage = [2, 1, 0, 0, 1]  ! updated counters for usage over 5 points
+  SUBROUTINE BINCOUNT(INDICES, USAGE)
+    INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: INDICES ! (K, SIZE(POINTS,2))
+    INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: USAGE
+    INTEGER(KIND=I64) :: I
+    DO I = 1, SIZE(INDICES, KIND=I64)
+       USAGE(INDICES(I)) = USAGE(INDICES(I)) + 1
+    END DO
+  END SUBROUTINE BINCOUNT
 
 END MODULE BALL_TREE
 

@@ -1,11 +1,11 @@
 import numpy as np
 
 
-LARGE_TEST   = True
-COMPARE_AGAINST_SKLEARN = True
-TEST_TREE    = False
-TEST_PRUNE   = False
-TEST_SORT    = False
+LARGE_TEST = False
+COMPARE_AGAINST_SKLEARN = False
+TEST_TREE = True
+TEST_PRUNE = False
+TEST_SORT = False
 
 
 # × SUM(SQ) - 3.17 2.37 2.36 2.33 2.33
@@ -20,7 +20,7 @@ if COMPARE_AGAINST_SKLEARN:
     from tlux.system import Timer
     t = Timer()
 
-    if LARGE_TEST: train, dim = 1000000, 100
+    if LARGE_TEST: train, dim = 10000000, 10
     else:          train, dim = 5, 2
     test = 2
     leaf_size = 32
@@ -28,7 +28,8 @@ if COMPARE_AGAINST_SKLEARN:
     print("Initializing data..", flush=True)
     np.random.seed(0)
     x = np.random.random(size=(train,dim)).astype("float32")
-    z = np.random.random(size=(test,dim)).astype("float32")
+    z = np.random.random(size=(test,dim)).astype("float32")  # Use random z.
+    # z = x[np.random.randint(0,len(x),size=(test,))]  # Use z points from x.
     print()
     print("x:", x.shape)
     print("z:", z.shape)
@@ -37,8 +38,10 @@ if COMPARE_AGAINST_SKLEARN:
     print()
     print("Fortran Ball Tree")
     t.start()
+    # tree = BT(x, leaf_size=leaf_size)
     tree = BT(x[:len(x)//2], leaf_size=leaf_size, build=True) # build=False
     tree.add(x[len(x)//2:])
+    # tree.build()
     ct = t.stop()
     print("Construction time:", ct)
     t.start()
@@ -78,12 +81,12 @@ if COMPARE_AGAINST_SKLEARN:
     print("i: ",i)
     d3, i3 = d.copy(), i.copy()
     # ----------------------------------------------------------------
-    max_diff = max(max(abs(d1 - d2)), max(abs(d1-d3)))
+    max_diff = max(max(abs(d1-d2)), max(abs(d1-d3)))
     ds_match = max_diff < 2**(-13) # 2**(-26)
     is_match = np.all(i1 == i2) and np.all(i1 == i3)
     print()
     print(f"Max difference in distance calculations:\n   {max_diff:.3e}")
-    assert (ds_match and is_match), f"\nERROR\n  is_match: {is_match}\n  ds_match: {ds_match} {max(abs(d1-d3)):.3e} {max(abs(d1 - d2)):.3e}"
+    assert (ds_match and is_match), f"\nERROR\n  is_match: {is_match}\n  ds_match: {ds_match} {max(abs(d1-d3)):.3e} {max(abs(d1-d2)):.3e}"
 
 
 if TEST_TREE:
@@ -123,15 +126,15 @@ if TEST_TREE:
         print("Tree:")
         print(tree.tree.T)
         print()
-        print("Index mapping:")
-        print(tree.index_mapping)
+        print("Usage:")
+        print(tree.usage)
         print()
         print("Order, Radius:")
         print(tree.order)
         print(tree.radii)
         print('-'*70)
 
-    z = np.random.random(size=(1,size[1]))
+    z = np.random.random(size=(3,size[1]))
 
     if not LARGE_TEST: print("\nz: ",z,"\n")
 
@@ -140,12 +143,14 @@ if TEST_TREE:
     d,i = tree.query(z, k=k)
     t.stop()
     print("ball tree query in",t(),"seconds")
+    if len(x) < 20: print(" usage:", tree.usage)
     d,i = d[0], i[0]
     # Do an approximate query.
     t.start()
     _,_ = tree.query(z, k=k, budget=100)
     t.stop()
     print("ball tree constrained query in",t(),"seconds")
+    if len(x) < 20: print(" usage:", tree.usage)
     # Measure the "true" distances between points.
     t.start()
     true_dists = np.linalg.norm(x - z[0,:], axis=1)
