@@ -133,14 +133,14 @@ class Spline:
     def integral(self, i=1): return self.derivative(-i)
 
     # Compute the first derivative of this Spline.
-    def derivative(self, d=1):
+    def derivative(self, d=1, initial=None):
         # For integration, adjust the additive term to reflect the
         # expected lefthand side value of each function.
         if (d < 0):
             deriv_funcs = self._functions
             for i in range(-d):
                 deriv_funcs = [f.integral(1) for f in deriv_funcs]
-                total = self(self.knots[0])
+                total = self(self.knots[0])  # WARNING: Some might expect 0 here.
                 for i in range(len(deriv_funcs)):
                     deriv_funcs[i].coefficients[-1] = (
                         total - deriv_funcs[i](self.knots[i]))
@@ -340,6 +340,9 @@ class Polynomial:
             s += f"{self._coefficients[i]} {x}  +  "
         # Remove the trailing 
         s = s.rstrip(" +")
+        # Check for an empty string.
+        if (len(s) == 0):
+            s = "0"
         # Return the final string.
         return s
 
