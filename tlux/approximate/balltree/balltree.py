@@ -107,12 +107,12 @@ class BallTree:
         self.leaf_size = leaf_size
         self.built = 0
         self.size = 0
-        self.tree    = None
-        self.usage   = None
+        self.tree = None
+        self.usage = None
         self.sq_sums = None
-        self.order   = None
-        self.radii   = None
-        self.medians  = None
+        self.order = None
+        self.radii = None
+        self.medians = None
         # Assign the various pruning functions.
         self._balltree = ball_tree
         self._inner = prune.inner
@@ -138,7 +138,7 @@ class BallTree:
         if (self.tree is not None):
             # If possible, pack the points into available space.
             if (points.shape[1] <= self.tree.shape[1] - self.size):
-                self.tree[:,self.size:self.size+point.shape[1]] = points
+                self.tree[:,self.size:self.size+points.shape[1]] = points
                 self.size += points.shape[1]
             else:
                 # Store the old internal tree-defining attributes.
@@ -149,20 +149,20 @@ class BallTree:
                 old_radii = self.radii[:self.built]
                 old_medians = self.medians[:self.built]
                 # Compute the new size and initialize the memory for the new tree.
+                to_allocate = max(2 * self.size, self.size + points.shape[1])
                 self.size += points.shape[1]
-                self.tree = np.zeros(
-                    (self.tree.shape[0], self.size),
-                    dtype='float32', order='F')
+                self.tree = np.zeros((self.tree.shape[0], to_allocate),
+                                     dtype='float32', order='F')
                 # Assign the relevant internals for this tree.
-                self.usage = np.zeros(self.tree.shape[1],  dtype='int64')
-                self.sq_sums = np.zeros(self.tree.shape[1],  dtype='float32')
+                self.usage = np.zeros(self.tree.shape[1], dtype='int64')
+                self.sq_sums = np.zeros(self.tree.shape[1], dtype='float32')
                 self.order = np.arange(self.tree.shape[1], dtype='int64') + 1
-                self.radii = np.zeros(self.tree.shape[1],  dtype='float32')
-                self.medians = np.zeros(self.tree.shape[1],  dtype='float32')
+                self.radii = np.zeros(self.tree.shape[1], dtype='float32')
+                self.medians = np.zeros(self.tree.shape[1], dtype='float32')
                 # Pack the old points and the new points into a single tree
                 #  while ensuring the built parts of the previous tree are still valid.
                 self.tree[:,:old_tree.shape[1]] = old_tree
-                self.tree[:,old_tree.shape[1]:] = points
+                self.tree[:,old_tree.shape[1]:self.size] = points
                 self.usage[:old_usage.size] = old_usage
                 self.sq_sums[:old_sq_sums.size] = old_sq_sums
                 self.order[:old_order.size] = old_order
@@ -172,13 +172,13 @@ class BallTree:
                 del old_tree, old_usage, old_sq_sums, old_order, old_radii, old_medians
         else:
             # Save the points internally as the tree.
-            self.tree    = np.asarray(points, order='F', dtype='float32')
+            self.tree = np.asarray(points, order='F', dtype='float32')
             # Assign the relevant internals for this tree.
-            self.usage   = np.zeros(self.tree.shape[1],  dtype='int64')
-            self.sq_sums = np.zeros(self.tree.shape[1],  dtype='float32')
-            self.order   = np.arange(1, self.tree.shape[1]+1, dtype='int64')
-            self.radii   = np.zeros(self.tree.shape[1],  dtype='float32')
-            self.medians  = np.zeros(self.tree.shape[1],  dtype='float32')
+            self.usage = np.zeros(self.tree.shape[1], dtype='int64')
+            self.sq_sums = np.zeros(self.tree.shape[1], dtype='float32')
+            self.order = np.arange(1, self.tree.shape[1]+1, dtype='int64')
+            self.radii = np.zeros(self.tree.shape[1], dtype='float32')
+            self.medians = np.zeros(self.tree.shape[1], dtype='float32')
             # Store BallTree internals for knowing how to evaluate.
             self.built = 0
             self.size = self.tree.shape[1]

@@ -40,7 +40,8 @@ if COMPARE_AGAINST_SKLEARN:
     t.start()
     # tree = BT(x, leaf_size=leaf_size)
     tree = BT(x[:len(x)//2], leaf_size=leaf_size, build=True) # build=False
-    tree.add(x[len(x)//2:])
+    tree.add(x[len(x)//2 : (3*len(x))//4])
+    tree.add(x[(3*len(x))//4 :])
     # tree.build()
     ct = t.stop()
     print("Construction time:", ct)
