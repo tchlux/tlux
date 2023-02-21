@@ -2,13 +2,36 @@
 ! Includes routines for orthogonalization, computing the SVD, and
 ! radializing data matrices with the SVD.
 MODULE MATRIX_OPERATIONS
-  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, INT64
+  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, INT64, INT32
   USE IEEE_ARITHMETIC, ONLY: IS_NAN => IEEE_IS_NAN, IS_FINITE => IEEE_IS_FINITE
   IMPLICIT NONE
 
 CONTAINS
 
+
+  ! Compute the mean of a matrix along an axis in a way that is numerically stable.
+  SUBROUTINE STABLE_MEAN(MATRIX, MEAN, DIM, MASK)
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: MATRIX
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: MEAN
+    INTEGER, INTENT(IN) :: DIM
+    LOGICAL, INTENT(IN), OPTIONAL, DIMENSION(:,:) :: MASK
+    INTEGER(KIND=INT64) :: I
+    REAL(KIND=RT) :: SHIFT, SCALE
+    ! Compute the mean in a stable way (scale to the unit box first).
+    SHIFT = MINVAL(MATRIX, MASK=MASK)
+    SCALE = MAXVAL(MATRIX, MASK=MASK) - SHIFT
+    IF (SCALE .EQ. 0.0_RT) THEN
+       SCALE = 1.0_RT
+    END IF
+    MEAN(:) = SUM((MATRIX - SHIFT) / SCALE, DIM=DIM, MASK=MASK) / REAL(SIZE(MATRIX, DIM=DIM), RT)
+    MEAN(:) = SHIFT + MEAN(:) * SCALE
+  END SUBROUTINE STABLE_MEAN
+
+
   ! Convenience wrapper routine for calling matrix multiply.
+  ! 
+  ! TODO: For very large data, automatically batch the operations to reduce
+  !       the size of the temporary space that is needed.
   SUBROUTINE GEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
        AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
     CHARACTER, INTENT(IN) :: OP_A, OP_B
@@ -167,7 +190,7 @@ CONTAINS
              END DO
           END IF
        END IF
-       ! Subtract the first vector from all others.
+       ! Subtract the current vector from all others.
        IF (LENGTHS(I) .GT. EPSILON(1.0_RT)) THEN
           LENGTHS(I) = SQRT(LENGTHS(I))
           A(:,I) = A(:,I) / LENGTHS(I)
@@ -184,7 +207,7 @@ CONTAINS
           IF (PRESENT(RANK)) RANK = RANK + 1
        ELSE
           LENGTHS(I:) = 0.0_RT
-          ! A(:,I:) = 0.0_RT ! <- Expected or not? Unclear.
+          ! A(:,I:) = 0.0_RT ! <- Expected or not? Unclear. They're already practically zero.
           EXIT column_orthogonolization
        END IF
     END DO column_orthogonolization
@@ -243,7 +266,8 @@ CONTAINS
     VT(1:SIZE(ATA,1),1:SIZE(ATA,2)) = ATA(:,:)
     ! Fill remaining columns (if extra were provided) with zeros.
     IF ((SIZE(VT,1) .GT. SIZE(ATA,1)) .OR. (SIZE(VT,2) .GT. SIZE(ATA,2))) THEN
-       VT(SIZE(ATA,1)+1:,SIZE(ATA,2)+1:) = 0.0_RT
+       VT(SIZE(ATA,1)+1:,:) = 0.0_RT
+       VT(1:SIZE(ATA,1),SIZE(ATA,2)+1:) = 0.0_RT
     END IF
     ! Orthogonalize and reorder by magnitudes.
     CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
@@ -268,87 +292,129 @@ CONTAINS
   ! projecting onto those and rescaling so that each component has
   ! identical singular values (this makes the data more "radially
   ! symmetric").
-  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERT_RESULT, FLATTEN, STEPS, MAX_TO_SQUARE)
+  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERSE, FLATTEN, MAXBOUND, STEPS, MAX_TO_SQUARE)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: SHIFT
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VECS
-    LOGICAL, INTENT(IN), OPTIONAL :: INVERT_RESULT
-    LOGICAL, INTENT(IN), OPTIONAL :: FLATTEN
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:), OPTIONAL :: INVERSE
+    LOGICAL, INTENT(IN), OPTIONAL :: FLATTEN, MAXBOUND
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: MAX_TO_SQUARE
     ! Local variables.
-    LOGICAL :: INVERSE, FLAT
-    LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: NON_NUMBER_MASK
+    LOGICAL :: FLAT, SCALE_BY_AVERAGE
+    LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: VALIDITY_MASK
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: TEMP_VECS
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, SCALAR
+    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, SCALAR, MINS
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: X1
-    INTEGER :: I, D
+    INTEGER(KIND=INT64) :: I, D, N
     INTEGER(KIND=INT64) :: NMAX
+    D = SIZE(X,1,KIND=INT64)
+    N = SIZE(X,2,KIND=INT64)
     ! LOCAL ALLOCATION
     ALLOCATE( &
-         NON_NUMBER_MASK(SIZE(X,1,KIND=INT64), SIZE(X,2,KIND=INT64)), &
-         TEMP_VECS(SIZE(VECS,1,KIND=INT64),SIZE(VECS,2,KIND=INT64)), &
-         VALS(SIZE(X,1,KIND=INT64)), RN(SIZE(X,1,KIND=INT64)), SCALAR(SIZE(X,1,KIND=INT64)), &
-         X1(SIZE(X,1,KIND=INT64), SIZE(X,2,KIND=INT64)))
-    ! Set the default value for "INVERSE".
-    IF (PRESENT(INVERT_RESULT)) THEN
-       INVERSE = INVERT_RESULT
-    ELSE
-       INVERSE = .FALSE.
-    END IF
+         VALIDITY_MASK(N, D), &
+         VALS(D), &
+         RN(D), &
+         MINS(D), &
+         SCALAR(D), &
+         X1(D, N) &
+    )
     ! Set the default value for "FLAT".
     IF (PRESENT(FLATTEN)) THEN
        FLAT = FLATTEN
     ELSE
        FLAT = .TRUE.
     END IF
+    ! Set the default value for "SCALE_BY_AVERAGE".
+    IF (PRESENT(MAXBOUND)) THEN
+       SCALE_BY_AVERAGE = .NOT. MAXBOUND
+    ELSE
+       SCALE_BY_AVERAGE = .TRUE.
+    END IF
     ! Set default "NMAX".
     IF (PRESENT(MAX_TO_SQUARE)) THEN
-       NMAX = MIN(MAX_TO_SQUARE, SIZE(X,2,KIND=INT64))
+       NMAX = MIN(MAX_TO_SQUARE, N)
     ELSE
-       NMAX = MIN(10000000_INT64, SIZE(X,2,KIND=INT64))
+       NMAX = MIN(10000000_INT64, N)
     END IF
     ! Shift the data to be be centered about the origin.
-    D = SIZE(X,1,KIND=INT64)
     !$OMP PARALLEL DO
     DO I = 1, D
        ! Identify the location of "bad values" (Inf and NaN).
-       NON_NUMBER_MASK(I,:) = IS_NAN(X(I,:)) .OR. (.NOT. IS_FINITE(X(I,:)))
+       VALIDITY_MASK(:,I) = (&
+            IS_NAN(X(I,:)) .OR. &
+            (.NOT. IS_FINITE(X(I,:))) .OR. &
+            (ABS(X(I,:)) .GT. (HUGE(X(I,1)) / 2.0_RT)))
        ! Set all nonnumber values to zero (so they do not affect computed shifts).
-       WHERE (NON_NUMBER_MASK(I,:))
+       WHERE (VALIDITY_MASK(:,I))
           X(I,:) = 0.0_RT
        END WHERE
        ! Count the number of valid numbers in each component.
-       RN(I) = MAX(1.0_RT, REAL(SIZE(X,2,KIND=INT64) - COUNT(NON_NUMBER_MASK(I,:), KIND=INT64), KIND=RT))
+       RN(I) = MAX(1.0_RT, REAL(N - COUNT(VALIDITY_MASK(:,I), KIND=INT64), KIND=RT))
        ! Invert the mask to select only the valid numbers.
-       NON_NUMBER_MASK(I,:) = .NOT. NON_NUMBER_MASK(I,:)
-       ! Rescale the input components individually to have a maximum of 1
-       !  to prevent numerical issues with SVD (will embed in VECS or undo
-       !  this scaling later when storing the inverse transformation).
-       SCALAR(I) = MAXVAL(ABS(X(I,:)))
+       VALIDITY_MASK(:,I) = .NOT. VALIDITY_MASK(:,I)
+       ! Compute the minimum value for this column.
+       MINS(I) = 0.0_RT
+       MINS(I) = MINVAL(X(I,:), MASK=VALIDITY_MASK(:,I))
+       ! Rescale the input components individually to be
+       !  in [0,1] to prevent numerical issues with SVD.
+       SCALAR(I) = 1.0_RT
+       SCALAR(I) = MAXVAL(X(I,:), MASK=VALIDITY_MASK(:,I)) - MINS(I)
        IF (SCALAR(I) .NE. 0.0_RT) THEN
-          X(I,:) = X(I,:) / SCALAR(I)
+          WHERE (VALIDITY_MASK(:,I))
+             X(I,:) = (X(I,:) - MINS(I)) / SCALAR(I)
+          END WHERE
        ELSE
+          WHERE (VALIDITY_MASK(:,I))
+             X(I,:) = (X(I,:) - MINS(I))
+          END WHERE
           SCALAR(I) = 1.0_RT
        END IF
        ! Shift all valid numbers by the mean.
-       !   NOTE: mask was inverted to capture valid numbers.
-       SHIFT(I) = -SUM(X(I,:), MASK=NON_NUMBER_MASK(I,:)) / RN(I) 
-       WHERE (NON_NUMBER_MASK(I,:))
+       !   NOTE: mask was inverted above to capture VALID numbers.
+       SHIFT(I) = -SUM(X(I,:), MASK=VALIDITY_MASK(:,I)) / RN(I) 
+       WHERE (VALIDITY_MASK(:,I))
           X(I,:) = X(I,:) + SHIFT(I)
        END WHERE
+       ! Reincorporate the [0,1] rescaling into the shift term.
+       SHIFT(I) = SHIFT(I) * SCALAR(I) - MINS(I)
     END DO
     ! Set the unused portion of the "VECS" matrix to the identity.
-    VECS(D+1:,D+1:) = 0.0_RT
-    DO I = D+1, SIZE(VECS,1,KIND=INT64)
+    VECS(:,D+1:) = 0.0_RT
+    VECS(D+1:,1:D) = 0.0_RT
+    DO I = D+1, MIN(SIZE(VECS,1,KIND=INT64), SIZE(VECS,2,KIND=INT64))
        VECS(I,I) = 1.0_RT
     END DO
     ! Find the directions along which the data is most elongated.
-    CALL SVD(X(:,:NMAX), VALS, VECS(:D,:D), STEPS=STEPS)
+    CALL SVD(X(:,:NMAX), VALS, VECS(1:D,1:D), STEPS=STEPS)
+    ! Update the singular values associated with each vector (based on desired flatness outcome).
+    IF (FLAT) THEN
+       VALS(:) = VALS(:) / SQRT(RN)
+    ELSE
+       IF (SCALE_BY_AVERAGE) THEN
+          VALS(:) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))  ! Average singular value.
+       ELSE
+          VALS(:) = VALS(1) / SQRT(RN)  ! First, max, singular value.
+       END IF
+    END IF
+    ! Compute the inverse of the transformation if requested (BEFORE updating VECS).
+    IF (PRESENT(INVERSE)) THEN
+       ! Since the vectors are orthonormal, the inverse is the transpose. We also
+       ! will divide the vectors by the singular values, so we invert that as well.
+       DO I = 1, D
+          IF (VALS(I) .GT. 0.0_RT) THEN
+             INVERSE(I,1:D) = VALS(I) * VECS(1:D,I) * SCALAR(:)
+          ELSE
+             INVERSE(I,1:D) = VECS(1:D,I) * SCALAR(:)
+          END IF
+       END DO
+       ! Set all elements of INVERSE that are not touched to zero.
+       INVERSE(:,D+1:) = 0.0_RT
+       INVERSE(D+1:,1:D) = 0.0_RT
+    END IF
     ! Normalize the values associated with the singular vectors to
     !  make the output componentwise unit mean squared magnitude.
     IF (FLAT) THEN
-       VALS(:) = VALS(:) / SQRT(RN)
        ! For all nonzero vectors, rescale them so that the
        !  average squared distance from zero is exactly 1.
        DO I = 1, D
@@ -356,41 +422,27 @@ CONTAINS
              VECS(:,I) = VECS(:,I) / VALS(I)
           END IF
        END DO
+    ! OR, simply rescale all vectors by the first singular value.
     ELSE
-       ! Rescale all vectors by the average singular value.
-       VALS(:) = SUM(VALS(:)) / (SQRT(RN) * REAL(D,RT))
        IF (VALS(1) .GT. 0.0_RT) THEN
           VECS(:,:) = VECS(:,:) / VALS(1)
        END IF
     END IF
-    ! Apply the scaled singular vectors to the data to make it radially symmetric.
+    ! Apply the scaled singular vectors to the data to normalize.
     X1(:,:) = X(:,:) 
-    CALL GEMM('T', 'N', D, SIZE(X,2), D, 1.0_RT, &
-         VECS(:D,:D), D, &
-         X1(:,:), D, &
-         0.0_RT, X(:,:), D)
-    ! Compute the inverse of the transformation if requested.
-    IF (INVERSE) THEN
-       VALS(:) = VALS(:)**2
-       DO I = 1, D
-          IF (VALS(I) .GT. 0.0_RT) THEN
-             VECS(:D,I) = VECS(:D,I) * VALS(I)
-          END IF
-          VECS(I,:D) = VECS(I,:D) * SCALAR(I)
-       END DO
-       VECS(:D,:D) = TRANSPOSE(VECS(:D,:D))
-       SHIFT(:) = -SHIFT(:) * SCALAR(:)
-    ELSE
-       ! Apply the exact same transformation to the vectors
-       ! that was already applied to X to normalize original
-       ! component scale (maximum absolute values).
-       DO I = 1, D
-          VECS(I,:D) = VECS(I,:D) / SCALAR(I)
-       END DO
-       SHIFT(:) = SHIFT(:) * SCALAR(:)
-    END IF
+    CALL GEMM('T', 'N', INT(D,INT32), SIZE(X,2), INT(D,INT32), 1.0_RT, &
+         VECS(1:D,1:D), INT(D,INT32), &
+         X1(:,:), INT(D,INT32), &
+         0.0_RT, X(:,:), INT(D,INT32))
+    ! Apply the exact same transformation to the vectors
+    ! that was already applied to X to normalize original
+    ! component scale, because these vectors should
+    ! recreate the entire transformation.
+    DO I = 1, D
+       VECS(I,1:D) = VECS(I,1:D) / SCALAR(I)
+    END DO
     ! Deallocate local memory.
-    DEALLOCATE(NON_NUMBER_MASK, TEMP_VECS, VALS, RN, SCALAR, X1)
+    DEALLOCATE(VALIDITY_MASK, VALS, RN, MINS, SCALAR, X1)
   END SUBROUTINE RADIALIZE
 
   ! Perform least squares with LAPACK.

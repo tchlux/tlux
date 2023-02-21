@@ -14,7 +14,7 @@ class AxyModel:
         self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
         self.a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
         self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
-        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, order="F")
+        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, order="F")
         self.m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
         self.m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
         self.m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
@@ -49,6 +49,7 @@ class AxyModel:
             ("int", "initialize"),
             ("fit", "fit"),
             ("nrm", "normalize"),
+            ("gen", "fetch data"),
             ("emb", "embed"),
             ("evl", "evaluate"),
             ("grd", "gradient"),
@@ -200,7 +201,11 @@ class AXY:
                 setattr(self.config, n, kwargs[n])
             # Set all internal arrays and initialize the model.
             self.model = np.zeros(self.config.total_size, dtype="float32")
-            self.AXY.init_model(self.config, self.model, seed=self.seed)
+            initial_shift_range = kwargs.get("initial_shift_range", None)
+            initial_output_scale = kwargs.get("initial_output_scale", None)
+            self.AXY.init_model(self.config, self.model, seed=self.seed,
+                                initial_shift_range=initial_shift_range,
+                                initial_output_scale=initial_output_scale)
 
 
     # Generate the string containing all the configuration information for this model.
@@ -382,22 +387,26 @@ class AXY:
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
-            y=None, yi=None, yw=None, new_model=False, **kwargs):
+            y=None, yi=None, yw=None, new_model=False, nm=None, na=None, **kwargs):
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "AXY.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for aggregate inputs.
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
+        _nm, _na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, y, yi)
         )
-        # TODO: Move yw into the _to_array function.
+        if (na is None): na = _na
+        if (nm is None): nm = _nm
+        # Make sure NA is only as large as it practically needs to be.
+        na = min(na, sum(sizes[np.argsort(sizes)[-nm:]]))
+        # TODO: Move yw into the _to_array function?
         # Convert yw to a numpy array (if it is not already).
         if (yw is None):
-            yw = np.zeros((nm,0), dtype="float32", order="C")
+            yw = np.zeros((_nm,0), dtype="float32", order="C")
         else:
-            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((nm,-1)), order="C")
+            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((_nm,-1)), order="C")
         assert (yw.shape[1] in {0, 1, mdo}), f"Weights for points 'yw' {yw.shape} must have 1 column{' or '+str(mdo)+' columns' if (mdo > 0) else ''}."
         # Configure this model if requested (or not already done).
         self._init_kwargs.update(kwargs)
@@ -418,16 +427,6 @@ class AXY:
             for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
                 if (kwargs[n] is not None):
                     setattr(self.config, n, kwargs[n])            
-        # TODO: Should the following two conditions be in the _to_array function as well?
-        # If there are integer embeddings, expand "x" and "ax" to have space to hold those embeddings.
-        if (self.config.ade > 0):
-            _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
-            _ax[:,:ax.shape[1]] = ax
-            ax, _ax = _ax, ax
-        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
-            _x = np.zeros((x.shape[0],self.config.mdi), dtype="float32", order="C")
-            _x[:,:x.shape[1]] = x
-            x, _x = _x, x
         # Make sure some silly user error didn't happen.
         if (x.shape[1] > 0):
             assert (self.config.mdo > 0), f"Found disabled model (mdo=0) with positive number of 'x' inputs. Either do not provide 'x', 'xi', or do not set 'mdo=0'."
@@ -442,29 +441,25 @@ class AXY:
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
-        # TODO: HACK
-        # nm = 100
-        # na = 1000
-        self.AXY.new_fit_config(nm, na, self.config)
-        rwork = np.ones(self.config.rwork_size, dtype="float32")
+        self.AXY.new_fit_config(nm=nm, na=na, nmt=x.shape[0], nat=ax.shape[0],
+                                adi=axi.shape[1], mdi=xi.shape[1],
+                                seed=self.seed, config=self.config)
+        print("self: ", self)
+        print("self.config: ", self.config)
+        rwork = np.ones(self.config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
         iwork = np.ones(self.config.iwork_size, dtype="int32")
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
-        result = self.AXY.minimize_mse(self.config, self.model, rwork, iwork,
-                                        ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
-                                        steps=steps, record=self.record.T)
+        result = self.AXY.fit_model(self.config, self.model, rwork, iwork,
+                                    ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
+                                    steps=steps, record=self.record.T)
         # Check for a nonzero exit code.
-        self._check_code(result[-1], "minimize_mse")
-        # Copy the updated values back into the input arrays (for transparency).
-        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
-            _x[:,:] = x[:,:_x.shape[1]]
-        if (self.config.ade > 0):
-            _ax[:,:] = ax[:,:_ax.shape[1]]
+        self._check_code(result[-1], "fit_model")
         # Store the multiplier to be used in embeddings (to level the norm contribution).
         if (self.config.mdo > 0):
             last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
         else:
-            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, order="F")
+            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, order="F")[:,:-1]
         self.embedding_transform = np.linalg.norm(last_weights, axis=1)
         # Normalize the embedding transformation to be unit norm.
         transform_norm = np.linalg.norm(self.embedding_transform)
@@ -504,6 +499,13 @@ class AXY:
         # Compute the true real-vector input dimensions given embeddings.
         adn += ade
         mdn += mde + ado
+        # Initialize holder for y output.
+        y = np.zeros((nm, mdo), dtype="float32", order="C")
+        # ------------------------------------------------------------
+        # Call the unerlying library to make sure input shapes are appropriate.
+        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
+        # Check for a nonzero exit code.
+        self._check_code(info, "check_shape")
         # ------------------------------------------------------------
         # Initialize storage for all arrays needed at evaluation time.
         #   If there are integer embeddings, expand "ax" and "x" to have
@@ -512,13 +514,17 @@ class AXY:
             _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
             _ax[:,:ax.shape[1]] = ax
             ax = _ax
-        ay = np.zeros((na, ado), dtype="float32", order="F")
+        else:
+            ax = ax.copy()
+        ay = np.zeros((na, ado+1), dtype="float32", order="F")
         if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
             _x = np.zeros((x.shape[0],x.shape[1]+self.config.mde+self.config.ado),
                           dtype="float32", order="C")
             _x[:,:x.shape[1]] = x
             x = _x
-        y = np.zeros((nm, mdo), dtype="float32", order="C")
+        else:
+            x = x.copy()
+        # If all internal states are being saved, the make more space, otherwise only two copies are needed.
         if (save_states):
             a_states = np.zeros((na, ads, self.config.ans), dtype="float32", order="F")
             m_states = np.zeros((nm, mds, self.config.mns), dtype="float32", order="F")
@@ -526,10 +532,6 @@ class AXY:
             a_states = np.zeros((na, ads, 2), dtype="float32", order="F")
             m_states = np.zeros((nm, mds, 2), dtype="float32", order="F")
         # ------------------------------------------------------------
-        # Call the unerlying library.
-        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
-        # Check for a nonzero exit code.
-        self._check_code(info, "check_shape")
         # Embed the categorical inputs as numeical inputs.
         self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
         # Evaluate the model.
@@ -541,6 +543,10 @@ class AXY:
             self.a_states = a_states
             self.ay = ay
             self.m_states = m_states
+        else:
+            self.a_states = None
+            self.ay = None
+            self.m_states = None
         # If embeddings are desired, multiply the last state by the 2-norm
         #  of output weights for each component of that last embedding.
         if (embedding):
@@ -551,7 +557,7 @@ class AXY:
                     last_state = m_states[:,:,-2]
                 else:
                     last_state = x
-            else:
+            else:  # There is only an aggregator, no model follows.
                 if (self.config.ans > 0):
                     state = a_states[:,:,-2]
                 else:
@@ -636,13 +642,27 @@ if __name__ == "__main__":
     print("_"*70)
     print(" TESTING AXY MODULE")
 
-    # Remove the compiled object if modifications have been made to sources.
-    import os
-    f9 = os.path.dirname(os.path.abspath(__file__))
-    f9 = [os.path.join(f9,p) for p in os.listdir(f9) if p.endswith(".f90")]
-    so = os.path.expanduser("~/Git/tlux/tlux/approximate/axy/axy/axy.arm64.so")
-    if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
-        os.remove(so)
+    # # Remove the compiled object if modifications have been made to sources.
+    # import os
+    # f9 = os.path.dirname(os.path.abspath(__file__))
+    # f9 = [os.path.join(f9,p) for p in os.listdir(f9) if p.endswith(".f90")]
+    # so = os.path.expanduser("~/Git/tlux/tlux/approximate/axy/axy/axy.arm64.so")
+    # if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
+    #     os.remove(so)
+
+    import fmodpy
+    AXY_MOD = fmodpy.fimport(
+        input_fortran_file = "axy.f90",
+        dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
+        name = "axy",
+        blas = True,
+        lapack = True,
+        omp = True,
+        wrap = True,
+        # rebuild = True,
+        verbose = False,
+        f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+    ).axy
 
     # Import codes that will be used for testing.
     from tlux.plot import Plot
@@ -660,13 +680,15 @@ if __name__ == "__main__":
     use_x = False
     model_dim = 64
     model_states = 2
-    model_dim_output = 0
+    model_dim_output = None # 0
     use_y = True
     use_yi = False
     steps = 1000
-    num_threads = None
+    num_threads = None # 50
     use_nearest_neighbor = False
 
+    # WARNING: The following includes a curvature estimate, which
+    #          is NOT only using stochastic gradient descent.
     ONLY_SGD = dict(
         faster_rate = 1.0,
         slower_rate = 1.0,
@@ -682,10 +704,11 @@ if __name__ == "__main__":
         seed=seed,
         early_stop = False,
         logging_step_frequency = 1,
-        rank_check_frequency = 100,
+        rank_check_frequency = 10,
         **({"mdo":model_dim_output} if model_dim_output is not None else {}),
-        normalize_x = True,
-        normalize_y = True,
+        ax_normalized = False,
+        x_normalized = False,
+        y_normalized = False,
         # **ONLY_SGD
     )
 
@@ -776,6 +799,8 @@ if __name__ == "__main__":
             num_threads=num_threads,
             **settings,
         )
+        print("m: ", m)
+        print("m.config: ", m.config)
         m.fit(
             ax=(ax.copy() if use_a else None),
             axi=(axi if use_a else None),
@@ -785,6 +810,7 @@ if __name__ == "__main__":
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
             steps=steps,
+            # nm = n // 3,
         )
         # Save and load the model.
         m.save("temp-model.json")

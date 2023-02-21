@@ -8,8 +8,8 @@ CONTAINS
   ! Generate randomly distributed vectors on the N-sphere.
   SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: COLUMN_VECTORS
-    ! Local variables. LOCAL ALLOCATION
-    REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS
+    ! Local variables.
+    REAL(KIND=RT), DIMENSION(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2)) :: TEMP_VECS ! LOCAL ALLOCATION
     REAL(KIND=RT), PARAMETER :: PI = 3.141592653589793
     REAL(KIND=RT) :: LEN
     INTEGER :: I, J, K
@@ -23,13 +23,13 @@ CONTAINS
     CALL RANDOM_NUMBER(TEMP_VECS(:,:))
     ! Map the random uniform numbers to a radial distribution.
     COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
-    ! Orthogonalize the vectors in (random) order.
+    ! Orthogonalize the first K vectors in (random) order.
     IF (SIZE(COLUMN_VECTORS,1) .GT. 1) THEN
        ! Compute the last vector that is part of the orthogonalization.
        K = MIN(SIZE(COLUMN_VECTORS,1), SIZE(COLUMN_VECTORS,2))
-       ! Orthogonalize the "lazy way" without column pivoting.
-       ! Could result in imperfectly orthogonal vectors (because of
-       ! rounding errors being enlarged by upscaling), that is acceptable.
+       ! Orthogonalize the "lazy way" without column pivoting. Could
+       ! result in imperfectly orthogonal vectors (because of rounding
+       ! errors being enlarged by upscaling), that is acceptable here.
        DO I = 1, K-1
           LEN = NORM2(COLUMN_VECTORS(:,I))
           ! Generate a new random vector (that might be linearly dependent on previous)
@@ -57,7 +57,7 @@ CONTAINS
        ! Make the rest of the column vectors unit length.
        DO I = K, SIZE(COLUMN_VECTORS,2)
           LEN = NORM2(COLUMN_VECTORS(:,I))
-          IF (LEN .GT. 0.0_RT)  COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
+          IF (LEN .GT. 0.0_RT) COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN
        END DO
     END IF
   END SUBROUTINE RANDOM_UNIT_VECTORS

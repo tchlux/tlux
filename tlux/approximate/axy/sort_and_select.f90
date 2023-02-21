@@ -43,11 +43,11 @@ CONTAINS
   !                determined heuristically based on compute hardware.
   ! Output:
   ! 
-  !   INDICES  --  A 1D array of original indices for elements of VALUES.
+  !   INDICES  --  A 1D array of new locations for original indices.
   ! 
   !   The elements of the array INDICES are rearranged such that the
-  !   element at position VALUES(INDICES(K)) is in the same location 
-  !   it would be if all of VALUES were referenced in sorted order in
+  !   element at position VALUES(INDICES(K)) is in the location it
+  !   should be if all of VALUES were referenced in sorted order in
   !   INDICES. Also known as, VALUES(INDICES(K)) has rank K.
   ! 
   RECURSIVE SUBROUTINE ARGSELECT(VALUES, K, INDICES, DIVISOR, MAX_SIZE, RECURSING)
