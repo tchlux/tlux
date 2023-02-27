@@ -169,11 +169,15 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SMGC, EMGC ! MODEL_GRAD_CURV(NUM_VARS)
      INTEGER(KIND=INT64) :: SBM, EBM ! BEST_MODEL(NUM_VARS)
      INTEGER(KIND=INT64) :: SAXB, EAXB ! AX_BATCH(ADI,NA)
+     INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SAEC, EAEC ! A_EMB_COUNTS(ANE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO+1)
      INTEGER(KIND=INT64) :: SAYG, EAYG ! AY_GRADIENT(NA,ADO+1)
      INTEGER(KIND=INT64) :: SMXB, EMXB ! X_BATCH(MDI,NM)
+     INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SMEC, EMEC ! M_EMB_COUNTS(MNE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NM,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMXG, EMXG ! M_GRADS(NM,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMYB, EMYB ! Y_BATCH(DO,NM)
@@ -186,10 +190,6 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SML, EML ! M_LENGTHS(MDS,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAST, EAST ! A_STATE_TEMP(NA,ADS)
      INTEGER(KIND=INT64) :: SMST, EMST ! M_STATE_TEMP(NM,MDS)
-     INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
-     INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
-     INTEGER(KIND=INT64) :: SAEC, EAEC ! A_EMB_COUNTS(ANE,NUM_THREADS)
-     INTEGER(KIND=INT64) :: SMEC, EMEC ! M_EMB_COUNTS(MNE,NUM_THREADS)
      ! Integer workspace (for model optimization).
      INTEGER(KIND=INT64) :: SAXI, EAXI ! AXI (aggregate batch indices)
      INTEGER(KIND=INT64) :: SMXI, EMXI ! XI (model batch indices)
@@ -342,6 +342,10 @@ CONTAINS
      ! Compute indices related to the variable locations for this model.
      CONFIG%TOTAL_SIZE = 0
      ! ---------------------------------------------------------------
+     !   aggregator embedding vecs [ADE by ANE]
+     CONFIG%ASEV = 1_INT64 + CONFIG%TOTAL_SIZE
+     CONFIG%AEEV = CONFIG%ASEV-1_INT64 +  CONFIG%ADE * CONFIG%ANE
+     CONFIG%TOTAL_SIZE = CONFIG%AEEV
      !   aggregator input vecs [ADI by ADS]
      CONFIG%ASIV = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%AEIV = CONFIG%ASIV-1_INT64 +  CONFIG%ADI * CONFIG%ADS
@@ -362,11 +366,17 @@ CONTAINS
      CONFIG%ASOV = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%AEOV = CONFIG%ASOV-1_INT64 +  CONFIG%ADSO * (CONFIG%ADO+1_INT64)
      CONFIG%TOTAL_SIZE = CONFIG%AEOV
-     !   aggregator embedding vecs [ADE by ANE]
-     CONFIG%ASEV = 1_INT64 + CONFIG%TOTAL_SIZE
-     CONFIG%AEEV = CONFIG%ASEV-1_INT64 +  CONFIG%ADE * CONFIG%ANE
-     CONFIG%TOTAL_SIZE = CONFIG%AEEV
      ! ---------------------------------------------------------------
+     ! THIS IS SPECIAL, IT IS PART OF THE MODEL AND CHANGES DURING OPTIMIZATION
+     !   aggregator post-output shift [ADO]
+     CONFIG%AOSS = 1_INT64 + CONFIG%TOTAL_SIZE
+     CONFIG%AOSE = CONFIG%AOSS-1_INT64 + CONFIG%ADO
+     CONFIG%TOTAL_SIZE = CONFIG%AOSE
+     ! ---------------------------------------------------------------
+     !   model embedding vecs [MDE by MNE]
+     CONFIG%MSEV = 1_INT64 + CONFIG%TOTAL_SIZE
+     CONFIG%MEEV = CONFIG%MSEV-1_INT64 +  CONFIG%MDE * CONFIG%MNE
+     CONFIG%TOTAL_SIZE = CONFIG%MEEV
      !   model input vecs [MDI by MDS]
      CONFIG%MSIV = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%MEIV = CONFIG%MSIV-1_INT64 +  CONFIG%MDI * CONFIG%MDS
@@ -387,15 +397,6 @@ CONTAINS
      CONFIG%MSOV = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%MEOV = CONFIG%MSOV-1_INT64 +  CONFIG%MDSO * CONFIG%MDO
      CONFIG%TOTAL_SIZE = CONFIG%MEOV
-     !   model embedding vecs [MDE by MNE]
-     CONFIG%MSEV = 1_INT64 + CONFIG%TOTAL_SIZE
-     CONFIG%MEEV = CONFIG%MSEV-1_INT64 +  CONFIG%MDE * CONFIG%MNE
-     CONFIG%TOTAL_SIZE = CONFIG%MEEV
-     ! THIS IS SPECIAL, IT IS PART OF THE MODEL AND CHANGES DURING OPTIMIZATION
-     !   aggregator post-output shift [ADO]
-     CONFIG%AOSS = 1_INT64 + CONFIG%TOTAL_SIZE
-     CONFIG%AOSE = CONFIG%AOSS-1_INT64 + CONFIG%ADO
-     CONFIG%TOTAL_SIZE = CONFIG%AOSE
      ! ---------------------------------------------------------------
      !   number of variables
      CONFIG%NUM_VARS = CONFIG%TOTAL_SIZE
@@ -424,6 +425,7 @@ CONTAINS
      CONFIG%MOMS = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%MOME = CONFIG%MOMS-1_INT64 + CONFIG%DO * CONFIG%DO
      CONFIG%TOTAL_SIZE = CONFIG%MOME
+     ! ---------------------------------------------------------------
      !   set all time counters to zero
      CONFIG%WFIT = 0_INT64
      CONFIG%CFIT = 0_INT64
@@ -451,7 +453,9 @@ CONTAINS
 
   ! Given a number of X points "NM", and a number of aggregator X points
   ! "NA", update the "RWORK_SIZE" and "IWORK_SIZE" attributes in "CONFIG"
-  ! as well as all related work indices for that size data.
+  ! as well as all related work indices for that size data. Optionally
+  ! also provide "NAT" and "NMT" the 'total' number of aggregate and
+  ! fixed points respectively.
   SUBROUTINE NEW_FIT_CONFIG(NM, NA, NMT, NAT, ADI, MDI, SEED, CONFIG)
     INTEGER(KIND=INT64), INTENT(IN) :: NM
     INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: NA, NMT, NAT, ADI, MDI
@@ -491,6 +495,8 @@ CONTAINS
     ELSE
        CALL SRAND(0)
     END IF
+    ! TODO: The following is (long) integer work space, should be stored there.
+    ! 
     ! Construct an additive term, multiplier, and modulus for a linear
     ! congruential generator. These generators are cyclic and do not
     ! repeat when they maintain the properties:
@@ -523,10 +529,18 @@ CONTAINS
     CONFIG%EBM = CONFIG%SBM-1_INT64 + CONFIG%NUM_VARS
     CONFIG%RWORK_SIZE = CONFIG%EBM
     ! ---------------------------------------------------------------
-    ! AX batch
+    ! AX
     CONFIG%SAXB = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EAXB = CONFIG%SAXB-1_INT64 + CONFIG%NA * CONFIG%ADI
     CONFIG%RWORK_SIZE = CONFIG%EAXB
+    ! A embedding temp holder
+    CONFIG%SAET = 1_INT64 + CONFIG%RWORK_SIZE
+    CONFIG%EAET = CONFIG%SAET-1_INT64 + CONFIG%ADE * CONFIG%ANE * CONFIG%NUM_THREADS
+    CONFIG%RWORK_SIZE = CONFIG%EAET
+    ! A embedding temp counter
+    CONFIG%SAEC = 1_INT64 + CONFIG%RWORK_SIZE
+    CONFIG%EAEC = CONFIG%SAEC-1_INT64 + CONFIG%ANE * CONFIG%NUM_THREADS
+    CONFIG%RWORK_SIZE = CONFIG%EAEC
     ! aggregator states
     CONFIG%SAXS = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EAXS = CONFIG%SAXS-1_INT64 + CONFIG%NA * CONFIG%ADS * (CONFIG%ANS+1_INT64)
@@ -543,10 +557,18 @@ CONTAINS
     CONFIG%SAYG = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EAYG = CONFIG%SAYG-1_INT64 + CONFIG%NA * (CONFIG%ADO+1_INT64)
     CONFIG%RWORK_SIZE = CONFIG%EAYG
-    ! X batch
+    ! X
     CONFIG%SMXB = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMXB = CONFIG%SMXB-1_INT64 + CONFIG%NM * CONFIG%MDI
     CONFIG%RWORK_SIZE = CONFIG%EMXB
+    ! M embedding temp holder
+    CONFIG%SMET = 1_INT64 + CONFIG%RWORK_SIZE
+    CONFIG%EMET = CONFIG%SMET-1_INT64 + CONFIG%MDE * CONFIG%MNE * CONFIG%NUM_THREADS
+    CONFIG%RWORK_SIZE = CONFIG%EMET
+    ! M embedding temp counter
+    CONFIG%SMEC = 1_INT64 + CONFIG%RWORK_SIZE
+    CONFIG%EMEC = CONFIG%SMEC-1_INT64 + CONFIG%MNE * CONFIG%NUM_THREADS
+    CONFIG%RWORK_SIZE = CONFIG%EMEC
     ! model states
     CONFIG%SMXS = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMXS = CONFIG%SMXS-1_INT64 + CONFIG%NM * CONFIG%MDS * (CONFIG%MNS+1_INT64)
@@ -555,7 +577,7 @@ CONTAINS
     CONFIG%SMXG = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMXG = CONFIG%SMXG-1_INT64 + CONFIG%NM * CONFIG%MDS * (CONFIG%MNS+1_INT64)
     CONFIG%RWORK_SIZE = CONFIG%EMXG
-    ! Y batch
+    ! Y
     CONFIG%SMYB = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMYB = CONFIG%SMYB-1_INT64 + CONFIG%DO * CONFIG%NM
     CONFIG%RWORK_SIZE = CONFIG%EMYB
@@ -570,6 +592,7 @@ CONTAINS
     ! AXI rescale
     CONFIG%SAXIR = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EAXIR = CONFIG%SAXIR-1_INT64 + CONFIG%ADE * CONFIG%ADE
+    CONFIG%RWORK_SIZE = CONFIG%EAXIR
     ! XI shift
     CONFIG%SMXIS = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMXIS = CONFIG%SMXIS-1_INT64 + CONFIG%MDE
@@ -594,34 +617,18 @@ CONTAINS
     CONFIG%SMST = 1_INT64 + CONFIG%RWORK_SIZE
     CONFIG%EMST = CONFIG%SMST-1_INT64 + CONFIG%NM * CONFIG%MDS
     CONFIG%RWORK_SIZE = CONFIG%EMST
-    ! A embedding temp holder
-    CONFIG%SAET = 1_INT64 + CONFIG%RWORK_SIZE
-    CONFIG%EAET = CONFIG%SAET-1_INT64 + CONFIG%ADE * CONFIG%ANE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EAET
-    ! M embedding temp holder
-    CONFIG%SMET = 1_INT64 + CONFIG%RWORK_SIZE
-    CONFIG%EMET = CONFIG%SMET-1_INT64 + CONFIG%MDE * CONFIG%MNE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EMET
-    ! A embedding temp counter
-    CONFIG%SAEC = 1_INT64 + CONFIG%RWORK_SIZE
-    CONFIG%EAEC = CONFIG%SAEC-1_INT64 + CONFIG%ANE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EAEC
-    ! M embedding temp counter
-    CONFIG%SMEC = 1_INT64 + CONFIG%RWORK_SIZE
-    CONFIG%EMEC = CONFIG%SMEC-1_INT64 + CONFIG%MNE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EMEC
     ! ------------------------------------------------------------
     ! Set up the integer valued work array.
     CONFIG%IWORK_SIZE = 0_INT64
-    ! aggregate batch indices
+    ! AXI
     CONFIG%SAXI = 1_INT64 + CONFIG%IWORK_SIZE
     CONFIG%EAXI = CONFIG%SAXI-1_INT64 + CONFIG%NA * AXI_COLS
     CONFIG%IWORK_SIZE = CONFIG%EAXI
-    ! model batch indices
+    ! XI
     CONFIG%SMXI = 1_INT64 + CONFIG%IWORK_SIZE
     CONFIG%EMXI = CONFIG%SMXI-1_INT64 + CONFIG%NM * XI_COLS
     CONFIG%IWORK_SIZE = CONFIG%EMXI
-    ! sizes for batch
+    ! SIZES
     CONFIG%SSB = 1_INT64 + CONFIG%IWORK_SIZE
     CONFIG%ESB = CONFIG%SSB-1_INT64 + CONFIG%NM
     CONFIG%IWORK_SIZE = CONFIG%ESB
@@ -1867,16 +1874,19 @@ CONTAINS
     !          These will be sized as large as reasonably possible given memory limits.
     LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: YW_MASK ! LOCAL ALLOCATION
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: Y_SCALE ! LOCAL ALLOCATION
+    LOGICAL :: NORMALIZE
     INTEGER(KIND=INT64) :: D, E, NA
     REAL :: CPU_TIME_START, CPU_TIME_END
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
+    CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
+    CALL CPU_TIME(CPU_TIME_START)
+    NORMALIZE = CONFIG%NORMALIZE
+    CONFIG%NORMALIZE = .FALSE.
     ! Allocate local variables.
     ALLOCATE( &
          YW_MASK(SIZE(YW,1), SIZE(YW,2)), &
          Y_SCALE(SIZE(Y_RESCALE,1), SIZE(Y_RESCALE,2)) &
     )
-    CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
-    CALL CPU_TIME(CPU_TIME_START)
     ! Get some data to use in the normalization process.
     CALL FETCH_DATA(CONFIG, MODEL, &
          AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
@@ -2019,6 +2029,8 @@ CONTAINS
        END IF
        CONFIG%AY_NORMALIZED = .TRUE.
     END IF
+    ! Reset the normalize setting.
+    CONFIG%NORMALIZE = NORMALIZE
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
@@ -2409,7 +2421,7 @@ CONTAINS
     INTEGER,       INTENT(OUT) :: INFO
     ! Local variables.
     !    "backspace" character array for printing to the same line repeatedly
-    CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),27)
+    CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),31)
     !    temporary holders for overwritten CONFIG attributes
     LOGICAL :: NORMALIZE
     INTEGER :: NUM_THREADS
@@ -2926,16 +2938,18 @@ CONTAINS
          END IF
          ! Store the percentage of variables updated in this step.
          RECORD(4,STEP) = REAL(CONFIG%NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
-         ! Store the evaluative utilization rate (total data rank over full rank)
-         RECORD(5,STEP) = REAL(TOTAL_EVAL_RANK,RT) / REAL(TOTAL_RANK,RT)
-         ! Store the gradient utilization rate (total gradient rank over full rank)
-         RECORD(6,STEP) = REAL(TOTAL_GRAD_RANK,RT) / REAL(CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS,RT)
+         IF (TOTAL_RANK .GT. 0) THEN
+            ! Store the evaluative utilization rate (total data rank over full rank)
+            RECORD(5,STEP) = REAL(TOTAL_EVAL_RANK,RT) / REAL(TOTAL_RANK,RT)
+            ! Store the gradient utilization rate (total gradient rank over full rank)
+            RECORD(6,STEP) = REAL(TOTAL_GRAD_RANK,RT) / REAL(TOTAL_RANK,RT)
+         END IF
       END IF
       ! Write the status update to the command line.
       CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
       IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
          IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
-         WRITE (*,'(I6,"  (",F6.4,") [",F6.4,"]")', ADVANCE='NO') STEP, MSE, BEST_MSE
+         WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP, MSE, BEST_MSE
          LAST_PRINT_TIME = CURRENT_TIME
          DID_PRINT = .TRUE.
       END IF

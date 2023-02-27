@@ -668,50 +668,6 @@ if __name__ == "__main__":
     from tlux.plot import Plot
     from tlux.random import well_spaced_box
 
-    seed = 0
-    np.random.seed(seed)
-
-    n = 2**7
-    d = 2
-    new_model = True
-    use_a = True
-    agg_dim = 64
-    agg_states = 2
-    use_x = False
-    model_dim = 64
-    model_states = 2
-    model_dim_output = None # 0
-    use_y = True
-    use_yi = False
-    steps = 1000
-    num_threads = None # 50
-    use_nearest_neighbor = False
-
-    # WARNING: The following includes a curvature estimate, which
-    #          is NOT only using stochastic gradient descent.
-    ONLY_SGD = dict(
-        faster_rate = 1.0,
-        slower_rate = 1.0,
-        update_ratio_step = 0.0,
-        step_factor = 0.001,
-        step_mean_change = 0.1,
-        step_curv_change = 0.01,
-        keep_best = True,
-        basis_replacement = False,
-    )
-
-    settings = dict(
-        seed=seed,
-        early_stop = False,
-        logging_step_frequency = 1,
-        rank_check_frequency = 10,
-        **({"mdo":model_dim_output} if model_dim_output is not None else {}),
-        ax_normalized = False,
-        x_normalized = False,
-        y_normalized = False,
-        # **ONLY_SGD
-    )
-
     # A function for testing approximation algorithms.
     def f1(x):
         x = x.reshape((-1,2))
@@ -729,8 +685,53 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
+    functions = [f1, f2,]# f3]
 
-    functions = [f1, f2,] # f3]
+    seed = 0
+    np.random.seed(seed)
+
+    n = 2**7
+    d = 2
+    new_model = True
+    use_a = False
+    agg_dim = 64
+    agg_states = 2
+    use_x = True
+    model_dim = 64
+    model_states = 2
+    model_dim_output = None # 0
+    use_y = True
+    use_yi = False
+    steps = 10000
+    keep_best = False
+    num_threads = None # 50
+    use_nearest_neighbor = False
+
+    # WARNING: The following includes a curvature estimate, which
+    #          is NOT only using stochastic gradient descent.
+    ONLY_SGD = dict(
+        faster_rate = 1.0,
+        slower_rate = 1.0,
+        update_ratio_step = 0.0,
+        step_factor = 0.001,
+        step_mean_change = 0.1,
+        step_curv_change = 0.01,
+        keep_best = keep_best,
+        basis_replacement = False,
+    )
+
+    settings = dict(
+        seed=seed,
+        early_stop = False,
+        log_grad_norm_frequency = 1,
+        rank_check_frequency = 10,
+        **({"mdo":model_dim_output} if model_dim_output is not None else {}),
+        ax_normalized = False,
+        x_normalized = False,
+        y_normalized = False,
+        # keep_best = False,
+        # **ONLY_SGD
+    )
 
     # Generate data bounds.
     x_min_max = [[-.1, 1.1], [-.1, 1.1]]
