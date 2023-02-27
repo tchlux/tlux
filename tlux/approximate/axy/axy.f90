@@ -1205,7 +1205,7 @@ CONTAINS
     ! 
     ! Aggregator (set) model evaluation.
     ! 
-    IF (CONFIG%ADI .GT. 0) THEN
+    IF (CONFIG%ADO .GT. 0) THEN
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
        aggregator_evaluation : DO BATCH = 1, SIZE(BATCHA_STARTS, KIND=INT64)
           BS = BATCHA_STARTS(BATCH)
@@ -1250,14 +1250,14 @@ CONTAINS
        IF (CONFIG%MDO .GT. 0) THEN
           !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, GS, GE) IF(NT > 1)
           set_aggregation_to_x : DO I = 1, SIZE(Y,2,KIND=INT64)
-             IF (SIZES(I) .EQ. 0) THEN
-                X(E:,I) = 0.0_RT
-             ELSE
+             IF (SIZES(I) .GT. 0) THEN
                 ! Take the mean of all outputs from the aggregator model, store
                 !   as input to the model that proceeds this aggregation.
                 GS = AGG_STARTS(I)
                 GE = AGG_STARTS(I) + SIZES(I)-1
                 X(E:,I) = SUM(AY(GS:GE,:CONFIG%ADO), 1) / REAL(SIZES(I),RT) 
+             ELSE
+                X(E:,I) = 0.0_RT
              END IF
           END DO set_aggregation_to_x
        ELSE
@@ -1272,8 +1272,8 @@ CONTAINS
                 Y(:,I) = SUM(AY(GS:GE,:CONFIG%ADO), 1) / REAL(SIZES(I),RT) 
              END IF
           END DO set_aggregation_to_y
-       END IF
-    END IF
+       END IF  ! MDO > 0
+    END IF  ! ADO > 0
     ! 
     ! Positional model evaluation.
     ! 
@@ -1908,11 +1908,19 @@ CONTAINS
        DO D = 1, SIZE(AX_IN,2,INT64)
           AX_IN(:,D) = MATMUL(AX_IN(:,D), AX_RESCALE(:,:))
        END DO
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(AX_IN(:,:)) .OR. (.NOT. IS_FINITE(AX_IN(:,:))))
+          AX_IN(:,:) = 0.0_RT
+       END WHERE
        CONFIG%AX_NORMALIZED = .TRUE.
     ELSE IF (CONFIG%ADN .GT. 0) THEN
        AX_SHIFT(:) = 0.0_RT
        AX_RESCALE(:,:) = 0.0_RT
        FORALL (D=1:CONFIG%ADN) AX_RESCALE(D,D) = 1.0_RT
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(AX_IN(:,:)) .OR. (.NOT. IS_FINITE(AX_IN(:,:))))
+          AX_IN(:,:) = 0.0_RT
+       END WHERE
     END IF
     ! AXI
     IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
@@ -1942,10 +1950,18 @@ CONTAINS
           X_IN(:,D) = MATMUL(X_IN(:,D), X_RESCALE(:,:))
        END DO
        CONFIG%X_NORMALIZED = .TRUE.
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(X_IN(:,:)) .OR. (.NOT. IS_FINITE(X_IN(:,:))))
+          X_IN(:,:) = 0.0_RT
+       END WHERE
     ELSE IF (CONFIG%MDN .GT. 0) THEN
        X_SHIFT(:) = 0.0_RT
        X_RESCALE(:,:) = 0.0_RT
        FORALL (D=1:CONFIG%MDN) X_RESCALE(D,D) = 1.0_RT
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(X_IN(:,:)) .OR. (.NOT. IS_FINITE(X_IN(:,:))))
+          X_IN(:,:) = 0.0_RT
+       END WHERE
     END IF
     ! XI
     IF ((.NOT. CONFIG%XI_NORMALIZED) .AND. (CONFIG%MDE .GT. 0)) THEN
@@ -1974,11 +1990,19 @@ CONTAINS
        DO D = 1, SIZE(Y_IN,2,INT64)
           Y_IN(:,D) = MATMUL(Y_IN(:,D), Y_SCALE(:,:))
        END DO
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
+          Y_IN(:,:) = 0.0_RT
+       END WHERE
        CONFIG%Y_NORMALIZED = .TRUE.
     ELSE
        Y_SHIFT(:) = 0.0_RT
        Y_RESCALE(:,:) = 0.0_RT
        FORALL (D=1:SIZE(Y,1)) Y_RESCALE(D,D) = 1.0_RT
+       ! Set all invalid values to zeros.
+       WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
+          Y_IN(:,:) = 0.0_RT
+       END WHERE
     END IF
     ! YW
     IF (SIZE(YW_IN) .GT. 0) THEN
@@ -1991,6 +2015,10 @@ CONTAINS
        ELSEWHERE
           ! TODO: Handle when the COUNT is 0 correctly.
           YW_IN(:,:) = YW_IN(:,:) / (SUM(YW_IN(:,:), MASK=.NOT. YW_MASK(:,:)) / REAL(COUNT(.NOT. YW_MASK(:,:)),RT))
+       END WHERE
+       ! Set all invalid values to zero.
+       WHERE (IS_NAN(YW_IN(:,:)) .OR. (.NOT. IS_FINITE(YW_IN(:,:))))
+          YW_IN(:,:) = 0.0_RT
        END WHERE
     END IF
     ! 
@@ -2096,6 +2124,11 @@ CONTAINS
     ! 
     IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
          (MOD(FIT_STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
+       ! 
+       ! TODO: Model variables have stepped, so the embeddings changed.
+       !       Should the following code be re-embedding new values or leaving
+       !       the old ones in place? Maybe this call to EMBED is unadvisable.
+       ! 
        ! Embed all integer inputs into real vector inputs.
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
        ! Compute total rank for values at all internal layers.
@@ -2171,6 +2204,7 @@ CONTAINS
       ! Local variables.
       INTEGER :: L
       REAL(KIND=RT) :: SCALAR
+      REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
       DO L = 1, CONFIG%MNS+CONFIG%ANS+1
@@ -2179,29 +2213,35 @@ CONTAINS
             SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
             A_STATE_VECS(:,:,L) = A_STATE_VECS(:,:,L) / SCALAR
             A_STATE_SHIFT(:,L) = A_STATE_SHIFT(:,L) / SCALAR
-            ! [ANS] -> A_INPUT_VECS
+         ! [ANS] -> A_INPUT_VECS
          ELSE IF (L .EQ. CONFIG%ANS) THEN
             SCALAR = SQRT(MAXVAL(SUM(A_INPUT_VECS(:,:)**2, 1)))
             A_INPUT_VECS(:,:) = A_INPUT_VECS(:,:) / SCALAR
             A_INPUT_SHIFT(:) = A_INPUT_SHIFT(:) / SCALAR
-            ! [ANS+1, ANS+MNS-1] -> M_STATE_VECS
+         ! [ANS+1, ANS+MNS-1] -> M_STATE_VECS
          ELSE IF (L-CONFIG%ANS .LT. CONFIG%MNS) THEN
             SCALAR = SQRT(MAXVAL(SUM(M_STATE_VECS(:,:,L-CONFIG%ANS)**2, 1)))
             M_STATE_VECS(:,:,L-CONFIG%ANS) = M_STATE_VECS(:,:,L-CONFIG%ANS) / SCALAR
             M_STATE_SHIFT(:,L-CONFIG%ANS) = M_STATE_SHIFT(:,L-CONFIG%ANS) / SCALAR
-            ! [ANS+MNS] -> M_INPUT_VECS
-         ELSE IF (L .EQ. CONFIG%ANS+CONFIG%MNS) THEN
+         ! [ANS+MNS] -> M_INPUT_VECS
+         ELSE IF (L-CONFIG%ANS .EQ. CONFIG%MNS) THEN
             SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
             M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
-            ! [ANS+MNS+1] -> AY
+         ! [ANS+MNS+1] -> AY
          ELSE
             ! Update the aggregator model output shift to produce componentwise mean-zero
             !  values (prevent divergence), but only when there is a model afterwards. 
-            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0)) THEN
+            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. (SIZE(AY,1,INT64) .GT. 0_INT64)) THEN
+               ALLOCATE(AY_SUM(1:CONFIG%ADO))
+               AY_SUM(:) = SUM(AY(:,:CONFIG%ADO) / REAL(SIZE(AY,1,INT64),RT), 1)
+               WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
+                  AY_SUM(:) = MODEL(CONFIG%AOSS:CONFIG%AOSE)
+               END WHERE
                MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
-                    (1.0_RT - CONFIG%STEP_AY_CHANGE) *  MODEL(CONFIG%AOSS:CONFIG%AOSE) &
-                    - CONFIG%STEP_AY_CHANGE  * (SUM(AY(:,:CONFIG%ADO),1) / REAL(SIZE(AY,1),RT))
+                    (1.0_RT - CONFIG%STEP_AY_CHANGE) * MODEL(CONFIG%AOSS:CONFIG%AOSE) &
+                  - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
+               DEALLOCATE(AY_SUM)
             END IF
          END IF
       END DO
