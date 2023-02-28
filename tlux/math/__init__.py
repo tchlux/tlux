@@ -39,7 +39,7 @@ def orthogonalize(col_vecs, essentially_zero=2**(-26)):
 # Compute the singular values and the right singular vectors for a matrix of row vectors.
 def svd(row_vecs, steps=5, bias=1.0):
     dim = row_vecs.shape[1]
-    # Initialize a holder for the singular valeus and the right
+    # Initialize a holder for the singular values and the right
     #   singular vectors (the principal components).
     # Rescale the data for stability control, exit early when given only zeros.
     multiplier = abs(row_vecs).max()

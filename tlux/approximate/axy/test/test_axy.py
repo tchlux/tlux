@@ -8,6 +8,7 @@ from tlux.plot import Plot
 from tlux.approximate.axy.test.scenarios import (
     scenarios,
     AXY,
+    Details,
     check_code,
     spawn_model,
     gen_config_data,
@@ -26,7 +27,7 @@ def _test_scenario_iteration(max_samples=8):
     # TODO: Start modifying all the test routines to iterate over many scenarios.
     seed = 0
     for i, scenario in enumerate(scenario_generator()):
-        config, (model, rwork, iwork, record), data, work = gen_config_data(scenario, seed=seed)
+        config, details, data, work = gen_config_data(scenario, seed=seed)
         print()
         print(i)
         for n in sorted(scenario):
@@ -91,8 +92,8 @@ def _test_large_data_fit():
     print()
     print("info: ", info)
 
-_test_large_data_fit()
-exit()
+# _test_large_data_fit()
+# exit()
 
 
 # --------------------------------------------------------------------
@@ -272,6 +273,71 @@ _test_fetch_data()
 
 # --------------------------------------------------------------------
 #                           NORMALIZE_DATA
+
+
+def _test_axi():
+    # for s in scenario_generator():
+    #     print(s)
+    #     print()
+
+    config, details, data, work = gen_config_data(dict(
+        na_in=100000,
+        na=1000000,
+        adn=0,
+        adi=1,
+        ade=4,
+        nm=10000,
+        steps=10,
+    ))
+    print("config: ", config)
+    for (k,v) in data.items():
+        print("", k, (v.shape if hasattr(v, "shape") else v))
+
+    seed = 0
+    AXY.init_model(config, details.model, seed=seed)
+
+    from tlux.math import svd
+    from tlux.plot import Plot
+    p = Plot()
+
+    axi = details.a_embeddings.T
+    vals, vecs = svd(axi)
+    print("vals: ", vals)
+    axi = axi @ (vecs[:3].T)
+    p.add('axi before', *axi.T, marker_size=2)
+    data.pop('yi_in', None)
+
+    (
+        config,
+        model,
+        rwork,
+        iwork,
+        ax_in,
+        x_in, 
+        y_in,
+        yw_in,
+        record,
+        sse,
+        info
+    ) = AXY.fit_model(
+        config=details.config,
+        model=details.model,
+        steps=details.steps,
+        record=details.record,
+        rwork=details.rwork,
+        iwork=details.iwork,
+        **data
+    )
+
+    axi = details.a_embeddings.T
+    vals, vecs = svd(axi)
+    print("vals: ", vals)
+    axi = axi @ (vecs[:3].T)
+    p.add('axi after', *axi.T, marker_size=2)
+
+    p.show()
+
+_test_axi()
 
 
 # Generate a random rotation matrix (that rotates a random amount along each axis).

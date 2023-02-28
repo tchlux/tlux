@@ -125,6 +125,7 @@ MODULE AXY
      REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT ! Rate of exponential sliding average over gradient steps.
      REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient variation.
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.05_RT ! Rate of exponential sliding average over AY (forcing mean to zero).
+     REAL(KIND=RT) :: STEP_EMB_CHANGE = 0.05_RT ! Rate of exponential sliding average over embedding mean (forcing mean to zero).
      REAL(KIND=RT) :: FASTER_RATE = 1.01_RT ! Rate of increase of optimization factors.
      REAL(KIND=RT) :: SLOWER_RATE = 0.99_RT ! Rate of decrease of optimization factors.
      REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.5_RT ! Minimum ratio of model variables to update in any optimizaiton step.
@@ -140,11 +141,11 @@ MODULE AXY
      INTEGER(KIND=INT64) :: NUM_TO_UPDATE = HUGE(0) ! Number of model variables to update (initialize to large number).
      LOGICAL(KIND=INT8) :: AX_NORMALIZED = .FALSE. ! False if AX data needs to be normalized.
      LOGICAL(KIND=INT8) :: RESCALE_AX = .TRUE. ! Rescale all AX components to be equally weighted.
-     LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .TRUE. ! False if AXI embeddings need to be normalized.
+     LOGICAL(KIND=INT8) :: AXI_NORMALIZED = .FALSE. ! False if AXI embeddings need to be normalized.
      LOGICAL(KIND=INT8) :: AY_NORMALIZED = .FALSE. ! False if aggregator outputs need to  be normalized.
      LOGICAL(KIND=INT8) :: X_NORMALIZED = .FALSE. ! False if X data needs to be normalized.
      LOGICAL(KIND=INT8) :: RESCALE_X = .TRUE. ! Rescale all X components to be equally weighted.
-     LOGICAL(KIND=INT8) :: XI_NORMALIZED = .TRUE. ! False if XI embeddings need to be normalized.
+     LOGICAL(KIND=INT8) :: XI_NORMALIZED = .FALSE. ! False if XI embeddings need to be normalized.
      LOGICAL(KIND=INT8) :: Y_NORMALIZED = .FALSE. ! False if Y data needs to be normalized.
      LOGICAL(KIND=INT8) :: RESCALE_Y = .TRUE. ! Rescale all Y components to be equally weighted.
      LOGICAL(KIND=INT8) :: ENCODE_SCALING = .FALSE. ! True if input and output weight matrices shuld embed normalization scaling.
@@ -469,7 +470,7 @@ CONTAINS
        CONFIG%NA = 0
     END IF
     IF (PRESENT(NMT)) THEN
-       NM_TOTAL = NMT
+       NM_TOTAL = MIN(NMT, NM)
     ELSE
        NM_TOTAL = NM
     END IF
@@ -1935,6 +1936,8 @@ CONTAINS
        DO D = 1, SIZE(A_EMB_VECS,2,INT64)
           A_EMB_VECS(:,D) = MATMUL(A_EMB_VECS(:,D), AXI_RESCALE(:,:))
        END DO
+       ! Renormalize the embeddings to have a consistent maximum norm.
+       A_EMB_VECS(:,:) = A_EMB_VECS(:,:) / MAXVAL(NORM2(A_EMB_VECS(:,:), 1))
        CONFIG%AXI_NORMALIZED = .TRUE.
     END IF
     ! X
@@ -1976,6 +1979,8 @@ CONTAINS
        DO D = 1, SIZE(M_EMB_VECS,2,INT64)
           M_EMB_VECS(:,D) = MATMUL(M_EMB_VECS(:,D), XI_RESCALE(:,:))
        END DO
+       ! Renormalize the embeddings to have a consistent maximum norm.
+       M_EMB_VECS(:,:) = M_EMB_VECS(:,:) / MAXVAL(NORM2(M_EMB_VECS(:,:), 1))
        CONFIG%XI_NORMALIZED = .TRUE.
     END IF
     ! Y
@@ -2107,6 +2112,7 @@ CONTAINS
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
     ! 
     CALL UNIT_MAX_NORM(CONFIG, INT(NUM_THREADS), &
+         MODEL(CONFIG%ASEV:CONFIG%AEEV), & ! A embeddings
          MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
          MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
          MODEL(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
@@ -2114,6 +2120,7 @@ CONTAINS
          MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
          MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
          AY(:,:), & ! AY values (to update shift)
+         MODEL(CONFIG%MSEV:CONFIG%MEEV), & ! M embeddings
          MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
          MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
          MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
@@ -2185,10 +2192,11 @@ CONTAINS
 
     ! Make max length vector in each weight matrix have unit length.
     SUBROUTINE UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
-         A_INPUT_VECS, A_INPUT_SHIFT, A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, &
-         M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
+         A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, &
+         M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER, INTENT(IN) :: NUM_THREADS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMBEDDINGS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
@@ -2196,18 +2204,19 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADSO, CONFIG%ADO+1) :: A_OUTPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMBEDDINGS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
       ! Local variables.
-      INTEGER :: L
+      INTEGER :: L, D
       REAL(KIND=RT) :: SCALAR
-      REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM
+      REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
-      DO L = 1, CONFIG%MNS+CONFIG%ANS+1
+      DO L = 1, CONFIG%MNS+CONFIG%ANS+3
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN
             SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
@@ -2229,19 +2238,48 @@ CONTAINS
             M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
          ! [ANS+MNS+1] -> AY
-         ELSE
+         ELSE IF (L .EQ. CONFIG%MNS+CONFIG%ANS+1) THEN
             ! Update the aggregator model output shift to produce componentwise mean-zero
             !  values (prevent divergence), but only when there is a model afterwards. 
-            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. (SIZE(AY,1,INT64) .GT. 0_INT64)) THEN
+            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
+                 (SIZE(AY,1,INT64) .GT. 0_INT64) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
                ALLOCATE(AY_SUM(1:CONFIG%ADO))
                AY_SUM(:) = SUM(AY(:,:CONFIG%ADO) / REAL(SIZE(AY,1,INT64),RT), 1)
                WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
                   AY_SUM(:) = MODEL(CONFIG%AOSS:CONFIG%AOSE)
                END WHERE
-               MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
-                    (1.0_RT - CONFIG%STEP_AY_CHANGE) * MODEL(CONFIG%AOSS:CONFIG%AOSE) &
-                  - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
+               IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
+                  MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
+                       (1.0_RT - CONFIG%STEP_AY_CHANGE) * MODEL(CONFIG%AOSS:CONFIG%AOSE) &
+                     - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
+               ELSE
+                  MODEL(CONFIG%AOSS:CONFIG%AOSE) = -AY_SUM(:)
+               END IF
                DEALLOCATE(AY_SUM)
+            END IF
+         ! [ANS+MNS+1 + 1] -> A_EMBEDDINGS
+         ELSE IF ((CONFIG%ANE .GT. 0) .AND. (L .EQ. CONFIG%MNS+CONFIG%ANS+2)) THEN
+            SCALAR = SQRT(MAXVAL(SUM(A_EMBEDDINGS(:,:)**2, 1)))
+            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
+            IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
+               ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
+               A_EMB_MEAN(:) = SUM(A_EMBEDDINGS(:,:), 2) / REAL(SIZE(A_EMBEDDINGS,2), RT)
+               DO D = 1, SIZE(A_EMBEDDINGS,1)
+                  A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - CONFIG%STEP_EMB_CHANGE * A_EMB_MEAN(D)
+               END DO
+               DEALLOCATE(A_EMB_MEAN)
+            END IF
+         ! [ANS+MNS+1 + 2] -> M_EMBEDDINGS
+         ELSE IF ((CONFIG%MNE .GT. 0) .AND. (L .EQ. CONFIG%MNS+CONFIG%ANS+3)) THEN
+            SCALAR = SQRT(MAXVAL(SUM(M_EMBEDDINGS(:,:)**2, 1)))
+            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
+            IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
+               ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
+               M_EMB_MEAN(:) = SUM(M_EMBEDDINGS(:,:), 2) / REAL(SIZE(M_EMBEDDINGS,2), RT)
+               DO D = 1, SIZE(M_EMBEDDINGS,1)
+                  M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - CONFIG%STEP_EMB_CHANGE * M_EMB_MEAN(D)
+               END DO
+               DEALLOCATE(M_EMB_MEAN)
             END IF
          END IF
       END DO
@@ -2750,6 +2788,7 @@ CONTAINS
               SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:,:),  &
               Y_GRADIENT(:,:), A_GRADS(:NA,:,:), M_GRADS(:,:,:), &
               A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), A_EMB_COUNTS(:,:), M_EMB_COUNTS(:,:))
+
          IF (INFO .NE. 0) RETURN
          ! 
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -

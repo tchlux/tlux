@@ -394,19 +394,21 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        _nm, _na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
+        full_nm, full_na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, y, yi)
         )
-        if (na is None): na = _na
-        if (nm is None): nm = _nm
+        if (na is None): na = full_na
+        else:            na = min(na, full_na)
+        if (nm is None): nm = full_nm
+        else:            nm = min(nm, full_nm)
         # Make sure NA is only as large as it practically needs to be.
         na = min(na, sum(sizes[np.argsort(sizes)[-nm:]]))
         # TODO: Move yw into the _to_array function?
         # Convert yw to a numpy array (if it is not already).
         if (yw is None):
-            yw = np.zeros((_nm,0), dtype="float32", order="C")
+            yw = np.zeros((full_nm,0), dtype="float32", order="C")
         else:
-            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((_nm,-1)), order="C")
+            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((full_nm,-1)), order="C")
         assert (yw.shape[1] in {0, 1, mdo}), f"Weights for points 'yw' {yw.shape} must have 1 column{' or '+str(mdo)+' columns' if (mdo > 0) else ''}."
         # Configure this model if requested (or not already done).
         self._init_kwargs.update(kwargs)
