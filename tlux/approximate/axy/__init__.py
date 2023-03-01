@@ -140,7 +140,6 @@ class AXY:
     def __init__(self, **kwargs):
         try:
             # Store the Fortran module as an attribute.
-            # from tlux.approximate.axy.old_axy import axy
             from tlux.approximate.axy.axy import axy
             self.AXY = axy
         except:
@@ -446,8 +445,6 @@ class AXY:
         self.AXY.new_fit_config(nm=nm, na=na, nmt=x.shape[0], nat=ax.shape[0],
                                 adi=axi.shape[1], mdi=xi.shape[1],
                                 seed=self.seed, config=self.config)
-        print("self: ", self)
-        print("self.config: ", self.config)
         rwork = np.ones(self.config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
         iwork = np.ones(self.config.iwork_size, dtype="int32")
         # Minimize the mean squared error.

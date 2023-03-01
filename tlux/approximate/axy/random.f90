@@ -22,7 +22,10 @@ CONTAINS
     CALL RANDOM_NUMBER(COLUMN_VECTORS(:,:))
     CALL RANDOM_NUMBER(TEMP_VECS(:,:))
     ! Map the random uniform numbers to a radial distribution.
-    COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
+    !   WARNING: `LOG(0.0) = -Infinity` and similarly for any values less than EPSILON.
+    WHERE (COLUMN_VECTORS(:,:) .GT. EPSILON(COLUMN_VECTORS(1,1)))
+       COLUMN_VECTORS(:,:) = SQRT(-LOG(COLUMN_VECTORS(:,:))) * COS(PI * TEMP_VECS(:,:))
+    END WHERE
     ! Orthogonalize the first K vectors in (random) order.
     IF (SIZE(COLUMN_VECTORS,1) .GT. 1) THEN
        ! Compute the last vector that is part of the orthogonalization.
@@ -30,7 +33,7 @@ CONTAINS
        ! Orthogonalize the "lazy way" without column pivoting. Could
        ! result in imperfectly orthogonal vectors (because of rounding
        ! errors being enlarged by upscaling), that is acceptable here.
-       DO I = 1, K-1
+       DO I = 1, K
           LEN = NORM2(COLUMN_VECTORS(:,I))
           ! Generate a new random vector (that might be linearly dependent on previous)
           !   when there is nothing remaining of the current vector after orthogonalization.

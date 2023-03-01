@@ -96,7 +96,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: TOTAL_SIZE
      INTEGER(KIND=INT64) :: NUM_VARS
      ! Index subsets of total size vector naming scheme:
-     !   M___ -> model,   A___ -> aggregator model
+     !   M___ -> model,   A___ -> aggregator
      !   _S__ -> start,   _E__ -> end
      !   __I_ -> input,   __S_ -> states, __O_ -> output, __E_ -> embedding
      !   ___V -> vectors, ___S -> shifts
@@ -109,14 +109,16 @@ MODULE AXY
      INTEGER(KIND=INT64) :: MSOV, MEOV             ! model output
      INTEGER(KIND=INT64) :: MSEV, MEEV             ! model embedding
      ! Index subsets for data normalization.
-     !   M___ -> model,  A___ -> aggregator (/ aggregate) model
-     !   _I__ -> input,  _O__ -> output
-     !   __S_ -> shift,  __M_ -> multiplier
+     !   M___ -> model,  A___ -> aggregator
+     !   _I__ -> input,  _O__ -> output,      _E__ -> embedding
+     !   __S_ -> shift,  __M_ -> multiplier,  _C__ -> center
      !   ___S -> start,  ___E -> end
      INTEGER(KIND=INT64) :: AISS, AISE, AOSS, AOSE
      INTEGER(KIND=INT64) :: AIMS, AIME
+     INTEGER(KIND=INT64) :: AECS, AECE
      INTEGER(KIND=INT64) :: MISS, MISE, MOSS, MOSE
      INTEGER(KIND=INT64) :: MIMS, MIME, MOMS, MOME
+     INTEGER(KIND=INT64) :: MECS, MECE
      ! Function parameter.
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
      ! Optimization related parameters.
@@ -368,11 +370,18 @@ CONTAINS
      CONFIG%AEOV = CONFIG%ASOV-1_INT64 +  CONFIG%ADSO * (CONFIG%ADO+1_INT64)
      CONFIG%TOTAL_SIZE = CONFIG%AEOV
      ! ---------------------------------------------------------------
-     ! THIS IS SPECIAL, IT IS PART OF THE MODEL AND CHANGES DURING OPTIMIZATION
      !   aggregator post-output shift [ADO]
      CONFIG%AOSS = 1_INT64 + CONFIG%TOTAL_SIZE
      CONFIG%AOSE = CONFIG%AOSS-1_INT64 + CONFIG%ADO
      CONFIG%TOTAL_SIZE = CONFIG%AOSE
+     !   aggregator embedding center [ADE]
+     CONFIG%AECS = 1_INT64 + CONFIG%TOTAL_SIZE
+     CONFIG%AECE = CONFIG%AECS-1_INT64 + CONFIG%ADE
+     CONFIG%TOTAL_SIZE = CONFIG%AECE
+     !   model embedding center [MDE]
+     CONFIG%MECS = 1_INT64 + CONFIG%TOTAL_SIZE
+     CONFIG%MECE = CONFIG%MECS-1_INT64 + CONFIG%MDE
+     CONFIG%TOTAL_SIZE = CONFIG%MECE
      ! ---------------------------------------------------------------
      !   model embedding vecs [MDE by MNE]
      CONFIG%MSEV = 1_INT64 + CONFIG%TOTAL_SIZE
@@ -686,7 +695,8 @@ CONTAINS
          MODEL(CONFIG%MSSV:CONFIG%MESV), &
          MODEL(CONFIG%MSSS:CONFIG%MESS), &
          MODEL(CONFIG%MSOV:CONFIG%MEOV), &
-         MODEL(CONFIG%MSEV:CONFIG%MEEV))
+         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
+         MODEL(CONFIG%MECS:CONFIG%MECE))
     ! 
     ! Initialize the aggregator model.
     CALL INIT_SUBMODEL(&
@@ -697,7 +707,8 @@ CONTAINS
          MODEL(CONFIG%ASSV:CONFIG%AESV), &
          MODEL(CONFIG%ASSS:CONFIG%AESS), &
          MODEL(CONFIG%ASOV:CONFIG%AEOV), &
-         MODEL(CONFIG%ASEV:CONFIG%AEEV))
+         MODEL(CONFIG%ASEV:CONFIG%AEEV), &
+         MODEL(CONFIG%AECS:CONFIG%AECE))
     ! Set the normalization shifts to zero and multipliers to the identity.
     !   aggregator input shift,
     MODEL(CONFIG%AISS:CONFIG%AISE) = 0.0_RT    
@@ -725,7 +736,7 @@ CONTAINS
     ! Initialize the model after unpacking it into its constituent parts.
     SUBROUTINE INIT_SUBMODEL(MDI, MDS, MNS, MDSO, MDO, MDE, MNE, &
          INPUT_VECS, INPUT_SHIFT, STATE_VECS, STATE_SHIFT, &
-         OUTPUT_VECS, EMBEDDINGS)
+         OUTPUT_VECS, EMBEDDINGS, EMBEDDINGS_MEAN)
       INTEGER, INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO, MDE, MNE
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDI, MDS) :: INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS) :: INPUT_SHIFT
@@ -733,6 +744,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS, MAX(0_INT64,MNS-1_INT64)) :: STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDSO, MDO) :: OUTPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE, MNE) :: EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE) :: EMBEDDINGS_MEAN
       ! Local holder for "origin" at each layer.
       REAL(KIND=RT) :: R, D
       REAL(KIND=RT), DIMENSION(MDS) :: ORIGIN ! LOCAL ALLOCATION
@@ -753,6 +765,7 @@ CONTAINS
          CALL RANDOM_NUMBER(R)
          EMBEDDINGS(:,I) = EMBEDDINGS(:,I) * R**D
       END DO
+      EMBEDDINGS_MEAN(:) = 0.0_RT
       ! Make the output vectors have very small magnitude initially.
       OUTPUT_VECS(:,:) = OUTPUT_VECS(:,:) * OUTPUT_SCALE
       ! Generate deterministic equally spaced shifts for inputs and internal layers, 
@@ -1877,6 +1890,7 @@ CONTAINS
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: Y_SCALE ! LOCAL ALLOCATION
     LOGICAL :: NORMALIZE
     INTEGER(KIND=INT64) :: D, E, NA
+    REAL(KIND=RT) :: SCALAR
     REAL :: CPU_TIME_START, CPU_TIME_END
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
@@ -1937,7 +1951,10 @@ CONTAINS
           A_EMB_VECS(:,D) = MATMUL(A_EMB_VECS(:,D), AXI_RESCALE(:,:))
        END DO
        ! Renormalize the embeddings to have a consistent maximum norm.
-       A_EMB_VECS(:,:) = A_EMB_VECS(:,:) / MAXVAL(NORM2(A_EMB_VECS(:,:), 1))
+       SCALAR = MAXVAL(SUM(A_EMB_VECS(:,:)**2, 1))
+       IF (SCALAR .GT. 0.0_RT) THEN
+          A_EMB_VECS(:,:) = A_EMB_VECS(:,:) / SQRT(SCALAR)
+       END IF
        CONFIG%AXI_NORMALIZED = .TRUE.
     END IF
     ! X
@@ -1980,7 +1997,10 @@ CONTAINS
           M_EMB_VECS(:,D) = MATMUL(M_EMB_VECS(:,D), XI_RESCALE(:,:))
        END DO
        ! Renormalize the embeddings to have a consistent maximum norm.
-       M_EMB_VECS(:,:) = M_EMB_VECS(:,:) / MAXVAL(NORM2(M_EMB_VECS(:,:), 1))
+       SCALAR = MAXVAL(SUM(M_EMB_VECS(:,:)**2, 1))
+       IF (SCALAR .GT. 0.0_RT) THEN
+          M_EMB_VECS(:,:) = M_EMB_VECS(:,:) / SQRT(SCALAR)
+       END IF
        CONFIG%XI_NORMALIZED = .TRUE.
     END IF
     ! Y
@@ -2112,6 +2132,7 @@ CONTAINS
     ! Maintain a constant max-norm across the magnitue of input and internal vectors.
     ! 
     CALL UNIT_MAX_NORM(CONFIG, INT(NUM_THREADS), &
+         MODEL(CONFIG%AECS:CONFIG%AECE), & ! A embeddings mean
          MODEL(CONFIG%ASEV:CONFIG%AEEV), & ! A embeddings
          MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
          MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
@@ -2120,6 +2141,7 @@ CONTAINS
          MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
          MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
          AY(:,:), & ! AY values (to update shift)
+         MODEL(CONFIG%MECS:CONFIG%MECE), & ! M embeddings mean
          MODEL(CONFIG%MSEV:CONFIG%MEEV), & ! M embeddings
          MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
          MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
@@ -2192,10 +2214,13 @@ CONTAINS
 
     ! Make max length vector in each weight matrix have unit length.
     SUBROUTINE UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
-         A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, &
-         M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
+         A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, &
+         A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, &
+         M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, &
+         M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER, INTENT(IN) :: NUM_THREADS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE) :: A_EMBEDDINGS_MEAN
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMBEDDINGS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
@@ -2204,6 +2229,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADSO, CONFIG%ADO+1) :: A_OUTPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE) :: M_EMBEDDINGS_MEAN
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMBEDDINGS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
@@ -2216,7 +2242,7 @@ CONTAINS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
-      DO L = 1, CONFIG%MNS+CONFIG%ANS+3
+      DO L = 1, CONFIG%MNS+CONFIG%ANS
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN
             SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
@@ -2237,52 +2263,93 @@ CONTAINS
             SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
             M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
-         ! [ANS+MNS+1] -> AY
-         ELSE IF (L .EQ. CONFIG%MNS+CONFIG%ANS+1) THEN
-            ! Update the aggregator model output shift to produce componentwise mean-zero
-            !  values (prevent divergence), but only when there is a model afterwards. 
-            IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
-                 (SIZE(AY,1,INT64) .GT. 0_INT64) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
-               ALLOCATE(AY_SUM(1:CONFIG%ADO))
-               AY_SUM(:) = SUM(AY(:,:CONFIG%ADO) / REAL(SIZE(AY,1,INT64),RT), 1)
-               WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
-                  AY_SUM(:) = MODEL(CONFIG%AOSS:CONFIG%AOSE)
-               END WHERE
-               IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
-                  MODEL(CONFIG%AOSS:CONFIG%AOSE) = &
-                       (1.0_RT - CONFIG%STEP_AY_CHANGE) * MODEL(CONFIG%AOSS:CONFIG%AOSE) &
-                     - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
-               ELSE
-                  MODEL(CONFIG%AOSS:CONFIG%AOSE) = -AY_SUM(:)
-               END IF
-               DEALLOCATE(AY_SUM)
-            END IF
-         ! [ANS+MNS+1 + 1] -> A_EMBEDDINGS
-         ELSE IF ((CONFIG%ANE .GT. 0) .AND. (L .EQ. CONFIG%MNS+CONFIG%ANS+2)) THEN
-            SCALAR = SQRT(MAXVAL(SUM(A_EMBEDDINGS(:,:)**2, 1)))
-            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
-            IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
-               ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
-               A_EMB_MEAN(:) = SUM(A_EMBEDDINGS(:,:), 2) / REAL(SIZE(A_EMBEDDINGS,2), RT)
-               DO D = 1, SIZE(A_EMBEDDINGS,1)
-                  A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - CONFIG%STEP_EMB_CHANGE * A_EMB_MEAN(D)
-               END DO
-               DEALLOCATE(A_EMB_MEAN)
-            END IF
-         ! [ANS+MNS+1 + 2] -> M_EMBEDDINGS
-         ELSE IF ((CONFIG%MNE .GT. 0) .AND. (L .EQ. CONFIG%MNS+CONFIG%ANS+3)) THEN
-            SCALAR = SQRT(MAXVAL(SUM(M_EMBEDDINGS(:,:)**2, 1)))
-            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
-            IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
-               ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
-               M_EMB_MEAN(:) = SUM(M_EMBEDDINGS(:,:), 2) / REAL(SIZE(M_EMBEDDINGS,2), RT)
-               DO D = 1, SIZE(M_EMBEDDINGS,1)
-                  M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - CONFIG%STEP_EMB_CHANGE * M_EMB_MEAN(D)
-               END DO
-               DEALLOCATE(M_EMB_MEAN)
-            END IF
          END IF
       END DO
+      ! AY_SHIFT
+      ! 
+      ! Update the aggregator model output shift to produce componentwise mean-zero
+      !  values (prevent divergence), but only when there is a model afterwards. 
+      IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
+           (SIZE(AY,1,INT64) .GT. 0_INT64) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
+         ALLOCATE(AY_SUM(1:CONFIG%ADO))
+         AY_SUM(:) = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
+         DO D = 1, SIZE(AY,1,INT64)
+            AY_SUM(:) = AY_SUM(:) + AY(D,:CONFIG%ADO) / REAL(SIZE(AY,1,INT64),RT)
+         END DO
+         WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
+            AY_SUM(:) = -AY_SHIFT(:)
+         END WHERE
+         IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
+            AY_SHIFT(:) = &
+                 (1.0_RT - CONFIG%STEP_AY_CHANGE) * AY_SHIFT(:) &
+               - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
+         ELSE
+            AY_SHIFT(:) = -AY_SUM(:)
+         END IF
+         DEALLOCATE(AY_SUM)
+      END IF
+      ! A_EMBEDDINGS
+      IF (CONFIG%ANE .GT. 0) THEN
+         SCALAR = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
+         DO D = 1, SIZE(A_EMBEDDINGS,2)
+            SCALAR = MAX(SCALAR, SUM(A_EMBEDDINGS(:,D)**2))
+         END DO
+         SCALAR = SQRT(SCALAR)
+         IF (SCALAR .GT. 0.0_RT) THEN
+            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
+         END IF
+         ! Update the exponential trailing mean term and subtract it from current values.
+         IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
+            ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
+            A_EMB_MEAN(:) = 0.0_RT
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
+            DO D = 1, SIZE(A_EMBEDDINGS,2)
+               A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDINGS(:,D) / REAL(SIZE(A_EMBEDDINGS,2),RT)
+            END DO
+            ! Update the embeddings center (and in turn the shift).
+            A_EMBEDDINGS_MEAN(:) = &
+                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * A_EMBEDDINGS_MEAN(:) + &
+                 (         CONFIG%STEP_EMB_CHANGE) * A_EMB_MEAN(:)
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+            DO D = 1, SIZE(A_EMBEDDINGS,1)
+               A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - A_EMBEDDINGS_MEAN(D)
+            END DO
+            DEALLOCATE(A_EMB_MEAN)
+         END IF
+      END IF
+      ! M_EMBEDDINGS
+      IF (CONFIG%MNE .GT. 0) THEN
+         SCALAR = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
+         DO D = 1, SIZE(M_EMBEDDINGS,2)
+            SCALAR = MAX(SCALAR, SUM(M_EMBEDDINGS(:,D)**2))
+         END DO
+         SCALAR = SQRT(SCALAR)
+         IF (SCALAR .GT. 0.0_RT) THEN
+            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
+         END IF
+         ! Update the exponential trailing mean term and subtract it from current values.
+         IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
+            ALLOCATE(M_EMB_MEAN(1:CONFIG%ADE))
+            M_EMB_MEAN(:) = 0.0_RT
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:M_EMB_MEAN)
+            DO D = 1, SIZE(M_EMBEDDINGS,2)
+               M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDINGS(:,D) / REAL(SIZE(M_EMBEDDINGS,2),RT)
+            END DO
+            ! Update the embeddings center (and in turn the shift).
+            M_EMBEDDINGS_MEAN(:) = &
+                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * M_EMBEDDINGS_MEAN(:) + &
+                 (         CONFIG%STEP_EMB_CHANGE) * M_EMB_MEAN(:)
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+            DO D = 1, SIZE(M_EMBEDDINGS,1)
+               M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - M_EMBEDDINGS_MEAN(D)
+            END DO
+            DEALLOCATE(M_EMB_MEAN)
+         END IF
+      END IF
+
     END SUBROUTINE UNIT_MAX_NORM
 
     ! Check the rank of all internal states.
@@ -2788,7 +2855,6 @@ CONTAINS
               SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:,:),  &
               Y_GRADIENT(:,:), A_GRADS(:NA,:,:), M_GRADS(:,:,:), &
               A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), A_EMB_COUNTS(:,:), M_EMB_COUNTS(:,:))
-
          IF (INFO .NE. 0) RETURN
          ! 
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
