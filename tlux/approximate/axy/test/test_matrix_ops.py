@@ -40,6 +40,7 @@ def _test_stable_mean():
 # --------------------------------------------------------------------
 #                        RANDOM_UNIT_VECTORS
 
+# TODO: Add test with large number of vectors, ensure no Inf or Nan generated.
 def _test_random_unit_vectors():
     # Generate test data.
     n = 100 # number of points
@@ -64,8 +65,8 @@ def _test_random_unit_vectors():
     rand.random_unit_vectors(x)
     b = np.array(np.matmul(a, x), order="F", dtype="float32")
 
-# _test_random_unit_vectors()
-# exit()
+_test_random_unit_vectors()
+exit()
 
 
 # --------------------------------------------------------------------

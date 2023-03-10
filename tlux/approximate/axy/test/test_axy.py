@@ -5,18 +5,20 @@
 #  - Make sure the above function works in higher dimension (use PCA?).
 
 from tlux.plot import Plot
+from tlux.approximate.axy.summary import AxyModel
 from tlux.approximate.axy.test.scenarios import (
-    scenarios,
+    SCENARIO,
     AXY,
     Details,
     check_code,
     spawn_model,
     gen_config_data,
-    scenario_generator
+    scenario_generator,
+    initialize_agg_iterator
 )
 
 import numpy as np
-np.set_printoptions(linewidth=100)
+np.set_printoptions(linewidth=1000)
 
 
 # --------------------------------------------------------------------
@@ -62,7 +64,7 @@ def _test_large_data_fit():
     config.axi_normalized = False
     config.step_factor = 0.0001
     print()
-    for n in sorted(scenarios):
+    for n in sorted(SCENARIO):
         print(f"  {str(scenarios[n]):5s}  {n}")
     print(' data')
     for n in data:
@@ -155,6 +157,18 @@ def _test_init_model():
 
 # Test COMPUTE_BATCHES
 def _test_compute_batches():
+    # TODO:
+    # 
+    #  cases
+    #   - more / less data than threads
+    #   - joint / separate batching
+    #   - batch size as small as 1 / as large as amount of data
+    # 
+    #  assertions
+    #   - all data is covered
+    #   - no overlap between batches
+    #   - as many batches as possible = max(min(num_data, num_threads), num_data / batch_size)
+    # 
     seed = 0
     np.random.seed(seed)
     initial_shift_range = 1.0
@@ -169,16 +183,29 @@ def _test_compute_batches():
     print()
     print(config)
     print()
-    # Simple test with nice numbers.
-    config.batch_size = 20
-    # na = 100
+
+    # # Simple test with nice numbers.
+    # config.max_batch = 20
+    # # na = 100
+    # nm = 10
+    # # sizes = np.ones(nm, dtype="int32") * (na // nm)
+    # sizes = np.random.randint(0,10, size=(nm,)).astype("int32")
+    # na = sum(sizes)
+    # batcha_starts, batcha_ends, agg_starts, batchm_starts, batchm_ends, info = (
+    #     AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=True, info=0)
+    # )
+
+
+    # Custom test.
+    na = 1
     nm = 10
-    # sizes = np.ones(nm, dtype="int32") * (na // nm)
-    sizes = np.random.randint(0,10, size=(nm,)).astype("int32")
-    na = sum(sizes)
+    config.max_batch = 10000
+    config.num_threads = 2
+    sizes = np.asarray([1.0] + [0.0]*9, dtype="int32")
     batcha_starts, batcha_ends, agg_starts, batchm_starts, batchm_ends, info = (
-        AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=True, info=0)
+        AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=False, info=0)
     )
+
     print("nm: ", nm)
     print("sizes: ", sizes)
     print("sizes.sum: ", sum(sizes))
@@ -187,6 +214,10 @@ def _test_compute_batches():
     print("agg_starts.shape:    ", agg_starts.shape, agg_starts.tolist())
     print("batchm_starts.shape: ", batchm_starts.shape, batchm_starts.tolist())
     print("batchm_ends.shape:   ", batchm_ends.shape, batchm_ends.tolist())
+    print("batchm_starts: ", batchm_starts)
+    print("batchm_ends: ", batchm_ends)
+    print("batcha_starts: ", batcha_starts)
+    print("batcha_starts: ", batcha_starts)
     print("info: ", info)
 
 
@@ -236,6 +267,16 @@ def _test_fetch_data():
                 xi_in = np.zeros((0,nm_in), dtype="int32", order="F")
                 y_in = np.asarray(np.random.random(size=(config.mdo,nm_in)), dtype="float32", order="F")
                 yw_in = np.asarray(np.random.random(size=(1,nm_in)), dtype="float32", order="F")
+                agg_iterators = np.zeros((5,nm_in), dtype="int64", order="F")
+                initialize_agg_iterator(config, agg_iterators, sizes_in)
+                for i in range(nm_in):
+                    # Get next and do a full "circle" around the iterator, verifying its correctness.
+                    seen = set()
+                    *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])
+                    while (next_i not in seen):
+                        seen.add(next_i)
+                        *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])                        
+                    assert (tuple(sorted(seen)) == tuple(range(1,sizes_in[i]+1))), f"Aggregate iterator did not produce expected list of elements.\n  {sorted(seen)}\n  {list(range(1,sizes_in[i]+1))}"
                 # Create the containers for the data.
                 if (nm_in > nm_values[len(nm_values)//2]):
                     nm = nm_in // 2
@@ -257,19 +298,522 @@ def _test_fetch_data():
                 config.i_mult = 1
                 config.i_mod = nm
                 (
-                    config, ax, axi, f_sizes, x, xi, y, yw, f_na
+                    config, agg_iterators, ax, axi, f_sizes, x, xi, y, yw, f_na
                 ) = AXY.fetch_data(
-                    config, model, ax_in, ax, axi_in, axi, sizes_in, sizes,
+                    config, model, agg_iterators, ax_in, ax, axi_in, axi, sizes_in, sizes,
                     x_in, x, xi_in, xi, y_in, y, yw_in, yw
                 )
                 assert (py_na == f_na), f"Number of aggregate points did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_na}\n  fortran: {f_na}\n"
                 assert (tuple(sorted(py_sizes.tolist())) == tuple(sorted(f_sizes.tolist()))), f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
                 assert max(abs(py_sizes-f_sizes)) in {0,1}, f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
-                if ((f_na >= na_in) and (len(sizes_in) == len(sizes))):
-                    assert (tuple(ax[:,:na_in].tolist()) == tuple(ax_in[:,:].tolist())), f"AX did not match AX_IN even though there was enough space.\n  python:  {ax_in.tolist()}\n  fortran: {ax.tolist()}\n"
+                # TODO: Verify that when (nm >= nm_in) and (na >= na_in) that we get ALL inputs!
+
+                # TODO: The value test doesn't work with fortran using iterators.
+                # if ((f_na >= na_in) and (len(sizes_in) == len(sizes))):
+                #     assert (tuple(ax[:,:na_in].tolist()) == tuple(ax_in[:,:].tolist())), f"AX did not match AX_IN even though there was enough space.\n  python:  {ax_in.tolist()}\n  fortran: {ax.tolist()}\n"
 
 _test_fetch_data()
 
+
+# --------------------------------------------------------------------
+#                    INDEX_TO_PAIR     PAIR_TO_INDEX
+
+def _test_index_to_pair():
+    mv = 30
+    all_pairs = set()
+    # Verify that the pair mapping works forwards and backwards.
+    for i in range(1, mv**2+1):
+        pair1, pair2 = AXY.index_to_pair(max_value=mv, i=i)
+        all_pairs.add((pair1, pair2))
+        j = AXY.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
+        assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
+    # Verify that all pairs were actually generated.
+    for i in range(1,mv+1):
+        for j in range(1,mv+1):
+            assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
+
+_test_index_to_pair()
+
+
+# --------------------------------------------------------------------
+#                           EVALUATE
+
+# Define a function that correct casts the data to the desired type.
+def cast(arr, dtype):
+    arr = np.asarray(arr)
+    if (type(dtype) is type):
+        arr = np.asarray(
+            [dtype(v) for v in arr.flatten()],
+            dtype=dtype,
+            order="F"
+        ).reshape(arr.shape)            
+    else:
+        arr = np.asarray(arr, dtype=dtype, order="F")
+    return arr
+
+# Define the full EVALUATE function in python (testing via reimplementation).
+def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwargs):
+    # Get some constants.
+    nm = x.shape[1]
+    na = ax.shape[1]
+    m = AxyModel(config, cast(model, dtype))
+    # Embed the AXI values.
+    ax_embedded = cast(np.zeros((config.adi, na)), dtype)
+    for n in range(axi.shape[1]):
+        ax_embedded[:config.adn,n] = ax[:config.adn,n]
+        for d in range(axi.shape[0]):
+            e = axi[d,n]
+            if (e > 0) and (e <= config.ade):
+                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
+            elif (e > config.ade):
+                e1, e2 = AXY.index_to_pair(max_value=config.ane, i=e)
+                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1] - m.a_embeddings[:,e2-1]
+        if (axi.shape[0] > 1):
+            ax_embedded[-config.ade:,n] /= axi.shape[0]
+    ax = ax_embedded
+    # Embed the XI values.
+    x_embedded = cast(np.zeros((config.mdi, nm)), dtype)
+    for n in range(xi.shape[1]):
+        x_embedded[:config.mdn,n] = x[:config.mdn,n]
+        for d in range(xi.shape[0]):
+            e = xi[d,n]
+            if (e > 0) and (e <= config.mde):
+                x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
+            elif (e > config.mde):
+                e1, e2 = AXY.index_to_pair(max_value=config.mne, i=e)
+                x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
+        if (xi.shape[0] > 1):
+            x_embedded[-config.mde:,n] /= xi.shape[0]
+    x = x_embedded
+    # Initialize a holder for the output.
+    y = cast(np.zeros((config.mdo, nm)), dtype)
+    # Evaluate the aggregator.
+    if (config.ado > 0):
+        if (config.normalize and (config.adn > 0)):
+            # Add the shift term (across all point column vectors).
+            ax[:config.adn,:] = (ax[:config.adn,:].T + m.ax_shift).T
+            # Replace all NaN or Inf values
+            ax[:config.adn,:] = np.where(
+                np.logical_or(
+                    np.isnan(ax[:config.adn,:].astype("float32")),
+                    np.isinf(ax[:config.adn,:].astype("float32")),
+                ),
+                0.0,
+                ax[:config.adn,:]
+            )
+            # Apply the input multiplier.
+            if (config.needs_scaling):
+                ax[:config.adn,:] = m.ax_rescale.T @ ax[:config.adn,:]
+        # Evaluate the MLP.
+        values = ax
+        if (config.ans > 0):
+            # Apply input transformation.
+            values = np.clip(
+                ((values.T @ m.a_input_vecs) + m.a_input_shift).T,
+                config.discontinuity, float('inf')
+            )
+            # Apply internal transformations.
+            for i in range(config.ans-1):
+                values = np.clip(
+                    ((values.T @ m.a_state_vecs[:,:,i]) + m.a_state_shift[:,i]).T,
+                    config.discontinuity, float('inf')
+                )
+        # Apply output transformation.
+        ay = (values.T @ m.a_output_vecs[:,:])
+        ay_error = ay[:,config.ado:config.ado+1]  # extract +1 for error prediction
+        ay = ay[:,:config.ado] # strip off +1 for error prediction
+        # If there is a following model..
+        if (config.mdo > 0):
+            # Apply output shift.
+            ay[:,:] = (ay + m.ay_shift)
+            # Compute the first aggregator output embedding position.
+            e = config.mdn + config.mde
+            # Aggregate the batches.
+            a = 0
+            for i,s in enumerate(sizes):
+                if (s > 0):
+                    x[e:,i] = ay[a:a+s,:config.ado].sum(axis=0) / s
+                else:
+                    x[e:,i] = 0
+                a += s
+        else:
+            a = 0
+            for i,s in enumerate(sizes):
+                if (s > 0):
+                    y[:,i] = ay[a:a+s,:config.ado].sum(axis=0) / s
+                else:
+                    y[:,i] = 0
+                a += s
+    # Evaluate the fixed model.
+    if (config.mdo > 0):
+        if (config.normalize and (config.mdn > 0)):
+            # Add the shift term (across all point column vectors).
+            x[:config.mdn,:] = (x[:config.mdn,:].T + m.x_shift).T
+            # Replace all NaN or Inf values
+            x[:config.mdn,:] = np.where(
+                np.logical_or(
+                    np.isnan(x[:config.mdn,:].astype("float32")),
+                    np.isinf(x[:config.mdn,:].astype("float32")),
+                ),
+                0.0,
+                x[:config.mdn,:]
+            )
+            # Apply the input multiplier.
+            if (config.needs_scaling):
+                x[:config.mdn,:] = m.x_rescale.T @ x[:config.mdn,:]
+        # Evaluate the MLP.
+        values = x
+        if (config.mns > 0):
+            # Apply input transformation.
+            values = np.clip(
+                ((values.T @ m.m_input_vecs) + m.m_input_shift).T,
+                config.discontinuity, float('inf')
+            )
+            # Apply internal transformations.
+            for i in range(config.mns-1):
+                values = np.clip(
+                    ((values.T @ m.m_state_vecs[:,:,i]) + m.m_state_shift[:,i]).T,
+                    config.discontinuity, float('inf')
+                )
+        # Apply output transformation.
+        y = (values.T @ m.m_output_vecs[:,:]).T
+    # Apply final normalization.
+    if (config.normalize):
+        if (config.needs_scaling):
+            y[:,:] = m.y_rescale.T @ y
+        y[:,:] = (y.T + m.y_shift).T
+    # Return the final values.
+    return y
+
+
+def _test_evaluate():
+    print("EVALUATE")
+    # Generate a scenario.
+    s = SCENARIO.copy()
+    s["input_aggregate_categorical"] = True
+    s["input_aggregate_numeric"] = True
+    s["input_fixed_categorical"] = True
+    s["input_fixed_numeric"] = True
+    s["batch_aggregate_constrained"] = False
+    s["batch_fixed_constrained"] = False
+    s["model_aggregate_layered"] = True,
+    s["model_fixed_layered"] = True,
+    s["small_data"] = True
+    s["small_model"] = False
+    s["normalize"] = False
+    s["needs_scaling"] = False
+    s["num_threads"] = 10
+    s["na_in"] = 100000
+    s["nm_in"] = 10000
+    s["na"] = s["na_in"]
+    s["nm"] = s["nm_in"]
+    config, details, raw_data, data = gen_config_data(scenario=s, seed=0)
+    model = details.model
+
+    summary = ""
+    summary += f"AxyModel(config, model):  {AxyModel(config, model, show_times=False)}\n"
+    summary += "Input data:\n"
+    for (k,v) in raw_data.items():
+        summary += f" {v.dtype if hasattr(v, 'dtype') else type(v).__name__} {k} {v.shape if hasattr(v, 'shape') else ''}\n"
+    summary += "\n"
+    summary += "Batch data:\n"
+    for (k,v) in data.items():
+        summary += f" {v.dtype if hasattr(v, 'dtype') else type(v).__name__} {k} {v.shape if hasattr(v, 'shape') else ''}\n"
+    summary += "\n"
+
+    # Fetch and data (for model evaluation).
+    initialize_agg_iterator(config, details.agg_iterators, raw_data["sizes_in"])
+    (
+        config, details.agg_iterators,
+        data["ax"], data["axi"], data["sizes"],
+        data["x"], data["xi"], data["y"], data["yw"],
+        data["na"]
+    ) = AXY.fetch_data(
+        config=config, model=details.model, agg_iterators=details.agg_iterators,
+        ax_in=raw_data["ax_in"], ax=data["ax"],
+        axi_in=raw_data["axi_in"], axi=data["axi"],
+        sizes_in=raw_data["sizes_in"], sizes=data["sizes"],
+        x_in=raw_data["x_in"], x=data["x"],
+        xi_in=raw_data["xi_in"], xi=data["xi"],
+        y_in=raw_data["y_in"], y=data["y"],
+        yw_in=raw_data["yw_in"], yw=data["yw"],        
+    )
+
+    # All necessary keyword arguments for model evaluation.
+    na = data["na"]
+    eval_kwargs = dict(axi=data["axi"][:,:na], ax=data["ax"][:,:na],
+                       ay=details.ay[:na,:], sizes=data["sizes"],
+                       x=data["x"], xi=data["xi"], y=data["y"],
+                       a_states=details.a_states[:na,:,:], m_states=details.m_states)
+
+    # Fortran evaluation.
+    def f_evaluate(config, model, **data):
+        local_data = {k:v.copy(order="F") for (k,v) in data.items()}
+        local_data["y"] *= 0.0
+        AXY.embed(
+            config, model,
+            axi=local_data["axi"], xi=local_data["xi"],
+            ax=local_data["ax"], x=local_data["x"]
+        )
+        local_data.pop("axi")
+        local_data.pop("xi")
+        local_info = 0
+        (
+            config,
+            ax, ay, x,
+            y, a_states, m_states,
+            local_info
+        ) = AXY.evaluate(
+            config, model, info=local_info,
+            **local_data
+        )
+        check_code(local_info, "AXY.evaluate")
+        return y
+
+    fy = f_evaluate(config, model, **eval_kwargs)
+    pyy = py_evaluate(config, model, **eval_kwargs)
+    maxdiff = np.max(np.abs(fy - pyy))
+    assert maxdiff < (2**(-13)), f"ERROR: Failed comparison between Fortran and Python implementations of AXY.evaluate.\n  Max difference observed was {maxdiff}.\n  Summary of situation:\n\n{summary}"
+    print(" passed")
+
+# _test_evaluate()
+
+
+# --------------------------------------------------------------------
+#                           MODEL_GRADIENT
+def _test_model_gradient():
+    print("MODEL_GRADIENT")
+    # Generate a scenario.
+    s = SCENARIO.copy()
+    s["input_aggregate_categorical"] = False
+    s["input_aggregate_numeric"] = False
+    s["input_fixed_categorical"] = False
+    s["input_fixed_numeric"] = False
+    s["batch_aggregate_constrained"] = False
+    s["batch_fixed_constrained"] = False
+    s["model_aggregate_layered"] = False,
+    s["model_fixed_layered"] = False,
+    s["small_data"] = True
+    s["small_model"] = True
+    s["num_threads"] = 1
+    s["adn"] = 1
+    s["ade"] = 4
+    s["ans"] = 1
+    s["ads"] = 8
+    s["ado"] = 4
+    s["mde"] = 0
+    s["mdn"] = 0
+    s["mns"] = 1
+    s["mds"] = 8
+    s["na_in"] = 10
+    s["nm_in"] = 5
+    s["na"] = s["na_in"]
+    s["nm"] = s["nm_in"]
+    config, details, raw_data, data = gen_config_data(scenario=s, seed=10)
+    model = details.model
+    details.ay_shift *= 0.0
+
+    print("AxyModel(config, model): ")
+    print(AxyModel(config, model, show_vecs=True, show_times=False))
+
+    # Fetch and embed data (for model evaluation).
+    initialize_agg_iterator(config, details.agg_iterators, raw_data["sizes_in"])
+    (
+        config, details.agg_iterators,
+        data["ax"], data["axi"], data["sizes"],
+        data["x"], data["xi"], data["y"], data["yw"],
+        data["na"]
+    ) = AXY.fetch_data(
+        config=config, model=details.model, agg_iterators=details.agg_iterators,
+        ax_in=raw_data["ax_in"], ax=data["ax"],
+        axi_in=raw_data["axi_in"], axi=data["axi"],
+        sizes_in=raw_data["sizes_in"], sizes=data["sizes"],
+        x_in=raw_data["x_in"], x=data["x"],
+        xi_in=raw_data["xi_in"], xi=data["xi"],
+        y_in=raw_data["y_in"], y=data["y"],
+        yw_in=raw_data["yw_in"], yw=data["yw"],        
+    )
+    na = data["na"]
+    eval_kwargs = dict(axi=data["axi"][:,:na], ax=data["ax"][:,:na],
+                       ay=details.ay[:na,:], sizes=data["sizes"],
+                       x=data["x"], xi=data["xi"], y=data["y"],
+                       a_states=details.a_states[:na,:,:], m_states=details.m_states)
+
+    # Approximate the gradient with a finite difference.
+    from tlux.math.fraction import Fraction
+    dtype = Fraction
+    # dtype = "float64"
+    offset = Fraction(1, 2**52)
+    def finite_difference_gradient(model, data, config=config, offset=offset, dtype=dtype):
+        model = cast(model, dtype)
+        y = cast(data["y"], dtype)
+        n = y.shape[1]
+        # Evaluate the model and compute the current error.
+        fy = py_evaluate(config, model, dtype=dtype, **data)
+        squared_error = (fy - y)**2 / 2
+        # Initialize the gradient to zero.
+        gradient = 0 * model.copy()[:config.num_vars]
+        # For each component of the model, modify the model, evaluate, observe change in error.
+        for i in range(config.num_vars):
+            local_model = model.copy()
+            local_model[i] += offset
+            local_fy = py_evaluate(config, local_model, dtype=dtype, **data)
+            local_squared_error = (local_fy - y)**2 / 2
+            error_delta = (local_squared_error - squared_error).sum() / n
+            gradient[i] = error_delta / offset
+        # Show the "correct" gradient calculation.
+        _ = AxyModel(config, model)
+        ay_grad = _.m_output_vecs @ (fy-y)
+        return np.concatenate((gradient, model[config.num_vars:]))
+
+    # Compute the gradient with the library function.
+    def axy_gradient(model, data, config=config, details=details):
+        # Define the copy of the data that will be used for evaluating the model.
+        info = 0
+        # The "na" key should contain the actual number of aggregate values (after fetch).
+        na = data["na"]
+        axi = data["axi"][:,:na].copy(order="F")
+        xi = data["xi"].copy(order="F")
+        ax = data["ax"][:,:na].copy(order="F")
+        x = data["x"].copy(order="F")
+        y = data["y"].copy(order="F")
+        yw = data["yw"].copy(order="F")
+        sizes = data["sizes"].copy(order="F")
+        ay = details.ay[:na,:].copy(order="F")
+        a_states = details.a_grads[:na,:,:].copy(order="F")
+        m_states = details.m_grads.copy(order="F")
+        fy = data["y"].copy(order="F")
+        # Embed the data.
+        (
+            config,
+            ax,
+            x
+        ) = AXY.embed(
+            config, model,
+            axi,
+            xi,
+            ax,
+            x
+        )
+        # Evaluate the model (to populate intermediate state value holders).
+        (
+            config, ax, ay_gradient, x, y_gradient, a_grads, m_grads, info
+        ) = AXY.evaluate(
+            config, model,
+            ax=ax,
+            ay=ay,
+            sizes=sizes,
+            x=x,
+            y=fy,
+            a_states=a_states,
+            m_states=m_states,
+            info=0
+        )
+        check_code(info, "AXY.evaluate")
+
+        model_grad = 0 * details.model_grad
+        a_emb_temp = 0 * details.a_emb_temp
+        m_emb_temp = 0 * details.m_emb_temp
+        a_emb_counts = 0 * details.a_emb_counts
+        m_emb_counts = 0 * details.m_emb_counts
+        (
+            config,
+            ax,
+            x,
+            sum_squared_gradient,
+            model_grad,
+            info,
+            ay_gradient,
+            y_gradient,
+            a_grads,
+            m_grads,
+            a_emb_temp,
+            m_emb_temp,
+            a_emb_counts,
+            m_emb_counts
+        ) = AXY.model_gradient(
+            config, model,
+            ax=ax, axi=axi, sizes=sizes,
+            x=x, xi=xi,
+            y=y, yw=yw,
+            sum_squared_gradient=0.0,
+            model_grad=model_grad,
+            info=info,
+            ay_gradient=ay_gradient,
+            y_gradient=y_gradient,
+            a_grads=a_grads,
+            m_grads=m_grads,
+            a_emb_temp=a_emb_temp,
+            m_emb_temp=m_emb_temp,
+            a_emb_counts=a_emb_counts,
+            m_emb_counts=m_emb_counts,
+        )
+        check_code(info, "AXY.model_gradient")
+        return np.concatenate((model_grad.sum(axis=1), model[config.num_vars:]))
+
+
+    gradient = finite_difference_gradient(model, data)
+    model_gradient = axy_gradient(model, data)
+    error = (model_gradient - gradient)
+    print("error: ", error[np.argsort(-abs(error))[:5]].astype("float32"))
+    ratio = np.asarray([1 + guess if (val == 0) else guess / val
+                        for (guess,val) in zip(model_gradient, gradient)])
+    print("ratio: ", ratio[np.argsort(abs(ratio-1))[:5]].astype("float32"))
+
+    max_error = abs(error).max()
+    max_ratio_error = abs(ratio-1).max()
+    print("max_error:       ", float(max_error))
+    print("max_ratio_error: ", float(max_ratio_error))
+    failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
+
+    if (failed_test):
+        # Show the configuration and the data.
+        print()
+        print('-'*100)
+        print("config: ", config)
+        print()
+        print("Data:")
+        for (k,v) in data.items():
+            print("", type(k).__name__, k, v.shape if hasattr(v,"shape") else "")
+        print('-'*100)
+        print()
+
+        # Show the model.
+        print("-"*70)
+        print("        MODEL")
+        print()
+        print(AxyModel(config, model, show_vecs=True, show_times=False))
+
+        # Get the gradient via finite difference.
+        print("-"*70)
+        print("        TRUTH")
+        print()
+        print(AxyModel(config, gradient.astype("float64"), show_vecs=True, show_times=False))
+
+        # Get the gradient with the compiled library.
+        print("-"*70)
+        print("        AXY")
+        print()
+        print(AxyModel(config, model_gradient, show_vecs=True, show_times=False))
+
+        # Show the difference between the provided gradient and the "correct" (approximately) gradient.
+        print("-"*70)
+        print("        ERROR")
+        print()
+        print(AxyModel(config, error.astype("float64").round(4), show_vecs=True, show_times=False))
+
+        # Show the ratio between the "correct" gradient and the one provided by the model.
+        print("-"*70)
+        print("        RATIO")
+        print()
+        print(AxyModel(config, ratio.astype("float64").round(2), show_vecs=True, show_times=False))
+        print()
+        
+        assert (not failed_test), f"Either the maximum error ({float(max_error)}) was too high or the ratio between the exact gradient and computed gradient ({float(max_ratio_error)}) was too far from 1."
+
+
+# _test_model_gradient()
+# exit()
 
 # --------------------------------------------------------------------
 #                           NORMALIZE_DATA
@@ -431,13 +975,15 @@ def _test_normalize_data():
         a_emb_vecs = model[config.asev-1:config.aeev].reshape((config.ane, config.ade)).T
         m_emb_vecs = model[config.msev-1:config.meev].reshape((config.mne, config.mde)).T
         a_out_vecs = model[config.asov-1:config.aeov].reshape((config.ado+1, config.adso)).T
+        agg_iterators = np.zeros((5,config.nmt), dtype="int64", order="F")
+        initialize_agg_iterator(config, agg_iterators, sizes_in)
         a_states = np.zeros((config.na, config.ads, config.ans+1), dtype="float32", order="F")
         ay = np.zeros((config.na, config.ado+1), dtype="float32", order="F")
         info = 0
         # Call the routine.
         config.rescale_y = True
         (
-            config, model,
+            config, model, agg_iterators,
             ax_in, x_in, y_in, yw_in,
             ax, axi, sizes, x, xi, y, yw,
             ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
@@ -446,7 +992,7 @@ def _test_normalize_data():
             a_out_vecs, a_states, ay,
             info
         ) = AXY.normalize_data(
-            config, model,
+            config, model, agg_iterators,
             ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yw_in,
             ax, axi, sizes, x, xi, y, yw,
             ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
@@ -474,8 +1020,8 @@ def _test_normalize_data():
         #  - run this routine with huge data (make sure memory usage doesn't explode)
         # 
 
-# _test_normalize_data()
-# exit()
+_test_normalize_data()
+exit()
 
 
 

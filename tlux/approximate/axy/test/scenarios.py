@@ -6,9 +6,13 @@
 import fmodpy
 
 # Most combinations of these define the possible uses of the model.
-scenarios = dict(
+SCENARIO = dict(
     steps = 50,
+    ade = None,
+    ado = None,
+    mde = None,
     aggregator_only = False,
+    aggregate_pairwise = False,
     batch_aggregate_constrained = False,
     batch_fixed_constrained = True,
     input_aggregate_categorical = True,
@@ -49,20 +53,24 @@ class Details(dict):
         import numpy as np
         self.config = config
         self.steps = steps
+        # Modify nm and na to be the smallest needed values.
         # Generic allocations and objects.
-        nm = config.nm
         ftype = dict(order="F", dtype="float32")
         itype = dict(order="F", dtype="int32")
-        model = np.ones(config.total_size, dtype="float32")
-        rwork = np.ones(config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
-        iwork = np.ones(config.iwork_size, dtype="int32")
-        record = np.zeros((6,steps), dtype="float32", order="F")
-        yi = np.zeros((ydi, nm), **itype)
-        yw = np.zeros((ywd, nm), **ftype)
+        ltype = dict(order="F", dtype="int64")
+        model = np.ones(config.total_size, **ftype)
+        rwork = np.ones(config.rwork_size, **ftype)  # beware of allocation, heap vs stack
+        iwork = np.ones(config.iwork_size, **itype)
+        agg_iterators = np.ones((5, config.nmt), **ltype)
+        record = np.zeros((6,steps), **ftype)
+        yi = np.zeros((ydi, config.nm), **itype)
+        yw = np.zeros((ywd, config.nm), **ftype)
+        # Store source memory allocations internally.
         self.model = model
         self.rwork = rwork
         self.iwork = iwork
         self.record = record
+        self.agg_iterators = agg_iterators
         # Declare all the special attributes.
         self.update(dict(
             # Model.
@@ -90,20 +98,20 @@ class Details(dict):
             model_grad_mean = rwork[config.smgm-1:config.emgm].reshape(config.num_vars, order="F"),
             model_grad_curv = rwork[config.smgc-1:config.emgc].reshape(config.num_vars, order="F"),
             best_model = rwork[config.sbm-1:config.ebm].reshape(config.num_vars, order="F"),
-            ax = rwork[config.saxb-1:config.eaxb].reshape(config.na, config.adi, order="F"),
+            ax = rwork[config.saxb-1:config.eaxb].reshape(config.adi, config.na, order="F"),
             a_emb_temp = rwork[config.saet-1:config.eaet].reshape(config.ade, config.ane, config.num_threads, order="F"),
-            a_emb_temp_counter = rwork[config.saec-1:config.eaec].reshape(config.ane, config.num_threads, order="F"),
-            agg_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, order="F"),
-            agg_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
+            a_emb_counts = rwork[config.saec-1:config.eaec].reshape(config.ane, config.num_threads, order="F"),
+            a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, order="F"),
+            a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
             ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
-            ay_grad = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
-            x = rwork[config.smxb-1:config.emxb].reshape(config.nm, config.mdi, order="F"),
+            ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
+            x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nm, order="F"),
             m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
-            m_emb_temp_counter = rwork[config.smec-1:config.emec].reshape(config.mne, config.num_threads, order="F"),
-            model_states = rwork[config.smxs-1:config.emxs].reshape(config.nm, config.mds, config.mns+1, order="F"),
-            model_grads = rwork[config.smxg-1:config.emxg].reshape(config.nm, config.mds, config.mns+1, order="F"),
+            m_emb_counts = rwork[config.smec-1:config.emec].reshape(config.mne, config.num_threads, order="F"),
+            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nm, config.mds, config.mns+1, order="F"),
+            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nm, config.mds, config.mns+1, order="F"),
             y = rwork[config.smyb-1:config.emyb].reshape(config.do, config.nm, order="F"),
-            y_grad = rwork[config.syg-1:config.eyg].reshape(config.do, config.nm, order="F"),
+            y_gradient = rwork[config.syg-1:config.eyg].reshape(config.do, config.nm, order="F"),
             axi_shift = rwork[config.saxis-1:config.eaxis].reshape(config.ade, order="F"),
             axi_rescale = rwork[config.saxir-1:config.eaxir].reshape(config.ade, config.ade, order="F"),
             xi_shift = rwork[config.smxis-1:config.emxis].reshape(config.mde, order="F"),
@@ -113,8 +121,8 @@ class Details(dict):
             a_state_temp = rwork[config.sast-1:config.east].reshape(config.na, config.ads, order="F"),
             m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nm, config.mds, order="F"),
             # Integer work space.
-            axi = iwork[config.saxi-1:config.eaxi].reshape(config.na, -1, order="F"),
-            xi = iwork[config.smxi-1:config.emxi].reshape(config.nm, -1, order="F"),
+            axi = iwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F"),
+            xi = iwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
             sizes = iwork[config.ssb-1:config.esb].reshape(config.nm, order="F"),
             a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
             m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
@@ -179,12 +187,13 @@ def spawn_model(adn, mdn, mdo, ade=0, ane=0, ads=3, ans=2, ado=None, mde=0, mne=
 
 
 # Given a scenario, generate a model and data to match the scenario.
-def gen_config_data(scenario=None, seed=0, default=scenarios):
+def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     # Update the default scenario with the provided one.
     settings = default.copy()
     if (scenario is not None):
         settings.update(scenario)
     scenario = settings
+    scenario.update(scenario_kwargs)
     # Problem size.
     if scenario["small_data"]:
         nm_in = scenario.get('nm_in', 10)
@@ -213,7 +222,7 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
         else:
             adn = scenario.get('adn', 20)
     else:
-        adn = scenario.get('adn', 0)
+        adn = 0 # scenario.get('adn', 0)
     # Aggregate categorical input.
     if scenario["input_aggregate_categorical"]:
         if scenario["small_data"]:
@@ -223,8 +232,8 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
             ane = scenario.get('ane', 5000)
             adi = scenario.get('adi', 5)
     else:
-        ane = scenario.get('ane', 0)
-        adi = scenario.get('adi', 0)
+        ane = 0 # scenario.get('ane', 0)
+        adi = 0 # scenario.get('adi', 0)
     # Aggregate model layered.
     if scenario["model_aggregate_layered"]:
         if scenario["small_model"]:
@@ -253,8 +262,8 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
             mne = scenario.get('mne', 5000)
             mdi = scenario.get('mdi', 5)
     else:
-        mne = scenario.get('mne', 0)
-        mdi = scenario.get('mdi', 0)
+        mne = 0 # scenario.get('mne', 0)
+        mdi = 0 # scenario.get('mdi', 0)
     # Fixed model layered.
     if scenario["model_fixed_layered"]:
         if scenario["small_model"]:
@@ -306,13 +315,13 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
     # Generate the model config.
     config = AXY.new_model_config(
         adn=adn,
-        ade=None,
+        ade=scenario.get("ade",None),
         ane=ane,
         ads=ads,
         ans=ans,
-        ado=None,
+        ado=scenario.get("ado",None),
         mdn=mdn,
-        mde=None,
+        mde=scenario.get("mde",None),
         mne=mne,
         mds=mds,
         mns=mns,
@@ -337,15 +346,15 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
     ftype = dict(order="F", dtype="float32")
     itype = dict(order="F", dtype="int32")
     asarray = lambda a, t: np.asarray(a, **t)
-    ax_in = asarray(np.random.random(size=(adn, na_in)), ftype)
-    axi_in = asarray(np.random.randint(*na_range, size=(adi, na_in)), itype)
-    sizes_in = asarray(np.random.randint(0, round(2*(na_in / nm_in)), size=(nm_in if na_in > 0 else 0,)), itype)
-    x_in = asarray(np.random.random(size=(mdn, nm_in)), ftype)
+    ax_in = asarray(np.random.normal(size=(adn, config.nat)), ftype)
+    axi_in = asarray(np.random.randint(*na_range, size=(adi, config.nat)), itype)
+    sizes_in = asarray(np.random.randint(0, max(1,round(2*(config.nat / nm_in))), size=(nm_in if config.nat > 0 else 0,)), itype)
+    x_in = asarray(np.random.normal(size=(mdn, nm_in)), ftype)
     xi_in = asarray(np.random.randint(*nm_range, size=(mdi, nm_in)), itype)
-    y_in = asarray(np.random.random(size=(ydn, nm_in)), ftype)
+    y_in = asarray(np.random.normal(size=(ydn, nm_in)), ftype)
     if (ydi > 0): yi_in = asarray(np.random.randint(1, yne, size=(ydi, nm_in)), itype)
     else:         yi_in = None
-    yw_in = asarray(np.random.random(size=(ywd, nm_in)), ftype)
+    yw_in = asarray(np.random.normal(size=(ywd, nm_in)), ftype)
     # Set two of the sizes to zero (to make sure there are zeros in there.
     if (len(sizes_in) > 0):
         sizes_in[1*len(sizes_in) // 3] = 0
@@ -353,16 +362,18 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
     # Adjust the sizes to make sure the sum is the correct value.
     ssum = sum(sizes_in)
     i = 0
-    while (ssum != na_in):
-        if (ssum < na_in):
+    while (ssum != config.nat):
+        if (ssum < config.nat):
             ssum += 1
             sizes_in[i] += 1
-        elif (ssum > na_in) and (sizes_in[i] > 0):
+        elif (ssum > config.nat) and (sizes_in[i] > 0):
             ssum -= 1
             sizes_in[i] -= 1
         i = (i + 1) % len(sizes_in)
     # Generate the memory and references to specific data holders.
     details = Details(config, scenario['steps'], ydi=ydi, ywd=ywd)
+    # Initialize the model.
+    AXY.init_model(config, details.model, seed=seed)
     # Data holders.
     ax = details.ax
     axi = details.axi
@@ -381,7 +392,7 @@ def gen_config_data(scenario=None, seed=0, default=scenarios):
 
 
 # Define a scenario generator.
-def scenario_generator(scenarios=scenarios, randomized=True, seed=None):
+def scenario_generator(scenario=SCENARIO, randomized=True, seed=None):
     # If this is randomized, overwrite the "range" function with a random one.
     if randomized:
         if (seed is not None):
@@ -393,44 +404,60 @@ def scenario_generator(scenarios=scenarios, randomized=True, seed=None):
         import builtins
         range = builtins.range
     # Get all keys.
-    keys = sorted((k for k,v in scenarios.items() if (type(v) is bool)))
+    keys = sorted((k for k,v in scenario.items() if (type(v) is bool)))
     # Iterate over all binary pairs of keys.
     for i in range(2**len(keys)):
         # Start with the default scenario.
-        scenario = scenarios.copy()
+        s = scenario.copy()
         # Decide which combination of keys to set to True (using binary digits)
         bin_str = bin(i)[2:][::-1] + '0'*len(keys)
         for v,n in zip(bin_str, keys):
-            scenario[n] = (v == '1')
+            s[n] = (v == '1')
         # Skip any configurations that affect the model when it is absent.
-        if (scenario["aggregator_only"] and (
-                scenario["input_fixed_numeric"] or
-                scenario["input_fixed_categorical"] or
-                scenario["model_fixed_layered"]
+        if (s["aggregator_only"] and (
+                s["input_fixed_numeric"] or
+                s["input_fixed_categorical"] or
+                s["model_fixed_layered"]
         )):
             pass
         # Skip the invalid configuration where outputs are NOT weighted and
         #  "weights_dimensioned" is True, that is meaningless since there are no weights.
-        elif ((not scenario["weighted_output"]) and (scenario["weights_dimensioned"])):
+        elif ((not s["weighted_output"]) and (s["weights_dimensioned"])):
             pass
         # Skip the invalid configuration where there are no outputs.
-        elif (not (scenario["output_numeric"] or scenario["output_categorical"])):
+        elif (not (s["output_numeric"] or s["output_categorical"])):
             pass
         # Skip the invalid configuration for "large model" and NOT "model layered"
-        elif not (scenario["small_model"] or 
-                  scenario["model_fixed_layered"] or
-                  scenario["model_aggregate_layered"]):
+        elif not (s["small_model"] or 
+                  s["model_fixed_layered"] or
+                  s["model_aggregate_layered"]):
             pass
-        # Skip scenarios involving the aggregator when it is not present.
-        elif ((not scenario["input_aggregate_numeric"]) and
-              (not scenario["input_aggregate_categorical"]) and
-              (scenario["batch_aggregate_constrained"] or scenario["model_aggregate_layered"])):
+        # Skip ss involving the aggregator when it is not present.
+        elif ((not s["input_aggregate_numeric"]) and
+              (not s["input_aggregate_categorical"]) and
+              (s["batch_aggregate_constrained"] or s["model_aggregate_layered"] or s["aggregate_pairwise"])):
             pass
-        # Skip scenarios involving the model when it is not present.
-        elif ((not scenario["input_fixed_numeric"]) and
-              (not scenario["input_fixed_categorical"]) and
-              (scenario["batch_aggregate_constrained"] or scenario["model_aggregate_layered"])):
+        # Skip ss involving the model when it is not present.
+        elif ((not s["input_fixed_numeric"]) and
+              (not s["input_fixed_categorical"]) and
+              (s["batch_aggregate_constrained"] or s["model_aggregate_layered"])):
             pass
         else:
-            yield scenario
+            yield s
+
+
+# Initialize an aggregate iterator given a config and list of sizes.
+def initialize_agg_iterator(config, agg_iterators, sizes_in):
+    for i in range(agg_iterators.shape[1]):
+        if (sizes_in[i] == 0):
+            agg_iterators[:,i] = 0
+        else:
+            agg_iterators[0,i] = sizes_in[i]
+            if config.pairwise_aggregation:
+                agg_iterators[0,i] = agg_iterators[0,i]**2
+            agg_iterators[1:,i] = AXY.initialize_iterator(
+                i_limit=agg_iterators[0,i],
+            )
+
+
 
