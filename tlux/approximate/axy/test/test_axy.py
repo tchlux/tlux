@@ -26,6 +26,7 @@ np.set_printoptions(linewidth=1000)
 
 
 def _test_scenario_iteration(max_samples=8):
+    print("SCENARIO_GENERATOR")
     # TODO: Start modifying all the test routines to iterate over many scenarios.
     seed = 0
     for i, scenario in enumerate(scenario_generator()):
@@ -41,6 +42,7 @@ def _test_scenario_iteration(max_samples=8):
         for n in work:
             print(" ", n, work[n].shape if work[n] is not None else work[n])
         if i == max_samples: exit()
+    print(" passed")
 
 # _test_scenario_iteration()
 # exit()
@@ -51,6 +53,7 @@ def _test_scenario_iteration(max_samples=8):
 
 
 def _test_large_data_fit():
+    print("FIT_MODEL")
     config, details, data, work = gen_config_data(dict(
         na_in=10000000,
         na=1000000,
@@ -59,13 +62,14 @@ def _test_large_data_fit():
     model = details.model
     rwork = details.rwork
     iwork = details.iwork
+    lwork = details.lwork
     steps = details.steps
     record = details.record
     config.axi_normalized = False
     config.step_factor = 0.0001
     print()
     for n in sorted(SCENARIO):
-        print(f"  {str(scenarios[n]):5s}  {n}")
+        print(f"  {str(SCENARIO[n]):5s}  {n}")
     print(' data')
     for n in data:
         print(" ", n, data[n].shape if data[n] is not None else data[n])
@@ -75,10 +79,10 @@ def _test_large_data_fit():
     print(' config')
     print(' ', config)
     (
-        config, model, rwork, iwork, ax_in, x_in, y_in, yw_in,
+        config, model, rwork, iwork, lwork, ax_in, x_in, y_in, yw_in,
         record, sum_squared_error, info
     ) = AXY.fit_model(
-        config, model, rwork, iwork,
+        config, model, rwork, iwork, lwork,
         data['ax_in'], data['axi_in'], data['sizes_in'],
         data['x_in'], data['xi_in'], data['y_in'], data['yw_in'],
         steps=steps, record=record
@@ -104,6 +108,7 @@ def _test_large_data_fit():
 
 # Test INIT_MODEL
 def _test_init_model():
+    print("INIT_MODEL")
     seed = 0
     initial_shift_range = 1.0
     initial_output_scale = 0.1
@@ -132,7 +137,7 @@ def _test_init_model():
                    initial_shift_range=initial_shift_range,
                    initial_output_scale=initial_output_scale)
     # Store the model in a format that makes it easy to retrieve vectors.
-    from tlux.approximate.axy import AxyModel
+    from tlux.approximate.axy.summary import AxyModel
     m = AxyModel(config, model)
     print()
     print(m)
@@ -157,6 +162,7 @@ def _test_init_model():
 
 # Test COMPUTE_BATCHES
 def _test_compute_batches():
+    print("COMPUTE_BATCHES")
     # TODO:
     # 
     #  cases
@@ -184,27 +190,26 @@ def _test_compute_batches():
     print(config)
     print()
 
-    # # Simple test with nice numbers.
-    # config.max_batch = 20
-    # # na = 100
-    # nm = 10
-    # # sizes = np.ones(nm, dtype="int32") * (na // nm)
-    # sizes = np.random.randint(0,10, size=(nm,)).astype("int32")
-    # na = sum(sizes)
-    # batcha_starts, batcha_ends, agg_starts, batchm_starts, batchm_ends, info = (
-    #     AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=True, info=0)
-    # )
-
-
-    # Custom test.
-    na = 1
+    # Simple test with nice numbers.
+    config.max_batch = 20
+    # na = 100
     nm = 10
-    config.max_batch = 10000
-    config.num_threads = 2
-    sizes = np.asarray([1.0] + [0.0]*9, dtype="int32")
+    # sizes = np.ones(nm, dtype="int32") * (na // nm)
+    sizes = np.random.randint(0,10, size=(nm,)).astype("int64")
+    na = sum(sizes)
     batcha_starts, batcha_ends, agg_starts, batchm_starts, batchm_ends, info = (
-        AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=False, info=0)
+        AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=True, info=0)
     )
+
+    # # Custom test.
+    # na = 1
+    # nm = 10
+    # config.max_batch = 10000
+    # config.num_threads = 2
+    # sizes = np.asarray([1.0] + [0.0]*9, dtype="int64")
+    # batcha_starts, batcha_ends, agg_starts, batchm_starts, batchm_ends, info = (
+    #     AXY.compute_batches(config, na=na, nm=nm, sizes=sizes, joint=False, info=0)
+    # )
 
     print("nm: ", nm)
     print("sizes: ", sizes)
@@ -223,6 +228,29 @@ def _test_compute_batches():
 
 # _test_compute_batches()
 # exit()
+
+
+# --------------------------------------------------------------------
+#                    INDEX_TO_PAIR     PAIR_TO_INDEX
+
+def _test_index_to_pair():
+    print("INDEX_TO_PAIR")
+    mv = 30
+    all_pairs = set()
+    # Verify that the pair mapping works forwards and backwards.
+    for i in range(1, mv**2+1):
+        pair1, pair2 = AXY.index_to_pair(max_value=mv, i=i)
+        all_pairs.add((pair1, pair2))
+        j = AXY.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
+        assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
+    # Verify that all pairs were actually generated.
+    for i in range(1,mv+1):
+        for j in range(1,mv+1):
+            assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
+    print(" passed")
+
+_test_index_to_pair()
+
 
 
 # --------------------------------------------------------------------
@@ -246,11 +274,14 @@ def py_fix_sizes(na, nm, sizes):
 
 # Test FETCH_DATA (making sure it clips the NA sizes correctly).
 def _test_fetch_data():
+    print("FETCH_DATA")
     nm_values = list(range(10, 101, 18))
     na_range = (1, 30)
     na_step = 20
     na_multitplier = 7
+    pairwise = False
     for nm_in in nm_values:
+        pairwise = (not pairwise)
         for na_max in range(0, 2*na_range[-1] + 1, na_step):
             na = na_max * nm_in
             for seed in range(6):
@@ -258,13 +289,14 @@ def _test_fetch_data():
                 np.random.seed(seed)
                 # Spawn a new model.
                 config, model = spawn_model(adn=1, mdn=1, mdo=1, ade=0)
+                config.pairwise_aggregation = pairwise
                 # Create fake data that matches the shape of the problem.
-                sizes_in = np.asarray(np.random.randint(*na_range, size=(nm_in,)), dtype="int32", order="F")
+                sizes_in = np.asarray(np.random.randint(*na_range, size=(nm_in,)), dtype="int64", order="F")
                 na_in = sum(sizes_in)
                 ax_in = np.asarray(np.random.random(size=(config.adn,na_in)), dtype="float32", order="F")
-                axi_in = np.zeros((0,na_in), dtype="int32", order="F")
+                axi_in = np.zeros((0,na_in), dtype="int64", order="F")
                 x_in = np.asarray(np.random.random(size=(config.mdn,nm_in)), dtype="float32", order="F")
-                xi_in = np.zeros((0,nm_in), dtype="int32", order="F")
+                xi_in = np.zeros((0,nm_in), dtype="int64", order="F")
                 y_in = np.asarray(np.random.random(size=(config.mdo,nm_in)), dtype="float32", order="F")
                 yw_in = np.asarray(np.random.random(size=(1,nm_in)), dtype="float32", order="F")
                 agg_iterators = np.zeros((5,nm_in), dtype="int64", order="F")
@@ -273,24 +305,29 @@ def _test_fetch_data():
                     # Get next and do a full "circle" around the iterator, verifying its correctness.
                     seen = set()
                     *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])
-                    while (next_i not in seen):
+                    for _ in range(agg_iterators[0,i]):
+                        # while (next_i not in seen):
                         seen.add(next_i)
                         *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])                        
-                    assert (tuple(sorted(seen)) == tuple(range(1,sizes_in[i]+1))), f"Aggregate iterator did not produce expected list of elements.\n  {sorted(seen)}\n  {list(range(1,sizes_in[i]+1))}"
-                # Create the containers for the data.
+                    seen = tuple( sorted(seen) )
+                    expected = tuple( range(1,sizes_in[i]**(2 if pairwise else 1) + 1) )
+                    assert (seen == expected), \
+                        f"Aggregate iterator did not produce expected list of elements.\n  {seen}\n  {expected}\n  {agg_iterators[:,i]}"
+                # Do batching for the second half of the tests.
                 if (nm_in > nm_values[len(nm_values)//2]):
                     nm = nm_in // 2
                 else:
                     nm = nm_in
+                # Initialize work space.
                 ax = np.zeros((config.adn,na), dtype="float32", order="F")
-                axi = np.zeros((0,na), dtype="int32", order="F")
-                sizes = np.zeros((nm,), dtype="int32", order="F")
+                axi = np.zeros((0,na), dtype="int64", order="F")
+                sizes = np.zeros((nm,), dtype="int64", order="F")
                 x = np.zeros((config.mdn,nm), dtype="float32", order="F")
-                xi = np.zeros((0,nm), dtype="int32", order="F")
+                xi = np.zeros((0,nm), dtype="int64", order="F")
                 y = np.zeros((config.mdo,nm), dtype="float32", order="F")
                 yw = np.zeros((1,nm), dtype="float32", order="F")
                 # Run the size fixing code in python.
-                py_sizes, py_na = py_fix_sizes(na, nm, sizes_in[:nm].copy())
+                py_sizes, py_na = py_fix_sizes(na, nm, sizes_in[:nm]**(2 if pairwise else 1))
                 # Run the size fixing (and data fetching) code in Fortran.
                 config = AXY.new_fit_config(nm=nm, nmt=nm_in, na=na, nat=na_in, seed=0, config=config)
                 config.i_next = 0
@@ -300,40 +337,71 @@ def _test_fetch_data():
                 (
                     config, agg_iterators, ax, axi, f_sizes, x, xi, y, yw, f_na
                 ) = AXY.fetch_data(
-                    config, model, agg_iterators, ax_in, ax, axi_in, axi, sizes_in, sizes,
+                    config, agg_iterators, ax_in, ax, axi_in, axi, sizes_in, sizes,
                     x_in, x, xi_in, xi, y_in, y, yw_in, yw
                 )
                 assert (py_na == f_na), f"Number of aggregate points did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_na}\n  fortran: {f_na}\n"
                 assert (tuple(sorted(py_sizes.tolist())) == tuple(sorted(f_sizes.tolist()))), f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
                 assert max(abs(py_sizes-f_sizes)) in {0,1}, f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
                 # TODO: Verify that when (nm >= nm_in) and (na >= na_in) that we get ALL inputs!
-
-                # TODO: The value test doesn't work with fortran using iterators.
-                # if ((f_na >= na_in) and (len(sizes_in) == len(sizes))):
-                #     assert (tuple(ax[:,:na_in].tolist()) == tuple(ax_in[:,:].tolist())), f"AX did not match AX_IN even though there was enough space.\n  python:  {ax_in.tolist()}\n  fortran: {ax.tolist()}\n"
+    print(" passed")
 
 _test_fetch_data()
 
 
 # --------------------------------------------------------------------
-#                    INDEX_TO_PAIR     PAIR_TO_INDEX
+#                            EMBED
+def _test_embed():
+    print("EMBED")
+    s = SCENARIO.copy()
+    s.update(dict(
+        pairwise_aggregation = True,
+        input_aggregate_categorical = True,
+        input_aggregate_numeric = True,
+        input_fixed_categorical = False,
+        input_fixed_numeric = False,
+        batch_aggregate_constrained = False,
+        batch_fixed_constrained = False,
+        model_aggregate_layered = True,
+        model_fixed_layered = True,
+        small_data = True,
+        small_model = True,
+        adi = 2,
+        na_in = 2,
+        na    = 2,
+        nm_in = 1,
+        nm    = 1,
+    ))
+    config, details, raw_data, data = gen_config_data(scenario=s, seed=0)
+    config.pairwise_aggregation = True
+    config.na = sum(raw_data["sizes_in"]**2)
+    config.i_next = 0
+    config.i_step = 1
+    config.i_mult = 1
+    config.i_mod = s["nm"]
+    yi_in = raw_data.pop("yi_in")
+    yi = data.pop("yi")
+    axi_in = raw_data["axi_in"]
+    sizes_in = raw_data["sizes_in"]
+    axi_in[0,:] = 0
+    details.agg_iterators[0,:] = sizes_in[:]**2 # limit
+    details.agg_iterators[1,:] = 0 # next
+    details.agg_iterators[2,:] = 1 # mult
+    details.agg_iterators[3,:] = 1 # step
+    details.agg_iterators[4,:] = sizes_in[:]**2 # mod
+    print("axi_in: \n", axi_in.T)
+    (
+        config, agg_iterators, ax, axi, f_sizes, x, xi, y, yw, f_na
+    ) = AXY.fetch_data(
+        config=config, agg_iterators=details.agg_iterators, **raw_data, **data,
+    )
+    print("axi: \n", axi.T)
+    # Once we have fetched data that includes pairs, we should verify that they are embedded correctly.
+    # 
+    # TODO: Verify that the pairs produced by FETCH_DATA match the pairs retrieved by EMBED and EMBEDDING_GRADIENT
 
-def _test_index_to_pair():
-    mv = 30
-    all_pairs = set()
-    # Verify that the pair mapping works forwards and backwards.
-    for i in range(1, mv**2+1):
-        pair1, pair2 = AXY.index_to_pair(max_value=mv, i=i)
-        all_pairs.add((pair1, pair2))
-        j = AXY.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
-        assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
-    # Verify that all pairs were actually generated.
-    for i in range(1,mv+1):
-        for j in range(1,mv+1):
-            assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
-
-_test_index_to_pair()
-
+# _test_embed()
+# exit()
 
 # --------------------------------------------------------------------
 #                           EVALUATE
@@ -363,11 +431,11 @@ def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_
         ax_embedded[:config.adn,n] = ax[:config.adn,n]
         for d in range(axi.shape[0]):
             e = axi[d,n]
-            if (e > 0) and (e <= config.ade):
+            if (e > 0) and (e <= config.ane):
                 ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
-            elif (e > config.ade):
-                e1, e2 = AXY.index_to_pair(max_value=config.ane, i=e)
-                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1] - m.a_embeddings[:,e2-1]
+            elif (e > config.ane):
+                e1, e2 = AXY.index_to_pair(max_value=config.ane+1, i=e-config.ane)
+                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1-1] - m.a_embeddings[:,e2-1-1]
         if (axi.shape[0] > 1):
             ax_embedded[-config.ade:,n] /= axi.shape[0]
     ax = ax_embedded
@@ -377,9 +445,9 @@ def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_
         x_embedded[:config.mdn,n] = x[:config.mdn,n]
         for d in range(xi.shape[0]):
             e = xi[d,n]
-            if (e > 0) and (e <= config.mde):
+            if (e > 0) and (e <= config.mne):
                 x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
-            elif (e > config.mde):
+            elif (e > config.mne):
                 e1, e2 = AXY.index_to_pair(max_value=config.mne, i=e)
                 x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
         if (xi.shape[0] > 1):
@@ -508,6 +576,7 @@ def _test_evaluate():
     s["na"] = s["na_in"]
     s["nm"] = s["nm_in"]
     config, details, raw_data, data = gen_config_data(scenario=s, seed=0)
+    config.pairwise_aggregation = True
     model = details.model
 
     summary = ""
@@ -529,7 +598,7 @@ def _test_evaluate():
         data["x"], data["xi"], data["y"], data["yw"],
         data["na"]
     ) = AXY.fetch_data(
-        config=config, model=details.model, agg_iterators=details.agg_iterators,
+        config=config, agg_iterators=details.agg_iterators,
         ax_in=raw_data["ax_in"], ax=data["ax"],
         axi_in=raw_data["axi_in"], axi=data["axi"],
         sizes_in=raw_data["sizes_in"], sizes=data["sizes"],
@@ -576,46 +645,51 @@ def _test_evaluate():
     assert maxdiff < (2**(-13)), f"ERROR: Failed comparison between Fortran and Python implementations of AXY.evaluate.\n  Max difference observed was {maxdiff}.\n  Summary of situation:\n\n{summary}"
     print(" passed")
 
-# _test_evaluate()
+_test_evaluate()
 
 
 # --------------------------------------------------------------------
 #                           MODEL_GRADIENT
 def _test_model_gradient():
     print("MODEL_GRADIENT")
+
+    show_results = False
+
     # Generate a scenario.
     s = SCENARIO.copy()
-    s["input_aggregate_categorical"] = False
+    s["input_aggregate_categorical"] = True
     s["input_aggregate_numeric"] = False
     s["input_fixed_categorical"] = False
     s["input_fixed_numeric"] = False
     s["batch_aggregate_constrained"] = False
     s["batch_fixed_constrained"] = False
-    s["model_aggregate_layered"] = False,
-    s["model_fixed_layered"] = False,
+    s["model_aggregate_layered"] = False
+    s["model_fixed_layered"] = False
     s["small_data"] = True
     s["small_model"] = True
     s["num_threads"] = 1
-    s["adn"] = 1
-    s["ade"] = 4
-    s["ans"] = 1
-    s["ads"] = 8
-    s["ado"] = 4
-    s["mde"] = 0
-    s["mdn"] = 0
-    s["mns"] = 1
-    s["mds"] = 8
-    s["na_in"] = 10
-    s["nm_in"] = 5
+    s["pairwise_aggregation"] = True
+    # s["adn"] = 1
+    # s["ade"] = 4
+    # s["ans"] = 1
+    # s["ads"] = 8
+    # s["ado"] = 4
+    # s["mde"] = 0
+    # s["mdn"] = 0
+    # s["mns"] = 1
+    # s["mds"] = 8
+    s["na_in"] = 20
+    s["nm_in"] = 10
     s["na"] = s["na_in"]
     s["nm"] = s["nm_in"]
-    config, details, raw_data, data = gen_config_data(scenario=s, seed=10)
+    config, details, raw_data, data = gen_config_data(
+        scenario=s,
+        seed=0,
+        # ane=3,
+    )
+    config.pairwise_aggregation = True
     model = details.model
     details.ay_shift *= 0.0
-
-    print("AxyModel(config, model): ")
-    print(AxyModel(config, model, show_vecs=True, show_times=False))
-
     # Fetch and embed data (for model evaluation).
     initialize_agg_iterator(config, details.agg_iterators, raw_data["sizes_in"])
     (
@@ -624,7 +698,7 @@ def _test_model_gradient():
         data["x"], data["xi"], data["y"], data["yw"],
         data["na"]
     ) = AXY.fetch_data(
-        config=config, model=details.model, agg_iterators=details.agg_iterators,
+        config=config, agg_iterators=details.agg_iterators,
         ax_in=raw_data["ax_in"], ax=data["ax"],
         axi_in=raw_data["axi_in"], axi=data["axi"],
         sizes_in=raw_data["sizes_in"], sizes=data["sizes"],
@@ -714,8 +788,6 @@ def _test_model_gradient():
         model_grad = 0 * details.model_grad
         a_emb_temp = 0 * details.a_emb_temp
         m_emb_temp = 0 * details.m_emb_temp
-        a_emb_counts = 0 * details.a_emb_counts
-        m_emb_counts = 0 * details.m_emb_counts
         (
             config,
             ax,
@@ -729,8 +801,6 @@ def _test_model_gradient():
             m_grads,
             a_emb_temp,
             m_emb_temp,
-            a_emb_counts,
-            m_emb_counts
         ) = AXY.model_gradient(
             config, model,
             ax=ax, axi=axi, sizes=sizes,
@@ -745,28 +815,27 @@ def _test_model_gradient():
             m_grads=m_grads,
             a_emb_temp=a_emb_temp,
             m_emb_temp=m_emb_temp,
-            a_emb_counts=a_emb_counts,
-            m_emb_counts=m_emb_counts,
         )
         check_code(info, "AXY.model_gradient")
         return np.concatenate((model_grad.sum(axis=1), model[config.num_vars:]))
 
-
     gradient = finite_difference_gradient(model, data)
     model_gradient = axy_gradient(model, data)
     error = (model_gradient - gradient)
-    print("error: ", error[np.argsort(-abs(error))[:5]].astype("float32"))
     ratio = np.asarray([1 + guess if (val == 0) else guess / val
                         for (guess,val) in zip(model_gradient, gradient)])
-    print("ratio: ", ratio[np.argsort(abs(ratio-1))[:5]].astype("float32"))
-
     max_error = abs(error).max()
     max_ratio_error = abs(ratio-1).max()
-    print("max_error:       ", float(max_error))
-    print("max_ratio_error: ", float(max_ratio_error))
     failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
 
-    if (failed_test):
+    if (failed_test or show_results):
+        print("AxyModel(config, model): ")
+        print(AxyModel(config, model, show_vecs=True, show_times=False))
+        print("error: ", error[np.argsort(-abs(error))[:5]].astype("float32"))
+        print("ratio: ", ratio[np.argsort(abs(ratio-1))[:5]].astype("float32"))
+        print("max_error:       ", float(max_error))
+        print("max_ratio_error: ", float(max_ratio_error))
+        print()
         # Show the configuration and the data.
         print()
         print('-'*100)
@@ -810,16 +879,17 @@ def _test_model_gradient():
         print()
         
         assert (not failed_test), f"Either the maximum error ({float(max_error)}) was too high or the ratio between the exact gradient and computed gradient ({float(max_ratio_error)}) was too far from 1."
+    else:
+        print(" passed")
 
+_test_model_gradient()
 
-# _test_model_gradient()
-# exit()
 
 # --------------------------------------------------------------------
-#                           NORMALIZE_DATA
-
+#                              AXI
 
 def _test_axi():
+    print("FIT_MODEL")
     # for s in scenario_generator():
     #     print(s)
     #     print()
@@ -856,6 +926,7 @@ def _test_axi():
         model,
         rwork,
         iwork,
+        lwork,
         ax_in,
         x_in, 
         y_in,
@@ -870,6 +941,7 @@ def _test_axi():
         record=details.record,
         rwork=details.rwork,
         iwork=details.iwork,
+        lwork=details.lwork,
         **data
     )
 
@@ -881,7 +953,8 @@ def _test_axi():
 
     p.show()
 
-_test_axi()
+# _test_axi()
+# exit()
 
 
 # Generate a random rotation matrix (that rotates a random amount along each axis).
@@ -914,6 +987,7 @@ def random_data(num_points, dimension, box=10, skew=lambda x: 1 * x**2 / sum(x**
 
 # Test function for visually checking the "radialize" function.
 def _test_normalize_data():
+    print("NORMALIZE_DATA")
     # Generate data to test with.
     num_trials = 10
     size_range = (0, 2000)
@@ -935,28 +1009,29 @@ def _test_normalize_data():
         if (should_plot):
             p.add('y '+str(i+1), *y.T, marker_size=3)
         # Generate random AX data.
-        sizes = np.asarray(np.random.randint(*size_range, size=(num_points,)), dtype="int32", order="F")
+        sizes = np.asarray(np.random.randint(*size_range, size=(num_points,)), dtype="int64", order="F")
         num_aggregate = sizes.sum()
         ax, ax_shift, ax_scale, ax_rotation = random_data(num_aggregate, dimension)
         if (should_plot):
             p.add('ax '+str(i+1), *ax.T, marker_size=3)
         # Set up all of the inputs to the NORMALIZE_DATA routine.
         config, model = spawn_model(adn=dimension, mdn=dimension, mdo=dimension, num_threads=1)
+        config.pairwise_aggregation = True
         config = AXY.new_fit_config(nm=nm, nmt=num_points, na=na, nat=num_aggregate, config=config)
         # Set up the "full data".
         ax_in = ax.T
-        axi_in = np.zeros((0,num_aggregate), dtype="int32", order="F")
+        axi_in = np.zeros((0,num_aggregate), dtype="int64", order="F")
         sizes_in = sizes.copy()
         x_in = x.T
-        xi_in = np.zeros((0,num_points), dtype="int32", order="F")
+        xi_in = np.zeros((0,num_points), dtype="int64", order="F")
         y_in = y.T
         yw_in = np.zeros((0,num_points), dtype="float32", order="F")
         # Set up the "data holder".
         ax = np.zeros((config.adn,config.na), dtype="float32", order="F")
-        axi = np.zeros((0,config.na), dtype="int32", order="F")
-        sizes = np.zeros((config.nm if config.na > 0 else 0,), dtype="int32", order="F")
+        axi = np.zeros((0,config.na), dtype="int64", order="F")
+        sizes = np.zeros((config.nm if config.na > 0 else 0,), dtype="int64", order="F")
         x = np.zeros((config.mdi, config.nm), dtype="float32", order="F")
-        xi = np.zeros((0,num_points), dtype="int32", order="F")
+        xi = np.zeros((0,num_points), dtype="int64", order="F")
         y = np.zeros((config.do, config.nm), dtype="float32", order="F")
         yw = np.zeros((0,num_points), dtype="float32", order="F")
         # Set up the "transformations".
@@ -982,6 +1057,21 @@ def _test_normalize_data():
         info = 0
         # Call the routine.
         config.rescale_y = True
+        # print()
+        # print("config: ", config)
+        # print("  ax_in.shape:    ", ax_in.shape)
+        # print("  axi_in.shape:   ", axi_in.shape)
+        # print("  sizes_in.shape: ", sizes_in.shape)
+        # print("  x_in.shape:     ", x_in.shape)
+        # print("  xi_in.shape:    ", xi_in.shape)
+        # print("  y_in.shape:     ", y_in.shape)
+        # print("  yw_in.shape:    ", yw_in.shape)
+        # print("  ax.shape:       ", ax.shape)
+        # print("  axi.shape:      ", axi.shape)
+        # print("  sizes.shape:    ", sizes.shape)
+        # print("  x.shape:        ", x.shape)
+        # print("  y.shape:        ", y.shape)
+        # print("  yw.shape:       ", yw.shape)
         (
             config, model, agg_iterators,
             ax_in, x_in, y_in, yw_in,
@@ -1004,15 +1094,18 @@ def _test_normalize_data():
             p.add('-> y '+str(i+1), *y_in, marker_size=3)
             p.add('-> ax '+str(i+1), *ax_in, marker_size=3)
             p.show()
-        else:
+        elif ():
             # TODO: Assert that the mean is near zero and the variance is near one.
             print()
             print("ax_in.shape:\n", ax_in.shape)
-            print("ax_in.mean(axis=1):\n", ax_in.mean(axis=1))
-            print("ax_in.std(axis=1):\n", ax_in.std(axis=1))
-            print()
-            print("y_in.mean(axis=1): \n", y_in.mean(axis=1))
-            print("y_in.std(axis=1): \n", y_in.std(axis=1))
+            print(" ax_in.mean(axis=1):\n ", ax_in.mean(axis=1))
+            print(" ax_in.std(axis=1):\n ", ax_in.std(axis=1))
+            print("x_in.shape:\n", x_in.shape)
+            print(" x_in.mean(axis=1):\n ", x_in.mean(axis=1))
+            print(" x_in.std(axis=1):\n ", x_in.std(axis=1))
+            print("y_in.shape:\n", y_in.shape)
+            print(" y_in.mean(axis=1): \n ", y_in.mean(axis=1))
+            print(" y_in.std(axis=1): \n ", y_in.std(axis=1))
         #  - assert that the AX_IN, X_IN, and Y_IN are radialized
         #  - assert that the AY are radialized (ready for second model)
         #  - assert that the embedded AXI and XI are radialized
@@ -1020,33 +1113,14 @@ def _test_normalize_data():
         #  - run this routine with huge data (make sure memory usage doesn't explode)
         # 
 
-_test_normalize_data()
-exit()
+# _test_normalize_data()
+# exit()
 
 
-
-# 2023-02-18 10:48:07
+# 2023-03-13 06:48:18
 # 
-######################################################################################
-# #     # Generate the radialized version.                                           #
-# #     shift = np.zeros(dimension, dtype="float32")                                 #
-# #     transform = np.zeros((dimension, dimension), dtype="float32", order="F")     #
-# #     inverse = np.zeros((dimension, dimension), dtype="float32", order="F")       #
-# #     to_flatten = (i % 2) == 0                                                    #
-# #     descriptor = 'radialized' if to_flatten else 'normalized'                    #
-# #     xr, shift, transform, inverse = mops.radialize(                              #
-# #         x=(x.copy()).T, shift=shift, vecs=transform, inverse=inverse,            #
-# #         flatten=to_flatten                                                       #
-# #     )                                                                            #
-# #     p.add(f"{i+1} {descriptor}", *xr, marker_size=3)                             #
-#                                                                                    #
-# #     # Use the inverse to "fix" the data back to its original form.               #
-# #     xf = (inverse.T @ xr).T                                                      #
-# #     xf -= shift                                                                  #
-# #     p.add(f"{i+1} fixed", *xf.T, marker_size=3)                                  #
-#                                                                                    #
-# #     # Use the provided shift and transform to repeate the radialization process. #
-# #     xrr = (x + shift) @ transform                                                #
-# #     p.add(f"{i+1} re {descriptor}", *xrr.T, marker_size=3)                       #
-# # p.show()                                                                         #
-######################################################################################
+                #####################################################################################################################################################################################################
+                # # TODO: The value test doesn't work with fortran using iterators.                                                                                                                                 #
+                # # if ((f_na >= na_in) and (len(sizes_in) == len(sizes))):                                                                                                                                         #
+                # #     assert (tuple(ax[:,:na_in].tolist()) == tuple(ax_in[:,:].tolist())), f"AX did not match AX_IN even though there was enough space.\n  python:  {ax_in.tolist()}\n  fortran: {ax.tolist()}\n" #
+                #####################################################################################################################################################################################################

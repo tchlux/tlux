@@ -124,6 +124,7 @@ MODULE AXY
      ! Optimization related parameters.
      REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
      REAL(KIND=RT) :: MAX_STEP_FACTOR = 0.05_RT ! Maximum multiplier on gradient steps.
+     REAL(KIND=RT) :: MIN_STEP_FACTOR = 0.0005_RT ! Minimum multiplier on gradient steps.
      REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT ! Rate of exponential sliding average over gradient steps.
      REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient variation.
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.05_RT ! Rate of exponential sliding average over AY (forcing mean to zero).
@@ -138,6 +139,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: NUM_THREADS = 1 ! Number of parallel threads to use in fit & evaluation.
      INTEGER(KIND=INT64) :: PRINT_DELAY_SEC = 2 ! Delay between output logging during fit.
      INTEGER(KIND=INT64) :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
+     INTEGER(KIND=INT64) :: CONDITION_FREQUENCY = 10 ! Frequency with which to perform model conditioning operations.
      INTEGER(KIND=INT64) :: LOG_GRAD_NORM_FREQUENCY = 100 ! Frequency with which to log expensive records (model variable 2-norm step size).
      INTEGER(KIND=INT64) :: RANK_CHECK_FREQUENCY = 0 ! Frequency with which to orthogonalize internal basis functions.
      INTEGER(KIND=INT64) :: NUM_TO_UPDATE = HUGE(ONE) ! Number of model variables to update (initialize to large number).
@@ -157,8 +159,10 @@ MODULE AXY
      LOGICAL(KIND=INT8) :: Y_NORMALIZED = .FALSE. ! False if Y data needs to be normalized.
      LOGICAL(KIND=INT8) :: RESCALE_Y = .TRUE. ! Rescale all Y components to be equally weighted.
      LOGICAL(KIND=INT8) :: ENCODE_SCALING = .FALSE. ! True if input and output weight matrices shuld embed normalization scaling.
+     LOGICAL(KIND=INT8) :: NORMALIZE = .TRUE. ! True if shifting, cleaning, and scaling need to be done to inputs & outputs.
+     LOGICAL(KIND=INT8) :: NEEDS_SHIFTING = .TRUE. ! True if shifts need to be applied to inputs.
+     LOGICAL(KIND=INT8) :: NEEDS_CLEANING = .TRUE. ! True if NaN and Inf values should be removed.
      LOGICAL(KIND=INT8) :: NEEDS_SCALING = .TRUE. ! True if input and output weight matrices are NOT already rescaled.
-     LOGICAL(KIND=INT8) :: NORMALIZE = .TRUE. ! True if shifts and multipliers should be applied to inputs and outputs.
      ! Descriptions of the number of points that can be in one batch.
      INTEGER(KIND=INT64) :: RWORK_SIZE = 0
      INTEGER(KIND=INT64) :: IWORK_SIZE = 0
@@ -178,14 +182,12 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SBM, EBM ! BEST_MODEL(NUM_VARS)
      INTEGER(KIND=INT64) :: SAXB, EAXB ! AX_BATCH(ADI,NA)
      INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
-     INTEGER(KIND=INT64) :: SAEC, EAEC ! A_EMB_COUNTS(ANE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO+1)
      INTEGER(KIND=INT64) :: SAYG, EAYG ! AY_GRADIENT(NA,ADO+1)
      INTEGER(KIND=INT64) :: SMXB, EMXB ! X_BATCH(MDI,NM)
      INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
-     INTEGER(KIND=INT64) :: SMEC, EMEC ! M_EMB_COUNTS(MNE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NM,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMXG, EMXG ! M_GRADS(NM,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMYB, EMYB ! Y_BATCH(DO,NM)
@@ -477,27 +479,40 @@ CONTAINS
     INTEGER(KIND=INT32), INTENT(IN), OPTIONAL :: SEED
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     INTEGER(KIND=INT64) :: AXI_COLS, XI_COLS
+    ! NM and NMT (total)
     CONFIG%NM = NM
+    IF (PRESENT(NMT)) THEN
+       CONFIG%NMT = NMT
+    ELSE
+       CONFIG%NMT = NM
+    END IF
+    CONFIG%NM = MIN(CONFIG%NMT, CONFIG%NM)
+    ! NA and NAT (total)
+    IF (PRESENT(NAT)) THEN
+       IF (PRESENT(NA)) THEN
+          CONFIG%NAT = MIN(NAT, NA)
+       ELSE
+          CONFIG%NAT = NAT
+       END IF
+    ELSE
+       IF (PRESENT(NA)) THEN
+          CONFIG%NAT = NA
+       ELSE
+          CONFIG%NAT = 0
+       END IF
+    END IF
     IF (PRESENT(NA)) THEN
        CONFIG%NA = NA
     ELSE
        CONFIG%NA = 0
     END IF
-    IF (PRESENT(NMT)) THEN
-       CONFIG%NMT = MIN(NMT, NM)
-    ELSE
-       CONFIG%NMT = NM
-    END IF
-    IF (PRESENT(NAT)) THEN
-       CONFIG%NAT = MIN(NAT, NA)
-    ELSE
-       CONFIG%NAT = NA
-    END IF
+    ! ADI (not the literal value, but the number of categorical columns)
     IF (PRESENT(ADI)) THEN
        AXI_COLS = ADI
     ELSE
        AXI_COLS = 0_INT64
     END IF
+    ! MDI (not the literal value, but the number of categorical columns)
     IF (PRESENT(MDI)) THEN
        XI_COLS = MDI
     ELSE
@@ -525,7 +540,7 @@ CONTAINS
     CONFIG%RWORK_SIZE = CONFIG%EMGC
     ! best model
     CONFIG%SBM = ONE + CONFIG%RWORK_SIZE
-    CONFIG%EBM = CONFIG%SBM-ONE + CONFIG%NUM_VARS
+    CONFIG%EBM = CONFIG%SBM-ONE + CONFIG%TOTAL_SIZE
     CONFIG%RWORK_SIZE = CONFIG%EBM
     ! ---------------------------------------------------------------
     ! AX
@@ -536,10 +551,6 @@ CONTAINS
     CONFIG%SAET = ONE + CONFIG%RWORK_SIZE
     CONFIG%EAET = CONFIG%SAET-ONE + CONFIG%ADE * CONFIG%ANE * CONFIG%NUM_THREADS
     CONFIG%RWORK_SIZE = CONFIG%EAET
-    ! A embedding temp counter
-    CONFIG%SAEC = ONE + CONFIG%RWORK_SIZE
-    CONFIG%EAEC = CONFIG%SAEC-ONE + CONFIG%ANE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EAEC
     ! aggregator states
     CONFIG%SAXS = ONE + CONFIG%RWORK_SIZE
     CONFIG%EAXS = CONFIG%SAXS-ONE + CONFIG%NA * CONFIG%ADS * (CONFIG%ANS+ONE)
@@ -564,10 +575,6 @@ CONTAINS
     CONFIG%SMET = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMET = CONFIG%SMET-ONE + CONFIG%MDE * CONFIG%MNE * CONFIG%NUM_THREADS
     CONFIG%RWORK_SIZE = CONFIG%EMET
-    ! M embedding temp counter
-    CONFIG%SMEC = ONE + CONFIG%RWORK_SIZE
-    CONFIG%EMEC = CONFIG%SMEC-ONE + CONFIG%MNE * CONFIG%NUM_THREADS
-    CONFIG%RWORK_SIZE = CONFIG%EMEC
     ! model states
     CONFIG%SMXS = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMXS = CONFIG%SMXS-ONE + CONFIG%NM * CONFIG%MDS * (CONFIG%MNS+ONE)
@@ -619,18 +626,6 @@ CONTAINS
     ! ------------------------------------------------------------
     ! Set up the integer valued work array.
     CONFIG%IWORK_SIZE = 0_INT64
-    ! AXI
-    CONFIG%SAXI = ONE + CONFIG%IWORK_SIZE
-    CONFIG%EAXI = CONFIG%SAXI-ONE + AXI_COLS * CONFIG%NA
-    CONFIG%IWORK_SIZE = CONFIG%EAXI
-    ! XI
-    CONFIG%SMXI = ONE + CONFIG%IWORK_SIZE
-    CONFIG%EMXI = CONFIG%SMXI-ONE + XI_COLS * CONFIG%NM
-    CONFIG%IWORK_SIZE = CONFIG%EMXI
-    ! SIZES
-    CONFIG%SSB = ONE + CONFIG%IWORK_SIZE
-    CONFIG%ESB = CONFIG%SSB-ONE + CONFIG%NM
-    CONFIG%IWORK_SIZE = CONFIG%ESB
     ! A order (for orthogonalization)
     CONFIG%SAO = ONE + CONFIG%IWORK_SIZE
     CONFIG%EAO = CONFIG%SAO-ONE + CONFIG%ADS * CONFIG%NUM_THREADS
@@ -639,6 +634,20 @@ CONTAINS
     CONFIG%SMO = ONE + CONFIG%IWORK_SIZE
     CONFIG%EMO = CONFIG%SMO-ONE + CONFIG%MDS * CONFIG%NUM_THREADS
     CONFIG%IWORK_SIZE = CONFIG%EMO
+    ! Set up long-integer valued work array.
+    CONFIG%LWORK_SIZE = 0_INT64
+    ! AXI
+    CONFIG%SAXI = ONE + CONFIG%LWORK_SIZE
+    CONFIG%EAXI = CONFIG%SAXI-ONE + AXI_COLS * CONFIG%NA
+    CONFIG%LWORK_SIZE = CONFIG%EAXI
+    ! XI
+    CONFIG%SMXI = ONE + CONFIG%LWORK_SIZE
+    CONFIG%EMXI = CONFIG%SMXI-ONE + XI_COLS * CONFIG%NM
+    CONFIG%LWORK_SIZE = CONFIG%EMXI
+    ! SIZES
+    CONFIG%SSB = ONE + CONFIG%LWORK_SIZE
+    CONFIG%ESB = CONFIG%SSB-ONE + CONFIG%NM
+    CONFIG%LWORK_SIZE = CONFIG%ESB
   END SUBROUTINE NEW_FIT_CONFIG
 
   ! Initialize the weights for a model, optionally provide a random seed.
@@ -790,12 +799,12 @@ CONTAINS
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32),       INTENT(IN), DIMENSION(:,:) :: AXI
-    INTEGER(KIND=INT32),       INTENT(IN), DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32),       INTENT(IN), DIMENSION(:,:) :: XI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
-    INTEGER(KIND=INT32),       INTENT(OUT) :: INFO
+    INTEGER(KIND=INT32), INTENT(OUT) :: INFO
     INFO = 0
     ! Compute whether the shape matches the CONFIG.
     IF (SIZE(MODEL,KIND=INT64) .NE. CONFIG%TOTAL_SIZE) THEN
@@ -805,9 +814,9 @@ CONTAINS
     ELSE IF (SIZE(X,1,INT64) .NE. CONFIG%MDN) THEN
        INFO = 3 ! X input dimension is bad.
     ELSE IF ((CONFIG%MDO .GT. 0) .AND. (SIZE(Y,1,INT64) .NE. CONFIG%MDO)) THEN
-       INFO = 4 ! Output dimension is bad.
+       INFO = 4 ! Model output dimension is bad, does not match Y.
     ELSE IF ((CONFIG%MDO .EQ. 0) .AND. (SIZE(Y,1,INT64) .NE. CONFIG%ADO)) THEN
-       INFO = 5 ! Output dimension is bad.
+       INFO = 5 ! Aggregator output dimension is bad, does not match Y.
     ELSE IF ((CONFIG%MNE .GT. 0) .AND. (SIZE(XI,2,INT64) .NE. SIZE(X,2,INT64))) THEN
        INFO = 6 ! Input integer XI size does not match X.
     ELSE IF ((MINVAL(XI) .LT. 0) .OR. (MAXVAL(XI) .GT. CONFIG%MNE)) THEN
@@ -832,7 +841,7 @@ CONTAINS
        BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS, JOINT, INFO)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     INTEGER(KIND=INT64), INTENT(IN) :: NA, NM
-    INTEGER(KIND=INT32), INTENT(IN),  DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     INTEGER(KIND=INT64), INTENT(OUT), ALLOCATABLE, DIMENSION(:) :: BATCHA_STARTS, BATCHA_ENDS
     INTEGER(KIND=INT64), INTENT(OUT), ALLOCATABLE, DIMENSION(:) :: AGG_STARTS
     INTEGER(KIND=INT64), INTENT(OUT), ALLOCATABLE, DIMENSION(:) :: BATCHM_STARTS, BATCHM_ENDS
@@ -992,9 +1001,12 @@ CONTAINS
     !   3) ["multiplier" - 1] is divisible by 4 if "modulus" is divisible by 4.
     ! 
     I_NEXT = MOD(INT(IRAND(),INT64), I_LIMIT) ! Pick a random initial value.
-    I_STEP = MOD(INT(IRAND(),INT64), I_LIMIT)*2_INT64 + ONE ! Pick a random odd-valued additive term.
-    I_MULT = 4_INT64 * (I_LIMIT * MOD(INT(IRAND(),INT64), I_LIMIT)) + ONE ! Pick a multiplier 1 greater than a multiple of 4.
+    I_MULT = ONE + 4_INT64 * (I_LIMIT + MOD(INT(IRAND(),INT64), I_LIMIT)) ! Pick a multiplier 1 greater than a multiple of 4.
+    I_STEP = ONE + 2_INT64 * MOD(INT(IRAND(),INT64), I_LIMIT) ! Pick a random odd-valued additive term.
     I_MOD = 2_INT64 ** CEILING(LOG(REAL(I_LIMIT)) / LOG(2.0)) ! Pick a power-of-2 modulus just big enough to generate all numbers.
+    ! Cap the multiplier and step by the "I_MOD" (since it doesn't matter if they are larger).
+    I_MULT = MOD(I_MULT, I_MOD)
+    I_STEP = MOD(I_STEP, I_MOD)
   END SUBROUTINE INITIALIZE_ITERATOR
 
   
@@ -1046,22 +1058,21 @@ CONTAINS
 
 
   ! Give the raw input data, fetch a new set of data that fits in memory.
-  SUBROUTINE FETCH_DATA(CONFIG, MODEL, AGG_ITERATORS, &
+  SUBROUTINE FETCH_DATA(CONFIG, AGG_ITERATORS, &
        AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
-       X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA )
+       X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
-    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AGG_ITERATORS
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AX_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: AXI_IN
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:,:) :: AXI
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:) :: SIZES_IN
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI_IN
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AXI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES_IN
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: X_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: XI_IN
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:,:) :: XI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI_IN
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW_IN
@@ -1078,16 +1089,17 @@ CONTAINS
     CALL CPU_TIME(CPU_TIME_START)
     ! Allocate storage space if it will be used.
     IF (SIZE(SIZES_IN) .GT. 0) THEN
-       ALLOCATE(RSIZES(1:CONFIG%NM), SORTED_ORDER(1:CONFIG%NM))
+       ALLOCATE(RSIZES(1:CONFIG%NM), SORTED_ORDER(1:CONFIG%NM))  ! LOCAL ALLOCATION
     END IF
     ! Pack the regular inputs into the working space, storing sizes.
     START_VALUE = CONFIG%I_NEXT
-    GENDEX = 0
     DO I = 1, MIN(CONFIG%NM, SIZE(Y_IN,2,KIND=INT64))
+       ! Choose iteration strategy (linear is faster when all points are
+       !   needed, otherwise the random generator is used to pick points).
        IF (CONFIG%NM .GE. SIZE(Y_IN,2,KIND=INT64)) THEN
-          GENDEX = GENDEX + 1
+          GENDEX = I
        ELSE
-          GENDEX = GET_NEXT_INDEX(CONFIG%NM, CONFIG%I_NEXT, CONFIG%I_MULT, CONFIG%I_STEP, CONFIG%I_MOD)
+          GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, CONFIG%I_STEP, CONFIG%I_MOD)
        END IF
        ! Store the size.
        IF (SIZE(SIZES_IN) .GT. 0) THEN
@@ -1106,7 +1118,8 @@ CONTAINS
        ! Determine a maximum allowed size that will permit the most
        !  points to have the most possible aggregate inputs.
        CALL ARGSORT(RSIZES(:), SORTED_ORDER(:))
-       NREMAIN = REAL(CONFIG%NA,RT)
+       NA = MIN(CONFIG%NA, SIZE(AX,2,KIND=INT64))
+       NREMAIN = REAL(NA,RT)
        compute_max_agg : DO I = 1, CONFIG%NM
           ! Assuming all elements had the size of the current element, would they fit?
           CURRENT_TOTAL = RSIZES(SORTED_ORDER(I)) * REAL(CONFIG%NM - I + ONE, RT)
@@ -1141,12 +1154,13 @@ CONTAINS
        ! Pack in the aggregate inputs.
        AS = ONE
        CONFIG%I_NEXT = START_VALUE ! Reset the iterator back to where it started.
-       GENDEX = 0
+       ! TODO: Parallelize with an atomic wait over GET_NEXT_INDEX
+       !       make AS computation local (so there is no dependence)
        DO I = 1, MIN(CONFIG%NM, SIZE(SIZES_IN,KIND=INT64))
-          IF (CONFIG%NM .GE. SIZE(SIZES_IN)) THEN
-             GENDEX = GENDEX + 1
+          IF (CONFIG%NM .GE. SIZE(SIZES_IN,KIND=INT64)) THEN
+             GENDEX = I
           ELSE
-             GENDEX = GET_NEXT_INDEX(CONFIG%NM, CONFIG%I_NEXT, CONFIG%I_MULT, CONFIG%I_STEP, CONFIG%I_MOD)
+             GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, CONFIG%I_STEP, CONFIG%I_MOD)
           END IF
           ! Pack in those inputs.
           DO J = 1, SIZES(I)
@@ -1160,7 +1174,7 @@ CONTAINS
              )
              IF (CONFIG%PAIRWISE_AGGREGATION) THEN
                 ! Get a unique pair 
-                CALL INDEX_TO_PAIR(AGG_ITERATORS(1,GENDEX), K, P1, P2)
+                CALL INDEX_TO_PAIR(SIZES_IN(GENDEX), K, P1, P2)
                 P1 = AGG_STARTS(GENDEX) + P1 - ONE
                 P2 = AGG_STARTS(GENDEX) + P2 - ONE
                 ! Handle the case of a lone index (it paired with itself).
@@ -1176,11 +1190,12 @@ CONTAINS
                    ! Translate AXI embedding differences into appropriate integer values.
                    DO L = 1, SIZE(AXI_IN,1)
                       ! Get the single integer representing this pair.
-                      CALL PAIR_TO_INDEX(INT(CONFIG%ANE,INT64), INT(AXI_IN(L,P1),INT64), INT(AXI_IN(L,P2),INT64), K)
-                      AXI(L,AS) = K
+                      CALL PAIR_TO_INDEX(INT(CONFIG%ANE,INT64)+ONE, AXI_IN(L,P1)+ONE, AXI_IN(L,P2)+ONE, K)
+                      AXI(L,AS) = K + INT(CONFIG%ANE,INT64)
                    END DO
                 END IF
              ELSE
+                ! Convert the index in THIS aggregate set (K) to the offset input index (P1).
                 P1 = AGG_STARTS(GENDEX) + K - ONE
                 ! Store AGG value in AX.
                 AX(:CONFIG%ADN,AS) = AX_IN(:,P1)
@@ -1194,7 +1209,7 @@ CONTAINS
        ! Deallocate memory for identifying start of aggregate sets.
        DEALLOCATE(AGG_STARTS)
        ! Set the total number of aggregate inputs that were added.
-       NA = CONFIG%NA - INT(NREMAIN, INT64)
+       NA = AS - ONE
     ELSE
        NA = 0_INT64
     END IF
@@ -1209,12 +1224,13 @@ CONTAINS
   ! Given a model and mixed real and integer inputs, embed the integer
   !  inputs into their appropriate real-value-only formats.
   ! 
-  ! TODO: Make this convert negative integers in AXI into pairs.
+  ! TODO: Should this routine check for usage errors since it is expected
+  !       to be called by external users when evaluating a model?
   SUBROUTINE EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: AXI
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: XI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX ! ADI, SIZE(AX,2)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X  ! MDI, SIZE(X,2)
     REAL :: CPU_TIME_START, CPU_TIME_END
@@ -1245,30 +1261,134 @@ CONTAINS
     SUBROUTINE UNPACK_EMBEDDINGS(MDE, MNE, EMBEDDINGS, INT_INPUTS, EMBEDDED)
       INTEGER(KIND=INT32), INTENT(IN) :: MDE, MNE
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDE, MNE) :: EMBEDDINGS
-      INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
-      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: EMBEDDED
+      INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
+      REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: EMBEDDED
       INTEGER(KIND=INT64) :: N, D, E, E1, E2
       REAL(KIND=RT) :: RD
       RD = REAL(SIZE(INT_INPUTS,1,INT64),RT)
       ! Add together appropriate embedding vectors based on integer inputs.
       EMBEDDED(:,:) = 0.0_RT
-      !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(N, D, E)
-      DO N = 1, SIZE(INT_INPUTS,2,KIND=INT64)
-         DO D = 1, SIZE(INT_INPUTS,1,KIND=INT64)
+      !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(N, D, E, E1, E2)
+      DO N = ONE, SIZE(INT_INPUTS,2,KIND=INT64)
+         DO D = ONE, SIZE(INT_INPUTS,1,KIND=INT64)
             E = INT_INPUTS(D,N)
             IF ((E .GT. 0) .AND. (E .LE. MNE)) THEN
                EMBEDDED(:,N) = EMBEDDED(:,N) + EMBEDDINGS(:,E)
             ELSE IF (E .GT. MNE) THEN
-               CALL INDEX_TO_PAIR(INT(MNE,INT64), E, E1, E2)
-               EMBEDDED(:,N) = EMBEDDED(:,N) + EMBEDDINGS(:,E1) - EMBEDDINGS(:,E2)
+               CALL INDEX_TO_PAIR(INT(MNE,INT64)+ONE, E-MNE, E1, E2)
+               ! Skip "0" embeddings, since they are the zero vector.
+               IF (E1 .GT. ONE) THEN
+                  EMBEDDED(:,N) = EMBEDDED(:,N) + EMBEDDINGS(:,E1-ONE)
+               END IF
+               IF (E2 .GT. ONE) THEN
+                  EMBEDDED(:,N) = EMBEDDED(:,N) - EMBEDDINGS(:,E2-ONE)
+               END IF
             END IF
          END DO
-         IF (SIZE(INT_INPUTS,1,KIND=INT64) > 1) THEN
+         IF (SIZE(INT_INPUTS,1,KIND=INT64) > ONE) THEN
             EMBEDDED(:,N) = EMBEDDED(:,N) / RD
          END IF
       END DO
     END SUBROUTINE UNPACK_EMBEDDINGS
   END SUBROUTINE EMBED
+
+
+  ! Normalize numeric input values.
+  SUBROUTINE NORMALIZE_INPUTS(CONFIG, MODEL, AX, SIZES, X, INFO)
+    TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
+    REAL(KIND=RT), TARGET, INTENT(IN), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
+    INTEGER(KIND=INT32), INTENT(OUT) :: INFO    
+    ! Local variables.
+    REAL(KIND=RT), POINTER, DIMENSION(:) :: X_SHIFT, AX_SHIFT
+    REAL(KIND=RT), POINTER, DIMENSION(:,:) :: X_RESCALE, AX_RESCALE
+    ! LOCAL ALLOCATION
+    INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
+         BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
+    INTEGER(KIND=INT64) :: I, BATCH, BN, BS, BE, BT, NT
+    ! 
+    INFO = 0
+    ! Set the pointers to the internal normalization values.
+    IF (CONFIG%NEEDS_SHIFTING) THEN
+       AX_SHIFT(1:CONFIG%ADN) => MODEL(CONFIG%AISS:CONFIG%AISE)
+       X_SHIFT(1:CONFIG%MDN) => MODEL(CONFIG%MISS:CONFIG%MISE)
+    END IF
+    IF (CONFIG%NEEDS_SCALING) THEN
+       AX_RESCALE(1:CONFIG%ADN,1:CONFIG%ADN) => MODEL(CONFIG%AIMS:CONFIG%AIME)
+       X_RESCALE(1:CONFIG%MDN,1:CONFIG%MDN) => MODEL(CONFIG%MIMS:CONFIG%MIME)
+    END IF
+    ! Compute the batch start and end indices.
+    CALL COMPUTE_BATCHES(CONFIG, SIZE(AX,2,KIND=INT64), SIZE(X,2,KIND=INT64), SIZES, &
+         BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS, &
+         JOINT=.FALSE., INFO=INFO)
+    IF (INFO .NE. 0) RETURN
+    ! Normalize the aggregate inputs.
+    IF (CONFIG%ADO .GT. 0_INT64) THEN
+       ! Set the number of threads.
+       NT = MIN(SIZE(AX,2,KIND=INT64), CONFIG%NUM_THREADS)
+       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
+       aggregate_normalization : DO BATCH = 1, SIZE(BATCHA_STARTS, KIND=INT64)
+          BS = BATCHA_STARTS(BATCH)
+          BE = BATCHA_ENDS(BATCH)
+          BT = BE-BS+1
+          IF (BT .LE. 0) CYCLE aggregate_normalization
+          ! Normalize the data.
+          IF (CONFIG%NORMALIZE .AND. (CONFIG%ADN .GT. 0)) THEN
+             ! Apply shift terms to aggregator inputs.
+             IF (CONFIG%NEEDS_SHIFTING) THEN
+                DO I = BS, BE
+                   AX(:CONFIG%ADN,I) = AX(:CONFIG%ADN,I) + AX_SHIFT(:)
+                END DO
+             END IF
+             ! Remove any NaN or Inf values from the data.
+             IF (CONFIG%NEEDS_CLEANING) THEN
+                WHERE (IS_NAN(AX(:CONFIG%ADN,BS:BE)) .OR. (.NOT. IS_FINITE(AX(:CONFIG%ADN,BS:BE))))
+                   AX(:CONFIG%ADN,BS:BE) = 0.0_RT
+                END WHERE
+             END IF
+             ! Apply multiplier.
+             IF (CONFIG%NEEDS_SCALING) THEN
+                AX(:CONFIG%ADN,BS:BE) = MATMUL(TRANSPOSE(AX_RESCALE(:,:)), AX(:CONFIG%ADN,BS:BE))
+             END IF
+          END IF
+       END DO aggregate_normalization
+    END IF
+    ! Normalize the fixed inputs.
+    IF (CONFIG%MDO .GT. 0) THEN
+       ! Set the number of threads.
+       NT = MIN(SIZE(X,2,KIND=INT64), CONFIG%NUM_THREADS)
+       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
+       fixed_normalization : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
+          ! Update "BS", "BE", and "BT" to coincide with the model.
+          BS = BATCHM_STARTS(BATCH)
+          BE = BATCHM_ENDS(BATCH)
+          BT = BE-BS+1
+          IF ((BT .LE. 0) .OR. (MIN(BS,BE) .LE. 0)) CYCLE fixed_normalization
+          IF (CONFIG%NORMALIZE .AND. (CONFIG%MDN .GT. 0)) THEN
+             ! Apply shift terms to numeric model inputs.
+             IF (CONFIG%NEEDS_SHIFTING) THEN
+                DO I = BS, BE
+                   X(:CONFIG%MDN,I) = X(:CONFIG%MDN,I) + X_SHIFT(:)
+                END DO
+             END IF
+             ! Remove any NaN or Inf values from the data.
+             IF (CONFIG%NEEDS_CLEANING) THEN
+                WHERE (IS_NAN(X(:CONFIG%MDN,BS:BE)) .OR. (.NOT. IS_FINITE(X(:CONFIG%MDN,BS:BE))))
+                   X(:CONFIG%MDN,BS:BE) = 0.0_RT
+                END WHERE
+             END IF
+             ! Apply multiplier.
+             IF (CONFIG%NEEDS_SCALING) THEN
+                X(:CONFIG%MDN,BS:BE) = MATMUL(TRANSPOSE(X_RESCALE(:,:)), X(:CONFIG%MDN,BS:BE))
+             END IF
+          END IF
+       END DO fixed_normalization
+    END IF
+    ! Deallocate batch sizes.
+    DEALLOCATE(BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS)
+  END SUBROUTINE NORMALIZE_INPUTS
 
 
   ! Evaluate the piecewise linear regression model, assume already-embedded inputs.
@@ -1277,16 +1397,16 @@ CONTAINS
     REAL(KIND=RT), TARGET, INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: AY
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:)   :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:,:) :: A_STATES ! SIZE(AX,2), ADS, (ANS|2)
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:,:) :: M_STATES ! SIZE(X, 2), MDS, (MNS|2)
     INTEGER(KIND=INT32), INTENT(INOUT) :: INFO
     ! Internal values.
-    INTEGER(KIND=INT64) :: I, BATCH, BN, BS, BE, BT, GS, GE, NB, NT, E
-    REAL(KIND=RT), POINTER, DIMENSION(:) :: X_SHIFT, AX_SHIFT, AY_SHIFT, Y_SHIFT
-    REAL(KIND=RT), POINTER, DIMENSION(:,:) :: X_RESCALE, AX_RESCALE, Y_RESCALE
+    INTEGER(KIND=INT64) :: I, BATCH, BS, BE, BT, GS, GE, NB, NT, E
+    REAL(KIND=RT), POINTER, DIMENSION(:) :: AY_SHIFT, Y_SHIFT
+    REAL(KIND=RT), POINTER, DIMENSION(:,:) :: Y_RESCALE
     ! LOCAL ALLOCATION
     INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -1297,15 +1417,6 @@ CONTAINS
     CALL CPU_TIME(CPU_TIME_START)
     ! If there are no points to evaluate, then immediately return.
     IF (SIZE(Y,2,KIND=INT64) .EQ. 0) RETURN
-    ! Set the pointers to the internal normalization values.
-    IF (CONFIG%NORMALIZE) THEN
-       AX_SHIFT(1:CONFIG%ADN) => MODEL(CONFIG%AISS:CONFIG%AISE)
-       AX_RESCALE(1:CONFIG%ADN,1:CONFIG%ADN) => MODEL(CONFIG%AIMS:CONFIG%AIME)
-       X_SHIFT(1:CONFIG%MDN) => MODEL(CONFIG%MISS:CONFIG%MISE)
-       X_RESCALE(1:CONFIG%MDN,1:CONFIG%MDN) => MODEL(CONFIG%MIMS:CONFIG%MIME)
-       Y_SHIFT(1:CONFIG%DO) => MODEL(CONFIG%MOSS:CONFIG%MOSE)
-       Y_RESCALE(1:CONFIG%DO,1:CONFIG%DO) => MODEL(CONFIG%MOMS:CONFIG%MOME)
-    END IF
     AY_SHIFT(1:CONFIG%ADO) => MODEL(CONFIG%AOSS:CONFIG%AOSE)
     ! Compute the batch start and end indices.
     CALL COMPUTE_BATCHES(CONFIG, SIZE(AX,2,KIND=INT64), SIZE(X,2,KIND=INT64), SIZES, &
@@ -1324,21 +1435,6 @@ CONTAINS
           BE = BATCHA_ENDS(BATCH)
           BT = BE-BS+1
           IF (BT .LE. 0) CYCLE aggregator_evaluation
-          ! Normalize the data.
-          IF ((CONFIG%NORMALIZE) .AND. (CONFIG%ADN .GT. 0)) THEN
-             ! Apply shift terms to aggregator inputs.
-             DO I = BS, BE
-                AX(:CONFIG%ADN,I) = AX(:CONFIG%ADN,I) + AX_SHIFT(:)
-             END DO
-             ! Remove any NaN or Inf values from the data.
-             WHERE (IS_NAN(AX(:CONFIG%ADN,BS:BE)) .OR. (.NOT. IS_FINITE(AX(:CONFIG%ADN,BS:BE))))
-                AX(:CONFIG%ADN,BS:BE) = 0.0_RT
-             END WHERE
-             ! Apply multiplier.
-             IF (CONFIG%NEEDS_SCALING) THEN
-                AX(:CONFIG%ADN,BS:BE) = MATMUL(TRANSPOSE(AX_RESCALE(:,:)), AX(:CONFIG%ADN,BS:BE))
-             END IF
-          END IF
           ! Evaluate the aggregator model.
           CALL UNPACKED_EVALUATE(INT(BT), &
                CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ADSO, CONFIG%ADO+1, &
@@ -1398,20 +1494,6 @@ CONTAINS
           BE = BATCHM_ENDS(BATCH)
           BT = BE-BS+1
           IF ((BT .LE. 0) .OR. (MIN(BS,BE) .LE. 0)) CYCLE model_evaluation
-          ! Apply shift terms to numeric model inputs.
-          IF ((CONFIG%NORMALIZE) .AND. (CONFIG%MDN .GT. 0)) THEN
-             DO I = BS, BE
-                X(:CONFIG%MDN,I) = X(:CONFIG%MDN,I) + X_SHIFT(:)
-             END DO
-             ! Remove any NaN or Inf values from the data.
-             WHERE (IS_NAN(X(:CONFIG%MDN,BS:BE)) .OR. (.NOT. IS_FINITE(X(:CONFIG%MDN,BS:BE))))
-                X(:CONFIG%MDN,BS:BE) = 0.0_RT
-             END WHERE
-             ! Apply multiplier.
-             IF (CONFIG%NEEDS_SCALING) THEN
-                X(:CONFIG%MDN,BS:BE) = MATMUL(TRANSPOSE(X_RESCALE(:,:)), X(:CONFIG%MDN,BS:BE))
-             END IF
-          END IF
           ! Run the fixed model.
           CALL UNPACKED_EVALUATE(INT(BT), &
                CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, CONFIG%MDSO, CONFIG%MDO, &
@@ -1425,6 +1507,13 @@ CONTAINS
     END IF
     ! Apply shift terms to final outputs.
     IF (CONFIG%NORMALIZE) THEN
+       ! Set the pointers to the appropriate spots in model memory.
+       IF (CONFIG%NEEDS_SHIFTING) THEN
+          Y_SHIFT(1:CONFIG%DO) => MODEL(CONFIG%MOSS:CONFIG%MOSE)
+       END IF
+       IF (CONFIG%NEEDS_SCALING) THEN
+          Y_RESCALE(1:CONFIG%DO,1:CONFIG%DO) => MODEL(CONFIG%MOMS:CONFIG%MOME)
+       END IF
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
        output_normalization : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
           ! Update "BS", "BE", and "BT" to coincide with the model.
@@ -1437,9 +1526,11 @@ CONTAINS
              Y(:,BS:BE) = MATMUL(TRANSPOSE(Y_RESCALE(:,:)), Y(:,BS:BE))
           END IF
           ! Apply shift.
-          DO I = BS, BE
-             Y(:,I) = Y(:,I) - Y_SHIFT(:)
-          END DO
+          IF (CONFIG%NEEDS_SHIFTING) THEN
+             DO I = BS, BE
+                Y(:,I) = Y(:,I) - Y_SHIFT(:)
+             END DO
+          END IF
        END DO output_normalization
     END IF
     ! Deallocate batch sizes.
@@ -1537,20 +1628,18 @@ CONTAINS
   ! Compute the gradient with respect to embeddings given the input
   !  gradient by aggregating over the repeated occurrences of the embedding.
   SUBROUTINE EMBEDDING_GRADIENT(MDE, MNE, PAIRWISE, INT_INPUTS, GRAD, &
-       EMBEDDING_GRAD, TEMP_GRAD, COUNTS, NT)
+       EMBEDDING_GRAD, TEMP_GRAD, NT)
     INTEGER(KIND=INT32), INTENT(IN) :: MDE, MNE
     LOGICAL(KIND=INT8), INTENT(IN) :: PAIRWISE
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: INT_INPUTS
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: GRAD
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE,MNE) :: EMBEDDING_GRAD
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: TEMP_GRAD
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: COUNTS
     INTEGER(KIND=INT64), INTENT(IN) :: NT
     ! Local variables.
     INTEGER(KIND=INT64) :: N, D, E, E1, E2
     REAL(KIND=RT) :: RD
     ! Accumulate the gradients for all embedding vectors.
-    COUNTS(:) = 0.0_RT
     TEMP_GRAD(:,:) = 0.0_RT
     RD = REAL(SIZE(INT_INPUTS,1),RT)
     IF (PAIRWISE) THEN
@@ -1558,14 +1647,17 @@ CONTAINS
           DO D = 1, SIZE(INT_INPUTS,1,INT64)
              E = INT(INT_INPUTS(D,N),INT64)
              IF ((E .GT. 0) .AND. (E .LE. MNE)) THEN
-                COUNTS(E) = COUNTS(E) + 1.0_RT
                 TEMP_GRAD(:,E) = TEMP_GRAD(:,E) + GRAD(:,N) / RD
              ELSE IF (E .GT. MNE) THEN
-                CALL INDEX_TO_PAIR(INT(MNE,INT64), E, E1, E2)
-                COUNTS(E1) = COUNTS(E1) + 1.0_RT
-                COUNTS(E2) = COUNTS(E2) + 1.0_RT
-                TEMP_GRAD(:,E1) = TEMP_GRAD(:,E1) + GRAD(:,N) / RD
-                TEMP_GRAD(:,E2) = TEMP_GRAD(:,E2) - GRAD(:,N) / RD
+                CALL INDEX_TO_PAIR(INT(MNE,INT64)+ONE, E-MNE, E1, E2)
+                IF (E1 .GT. ONE) THEN
+                   E1 = E1 - ONE
+                   TEMP_GRAD(:,E1) = TEMP_GRAD(:,E1) + GRAD(:,N) / RD
+                END IF
+                IF (E2 .GT. ONE) THEN
+                   E2 = E2 - ONE
+                   TEMP_GRAD(:,E2) = TEMP_GRAD(:,E2) - GRAD(:,N) / RD
+                END IF
              END IF
           END DO
        END DO
@@ -1574,7 +1666,6 @@ CONTAINS
           DO D = 1, SIZE(INT_INPUTS,1,INT64)
              E = INT(INT_INPUTS(D,N),INT64)
              IF (E .GT. 0) THEN
-                COUNTS(E) = COUNTS(E) + 1.0_RT
                 TEMP_GRAD(:,E) = TEMP_GRAD(:,E) + GRAD(:,N) / RD
              END IF
           END DO
@@ -1583,9 +1674,7 @@ CONTAINS
     ! Average the embedding gradient by dividing by the sum of occurrences.
     RD = REAL(NT * SIZE(INT_INPUTS,2),RT)
     DO E = 1, MNE
-       IF (COUNTS(E) .GT. 0.0_RT) THEN
-          EMBEDDING_GRAD(:,E) = EMBEDDING_GRAD(:,E) + TEMP_GRAD(:,E) / RD
-       END IF
+       EMBEDDING_GRAD(:,E) = EMBEDDING_GRAD(:,E) + TEMP_GRAD(:,E) / RD
     END DO
   END SUBROUTINE EMBEDDING_GRADIENT
 
@@ -1597,15 +1686,15 @@ CONTAINS
        M_STATES, A_STATES, AY, GRAD, NT, BATCHA_STARTS, &
        BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:) :: MODEL
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32),       INTENT(IN),    DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_STATES ! SIZE(X, 2), MDS, MNS+1
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_STATES ! SIZE(AX,2), ADS, ANS+1
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY ! SIZE(AX,2), ADO+1
-    REAL(KIND=RT), INTENT(OUT),   DIMENSION(:,:) :: GRAD ! SIZE(MODEL), NUM_THREADS
+    REAL(KIND=RT), INTENT(OUT),  DIMENSION(:,:) :: GRAD ! SIZE(MODEL), NUM_THREADS
     INTEGER(KIND=INT32), INTENT(IN) :: NT
     INTEGER(KIND=INT64), DIMENSION(:), INTENT(IN) :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -1832,14 +1921,14 @@ CONTAINS
        AX, AXI, SIZES, X, XI, Y, YW, &
        SUM_SQUARED_GRADIENT, MODEL_GRAD, INFO, &
        AY_GRADIENT, Y_GRADIENT, A_GRADS, M_GRADS, &
-       A_EMB_TEMP, M_EMB_TEMP, A_EMB_COUNTS, M_EMB_COUNTS)
+       A_EMB_TEMP, M_EMB_TEMP)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: AXI
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: XI
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW
     ! Sum (over all data) squared error (summed over dimensions).
@@ -1855,8 +1944,6 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_GRADS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_EMB_TEMP
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_EMB_TEMP
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_EMB_COUNTS
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: M_EMB_COUNTS
     INTEGER(KIND=INT64) :: L, D, NT, TN, BATCH, SS, SE, MS, ME
     ! LOCAL ALLOCATION
     INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -1937,7 +2024,7 @@ CONTAINS
           ! Convert the computed input gradients into average gradients for each embedding.
           CALL EMBEDDING_GRADIENT(CONFIG%MDE, CONFIG%MNE, .FALSE._INT8, &
                XI(:,MS:ME), X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,MS:ME), &
-               MODEL_GRAD(CONFIG%MSEV:CONFIG%MEEV,TN), M_EMB_TEMP(:,:,TN), M_EMB_COUNTS(:,TN), NT)
+               MODEL_GRAD(CONFIG%MSEV:CONFIG%MEEV,TN), M_EMB_TEMP(:,:,TN), NT)
        END DO m_embeddings_gradient
     END IF
     IF (CONFIG%ADE .GT. 0) THEN
@@ -1950,7 +2037,7 @@ CONTAINS
           TN = OMP_GET_THREAD_NUM() + 1          
           CALL EMBEDDING_GRADIENT(CONFIG%ADE, CONFIG%ANE, CONFIG%PAIRWISE_AGGREGATION, &
                AXI(:,SS:SE), AX(CONFIG%ADN+1:CONFIG%ADI,SS:SE), &
-               MODEL_GRAD(CONFIG%ASEV:CONFIG%AEEV,TN), A_EMB_TEMP(:,:,TN), A_EMB_COUNTS(:,TN), NT)
+               MODEL_GRAD(CONFIG%ASEV:CONFIG%AEEV,TN), A_EMB_TEMP(:,:,TN), NT)
        END DO a_embeddings_gradient
     END IF
     ! Free memory devoted to batces.
@@ -1975,17 +2062,17 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
     INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AGG_ITERATORS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: AXI_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:) :: SIZES_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: XI_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:,:) :: AXI
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:) :: SIZES
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AXI
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:,:) :: XI
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: AX_SHIFT
@@ -2024,7 +2111,7 @@ CONTAINS
          Y_SCALE(SIZE(Y_RESCALE,1), SIZE(Y_RESCALE,2)) &
     )
     ! Get some data to use in the normalization process.
-    CALL FETCH_DATA(CONFIG, MODEL, AGG_ITERATORS, &
+    CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
          AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
          X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA )
     ! Encode embeddings if the are provided.
@@ -2189,24 +2276,6 @@ CONTAINS
                X(E:,:), & ! This is "Y", where the mean-aggregated outputs will be stored.
                A_STATES(:NA,:,:), A_STATES(:NA,:,:), INFO)
           CONFIG%MDO = D
-
-          ! ! Compute AY shift as the mean of outputs, apply it.
-          ! AY_SHIFT(:) = -SUM(AY(:,:CONFIG%ADO),1) / REAL(SIZE(AY,1,INT64),RT)
-          ! !$OMP PARALLEL DO
-          ! DO D = 1, CONFIG%ADO
-          !    AY(:,D) = AY(:,D) + AY_SHIFT(D)
-          ! END DO
-          ! ! Compute the AY scale as the standard deviation of outputs.
-          ! AY(1,:CONFIG%ADO) = SUM(AY(:,:CONFIG%ADO)**2,1) / REAL(SIZE(AY,1,INT64),RT)
-          ! ! This storage space is overwritten on each embedding, so we can use it
-          ! !  here as a scratch space for holding the intermediate normalization values.
-          ! AY(1,:CONFIG%ADO) = SQRT(MAX(AY(1,:CONFIG%ADO), SQRT(EPSILON(0.0_RT))))
-          ! ! Apply the factor to the output vectors (and the shift values).
-          ! DO D = 1, CONFIG%ADO
-          !    A_OUT_VECS(:,D) = A_OUT_VECS(:,D) / AY(1,D)
-          !    AY_SHIFT(D) = AY_SHIFT(D) / AY(1,D)
-          ! END DO
-
           ! Compute AY shift as the mean of mean-aggregated outputs, apply it.
           AY_SHIFT(:) = -SUM(X(E:,:),2) / REAL(SIZE(X,2,INT64),RT)
           !$OMP PARALLEL DO
@@ -2222,7 +2291,6 @@ CONTAINS
              A_OUT_VECS(:,D) = A_OUT_VECS(:,D) / X(E+D-1,1)
              AY_SHIFT(D) = AY_SHIFT(D) / X(E+D-1,1)
           END DO
-
        END IF
        CONFIG%AY_NORMALIZED = .TRUE.
     END IF
@@ -2241,7 +2309,7 @@ CONTAINS
   ! Performing conditioning related operations on this model 
   !  (ensure that mean squared error is effectively reduced).
   SUBROUTINE CONDITION_MODEL(CONFIG, MODEL, MODEL_GRAD_MEAN, MODEL_GRAD_CURV, &
-       AX, AXI, AY, AY_GRADIENT, X, XI, Y, Y_GRADIENT, &
+       AX, AXI, AY, AY_GRADIENT, SIZES, X, XI, Y, Y_GRADIENT, &
        NUM_THREADS, FIT_STEP, &
        A_STATES, M_STATES, A_GRADS, M_GRADS, &
        A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, A_ORDER, M_ORDER, &
@@ -2252,13 +2320,14 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL_GRAD_CURV
     ! Data.
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
-    INTEGER(KIND=INT32),       INTENT(IN),    DIMENSION(:,:) :: AXI
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: AY
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: AY_GRADIENT
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY_GRADIENT
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32),       INTENT(IN),    DIMENSION(:,:) :: XI
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: Y
-    REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: Y_GRADIENT
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y_GRADIENT
     ! Configuration.
     INTEGER(KIND=INT64), INTENT(IN) :: NUM_THREADS, FIT_STEP
     ! States, gradients, lengths, temporary storage, and order (of ranks).
@@ -2285,6 +2354,7 @@ CONTAINS
          MODEL(CONFIG%ASOV:CONFIG%AEOV), & ! A out vecs
          MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
          AY(:,:), & ! AY values (to update shift)
+         SIZES(:), & ! Aggregate set sizes (for AY shift computation).
          MODEL(CONFIG%MECS:CONFIG%MECE), & ! M embeddings mean
          MODEL(CONFIG%MSEV:CONFIG%MEEV), & ! M embeddings
          MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
@@ -2359,7 +2429,7 @@ CONTAINS
     ! Make max length vector in each weight matrix have unit length.
     SUBROUTINE UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
          A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, &
-         A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, &
+         A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, SIZES, &
          M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, &
          M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
@@ -2373,6 +2443,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADSO, CONFIG%ADO+1) :: A_OUTPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY
+      INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE) :: M_EMBEDDINGS_MEAN
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMBEDDINGS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
@@ -2381,8 +2452,9 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
       ! Local variables.
-      INTEGER(KIND=INT32) :: L, D
+      INTEGER(KIND=INT64) :: L, D
       REAL(KIND=RT) :: SCALAR
+      INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: AGG_STARTS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
@@ -2409,17 +2481,26 @@ CONTAINS
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
          END IF
       END DO
-      ! AY_SHIFT
+      ! AY_SHIFT, and componentwise variance of AY 
       ! 
       ! Update the aggregator model output shift to produce componentwise mean-zero
       !  values (prevent divergence), but only when there is a model afterwards. 
       IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
            (SIZE(AY,1,INT64) .GT. 0_INT64) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
-         ALLOCATE(AY_SUM(1:CONFIG%ADO))
+         ALLOCATE(AY_SUM(1:CONFIG%ADO), AGG_STARTS(1:CONFIG%NA))
+         ! Compute the index of the first element of each aggregate set.
+         AGG_STARTS(1) = 1
+         DO D = 1, SIZE(SIZES,KIND=INT64)-ONE
+            AGG_STARTS(D+ONE) = AGG_STARTS(D) + SIZES(D)
+         END DO
          AY_SUM(:) = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
-         DO D = 1, SIZE(AY,1,INT64)
-            AY_SUM(:) = AY_SUM(:) + AY(D,:CONFIG%ADO) / REAL(SIZE(AY,1,INT64),RT)
+         DO D = 1, SIZE(SIZES,KIND=INT64)
+            IF (SIZES(D) .GT. 0_INT64) THEN
+               AY_SUM(:) = AY_SUM(:) + &
+                    SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO), 1) / &
+                    (REAL(SIZES(D),RT) * REAL(SIZE(SIZES,KIND=INT64),RT))
+            END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
             AY_SUM(:) = -AY_SHIFT(:)
@@ -2430,6 +2511,33 @@ CONTAINS
                - (CONFIG%STEP_AY_CHANGE         ) * AY_SUM(:)
          ELSE
             AY_SHIFT(:) = -AY_SUM(:)
+         END IF
+         ! AY variance.
+         AY_SUM(:) = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
+         DO D = 1, SIZE(SIZES,KIND=INT64)
+            IF (SIZES(D) .GT. 0_INT64) THEN
+               AY_SUM(:) = AY_SUM(:) + &
+                    SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO)**2, 1) / &
+                    (REAL(SIZES(D),RT) * REAL(SIZE(SIZES,KIND=INT64),RT))
+            END IF
+         END DO
+         WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
+            AY_SUM(:) = 1.0_RT
+         END WHERE
+         AY_SUM(:) = SQRT(MAX(AY_SUM(:), SQRT(EPSILON(0.0_RT))))
+         IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+            DO D = 1, CONFIG%ADO
+               A_OUTPUT_VECS(:,D) = &
+                    (1.0_RT - CONFIG%STEP_AY_CHANGE) * A_OUTPUT_VECS(:,D) &
+                  + (CONFIG%STEP_AY_CHANGE         ) * A_OUTPUT_VECS(:,D) / AY_SUM(D)
+            END DO
+         ELSE
+            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+            DO D = 1, CONFIG%ADO
+               A_OUTPUT_VECS(:,D) = A_OUTPUT_VECS(:,D) / AY_SUM(D)
+            END DO
          END IF
          DEALLOCATE(AY_SUM)
       END IF
@@ -2689,7 +2797,7 @@ CONTAINS
 
 
   ! Fit input / output pairs by minimizing mean squared error.
-  SUBROUTINE FIT_MODEL(CONFIG, MODEL, RWORK, IWORK, &
+  SUBROUTINE FIT_MODEL(CONFIG, MODEL, RWORK, IWORK, LWORK, &
        AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
        STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
     ! TODO: Take an output file name (STDERR and STDOUT are handled).
@@ -2697,11 +2805,12 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: RWORK
     INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:) :: IWORK
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: LWORK
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: AXI_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:) :: SIZES_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X_IN
-    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:,:) :: XI_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_IN
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW_IN
     INTEGER(KIND=INT32), INTENT(IN) :: STEPS
@@ -2740,20 +2849,22 @@ CONTAINS
        INFO = 13 ! Provided RWORK is not large enough.
     ELSE IF (SIZE(IWORK,KIND=INT64) .LT. CONFIG%IWORK_SIZE) THEN
        INFO = 14 ! Provided IWORK is not large enough.
+    ELSE IF (SIZE(LWORK,KIND=INT64) .LT. CONFIG%LWORK_SIZE) THEN
+       INFO = 15 ! Provided LWORK is not large enough.
     ELSE IF ((CONFIG%ADI .GT. 0) .AND. (CONFIG%NA .LT. 1)) THEN
-       INFO = 15 ! Aggregate batch size is zero with nonzero expected aggregate input.
+       INFO = 16 ! Aggregate batch size is zero with nonzero expected aggregate input.
     ELSE IF ((CONFIG%MDI .GT. 0) .AND. (CONFIG%NM .LT. 1)) THEN
-       INFO = 16 ! Model batch size is zero with nonzero expected model input.
+       INFO = 17 ! Model batch size is zero with nonzero expected model input.
     END IF
     ! Do shape checks on the YW (weights for Y's) provided.
     IF (SIZE(YW_IN,2) .NE. SIZE(Y_IN,2)) THEN
-       INFO = 17 ! Bad YW number of points.
+       INFO = 18 ! Bad YW number of points.
     ELSE IF ((SIZE(YW_IN,1) .NE. 0) & ! some weights provided
          .AND. (SIZE(YW_IN,1) .NE. 1) & ! not one weight per point
          .AND. (SIZE(YW_IN,1) .NE. SIZE(Y_IN,1))) THEN ! one weight per output component
-       INFO = 18 ! Bad YW dimension (either 1 per point or commensurate with Y).
+       INFO = 19 ! Bad YW dimension (either 1 per point or commensurate with Y).
     ELSE IF (MINVAL(YW_IN(:,:)) .LT. 0.0_RT) THEN
-       INFO = 19 ! Bad YW values (negative numbers are not allowed).
+       INFO = 20 ! Bad YW values (negative numbers are not allowed).
     END IF
     IF (INFO .NE. 0) RETURN
     ! Allocate local variables.
@@ -2780,10 +2891,10 @@ CONTAINS
     ! Unpack all of the work storage into the expected shapes.
     CALL UNPACKED_FIT_MODEL(&
          ! Data batch holders.
-         IWORK(CONFIG%SAXI : CONFIG%EAXI), & ! AXI
+         LWORK(CONFIG%SAXI : CONFIG%EAXI), & ! AXI
          RWORK(CONFIG%SAXB : CONFIG%EAXB), & ! AX
-         IWORK(CONFIG%SSB : CONFIG%ESB), & ! SIZES
-         IWORK(CONFIG%SMXI : CONFIG%EMXI), & ! XI
+         LWORK(CONFIG%SSB : CONFIG%ESB), & ! SIZES
+         LWORK(CONFIG%SMXI : CONFIG%EMXI), & ! XI
          RWORK(CONFIG%SMXB : CONFIG%EMXB), & ! X
          RWORK(CONFIG%SMYB : CONFIG%EMYB), & ! Y
          ! Model components.
@@ -2797,7 +2908,7 @@ CONTAINS
          RWORK(CONFIG%SMG : CONFIG%EMG), & ! MODEL_GRAD(NUM_VARS,NUM_THREADS)
          RWORK(CONFIG%SMGM : CONFIG%EMGM), & ! MODEL_GRAD_MEAN(NUM_VARS)
          RWORK(CONFIG%SMGC : CONFIG%EMGC), & ! MODEL_GRAD_CURV(NUM_VARS)
-         RWORK(CONFIG%SBM : CONFIG%EBM), & ! BEST_MODEL(NUM_VARS)
+         RWORK(CONFIG%SBM : CONFIG%EBM), & ! BEST_MODEL(TOTAL_SIZE)
          ! States and gradients in parellel regions (work space).
          RWORK(CONFIG%SYG : CONFIG%EYG), & ! Y_GRADIENT(MDO,NM)
          RWORK(CONFIG%SMXG : CONFIG%EMXG), & ! M_GRADS(NM,MDS,MNS+1)
@@ -2825,8 +2936,6 @@ CONTAINS
          RWORK(CONFIG%SMST : CONFIG%EMST), & ! M_STATE_TEMP
          RWORK(CONFIG%SAET : CONFIG%EAET), & ! A_EMB_TEMP
          RWORK(CONFIG%SMET : CONFIG%EMET), & ! M_EMB_TEMP
-         RWORK(CONFIG%SAEC : CONFIG%EAEC), & ! A_EMB_COUNTS
-         RWORK(CONFIG%SMEC : CONFIG%EMEC), & ! M_EMB_COUNTS
          ! Rank evaluation (when conditioning model).
          IWORK(CONFIG%SAO : CONFIG%EAO), & ! A_ORDER
          IWORK(CONFIG%SMO : CONFIG%EMO) & ! M_ORDER
@@ -2850,12 +2959,12 @@ CONTAINS
          AX_SHIFT, AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_SHIFT, &
          X_SHIFT, X_RESCALE, XI_SHIFT, XI_RESCALE, Y_SHIFT, Y_RESCALE, &
          A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, &
-         A_EMB_TEMP, M_EMB_TEMP, A_EMB_COUNTS, M_EMB_COUNTS, A_ORDER, M_ORDER)
+         A_EMB_TEMP, M_EMB_TEMP, A_ORDER, M_ORDER)
       ! Definition of unpacked work storage.
-      INTEGER(KIND=INT32), DIMENSION(SIZE(AXI_IN,1), CONFIG%NA) :: AXI
+      INTEGER(KIND=INT64), DIMENSION(SIZE(AXI_IN,1), CONFIG%NA) :: AXI
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%NA) :: AX
-      INTEGER(KIND=INT32), DIMENSION(CONFIG%NM) :: SIZES
-      INTEGER(KIND=INT32), DIMENSION(SIZE(XI_IN,1), CONFIG%NM) :: XI
+      INTEGER(KIND=INT64), DIMENSION(CONFIG%NM) :: SIZES
+      INTEGER(KIND=INT64), DIMENSION(SIZE(XI_IN,1), CONFIG%NM) :: XI
       REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%NM) :: X
       REAL(KIND=RT), DIMENSION(CONFIG%DO, CONFIG%NM) :: Y
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_IN_VECS
@@ -2865,7 +2974,8 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMB_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMB_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%NUM_VARS,CONFIG%NUM_THREADS) :: MODEL_GRAD
-      REAL(KIND=RT), DIMENSION(CONFIG%NUM_VARS) :: MODEL_GRAD_MEAN, MODEL_GRAD_CURV, BEST_MODEL
+      REAL(KIND=RT), DIMENSION(CONFIG%NUM_VARS) :: MODEL_GRAD_MEAN, MODEL_GRAD_CURV
+      REAL(KIND=RT), DIMENSION(CONFIG%TOTAL_SIZE) :: BEST_MODEL
       REAL(KIND=RT), DIMENSION(CONFIG%DO, CONFIG%NM) :: Y_GRADIENT
       REAL(KIND=RT), DIMENSION(CONFIG%NM, CONFIG%MDS, CONFIG%MNS+1) :: M_GRADS, M_STATES
       REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADO+ONE) :: AY_GRADIENT, AY
@@ -2887,8 +2997,6 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%NM, CONFIG%MDS) :: M_STATE_TEMP
       REAL(KIND=RT), DIMENSION(CONFIG%ADE, CONFIG%ANE, CONFIG%NUM_THREADS) :: A_EMB_TEMP
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MNE, CONFIG%NUM_THREADS) :: M_EMB_TEMP
-      REAL(KIND=RT), DIMENSION(CONFIG%ANE, CONFIG%NUM_THREADS) :: A_EMB_COUNTS
-      REAL(KIND=RT), DIMENSION(CONFIG%MNE, CONFIG%NUM_THREADS) :: M_EMB_COUNTS
       INTEGER(KIND=INT32), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_ORDER
       INTEGER(KIND=INT32), DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_ORDER
       INTEGER(KIND=INT64) :: NA, NM, I, S
@@ -2939,6 +3047,16 @@ CONTAINS
             )
          END IF
       END DO
+      ! Make all iterators deterministic when all pairs will fit into the model.
+      NA = SUM(AGG_ITERATORS(1,:))
+      IF (NA .LE. CONFIG%NA) THEN
+         AGG_ITERATORS(2,:) = 0_INT64
+         AGG_ITERATORS(3,:) = 1_INT64
+         AGG_ITERATORS(4,:) = 1_INT64
+         AGG_ITERATORS(5,:) = AGG_ITERATORS(1,:)
+      END IF
+         
+
       ! 
       ! TODO: Set up validation data (separate from training data).
       !       Add swap scratch space to the memory somewhere.
@@ -2952,7 +3070,7 @@ CONTAINS
       !       Model saving and early stopping should be determined by validation MSE.
       ! 
       ! 
-      ! Normalize the data (with parallelization enabled for evaluating AY).
+      ! Normalize the *_IN data before fitting the model.
       CALL NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
            AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
            AX, AXI, SIZES, X, XI, Y, YW, &
@@ -2989,7 +3107,7 @@ CONTAINS
          ! Pack the data into the work space for a single batch forward pass operation.
          ! If pairwise aggregation is enabled, this also computes the appropriate differences.
          ! 
-         CALL FETCH_DATA(CONFIG, MODEL, AGG_ITERATORS, &
+         CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
               AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
               X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA )
          ! 
@@ -3002,7 +3120,7 @@ CONTAINS
          IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
               (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
             CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY(:NA,:), SIZES, &
-                 X, Y_GRADIENT, A_STATES, M_STATES, INFO)
+                 X, Y_GRADIENT, A_STATES(:NA,:,:), M_STATES, INFO)
             ! Copy the state values into holders for the gradients.
             A_GRADS(:NA,:,:) = A_STATES(:NA,:,:)
             M_GRADS(:,:,:) = M_STATES(:,:,:)
@@ -3024,7 +3142,7 @@ CONTAINS
               AX(:,:NA), AXI(:,:NA), SIZES(:), X(:,:), XI(:,:), Y(:,:), YW(:,:), &
               SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:,:),  &
               Y_GRADIENT(:,:), A_GRADS(:NA,:,:), M_GRADS(:,:,:), &
-              A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), A_EMB_COUNTS(:,:), M_EMB_COUNTS(:,:))
+              A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:))
          IF (INFO .NE. 0) RETURN
          ! 
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3036,24 +3154,28 @@ CONTAINS
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !              Modify the model variables (take step).
          ! 
-         CALL STEP_VARIABLES(MODEL_GRAD(:,1:NT), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), UPDATE_INDICES(:))
+         CALL STEP_VARIABLES(MODEL_GRAD(:,1:NT), MODEL_GRAD_MEAN(:), &
+              MODEL_GRAD_CURV(:), UPDATE_INDICES(:))
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !  Project the model parameters back into a safely constrained region.
          ! 
          ! Rescale internal vectors to have a maximum 2-norm of 1.
          ! Center the outputs of the aggregator model about the origin.
          ! Measure the "total rank" of all internal state representations of data.
-         CALL CONDITION_MODEL(CONFIG, &
-              MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
-              AX(:,:), AXI(:,:), AY(:,:), AY_GRADIENT(:,:), & ! Data.
-              X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
-              CONFIG%NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
-              A_STATES(:,:,:), M_STATES(:,:,:), & ! State values at basis functions.
-              A_GRADS(:,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.
-              A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
-              A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
-              A_ORDER(:,:), M_ORDER(:,:), &
-              TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+         IF ((CONFIG%CONDITION_FREQUENCY .GT. 0) .AND. &
+              (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%CONDITION_FREQUENCY) .EQ. 0)) THEN
+            CALL CONDITION_MODEL(CONFIG, &
+                 MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
+                 AX(:,:NA), AXI(:,:NA), AY(:NA,:), AY_GRADIENT(:NA,:), SIZES(:), & ! Data.
+                 X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
+                 CONFIG%NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
+                 A_STATES(:NA,:,:), M_STATES(:,:,:), & ! State values at basis functions.
+                 A_GRADS(:NA,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.
+                 A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
+                 A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
+                 A_ORDER(:,:), M_ORDER(:,:), &
+                 TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+         END IF
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          ! Record statistics about the model and write an update about 
          ! step and convergence to the command line.
@@ -3067,8 +3189,8 @@ CONTAINS
       ! 
       ! Restore the best model seen so far (if enough steps were taken).
       IF (CONFIG%KEEP_BEST .AND. (STEPS .GT. 0)) THEN
-         MSE                      = BEST_MSE
-         MODEL(1:CONFIG%NUM_VARS) = BEST_MODEL(:)
+         MSE      = BEST_MSE
+         MODEL(:) = BEST_MODEL(:)
       END IF
       ! 
       ! Apply the data normalizing scaling factors to the weight
@@ -3132,23 +3254,24 @@ CONTAINS
       ! Convert the sum of squared errors into the mean squared error.
       MSE = SUM_SQUARED_ERROR / REAL(CONFIG%NM * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
       IF (IS_NAN(MSE) .OR. (.NOT. IS_FINITE(MSE))) THEN
-         INFO = 20 ! Encountered NaN or Inf mean squared error during training.
+         INFO = 21 ! Encountered NaN or Inf mean squared error during training, this should not happen. Are any values extremely large?
          RETURN
       END IF
       ! Adjust exponential sliding windows based on change in error.
       IF (MSE .LE. PREV_MSE) THEN
          CONFIG%STEP_FACTOR = MIN(CONFIG%STEP_FACTOR * CONFIG%FASTER_RATE, CONFIG%MAX_STEP_FACTOR)
-         CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%SLOWER_RATE
+         CONFIG%STEP_FACTOR = MAX(CONFIG%STEP_FACTOR, CONFIG%MIN_STEP_FACTOR)
+         CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%FASTER_RATE
          STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-         CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%SLOWER_RATE
+         CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE
          STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_TO_UPDATE + &
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
       ELSE
          CONFIG%STEP_FACTOR = CONFIG%STEP_FACTOR * CONFIG%SLOWER_RATE
-         CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%FASTER_RATE
+         CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%SLOWER_RATE
          STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-         CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE
+         CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%SLOWER_RATE
          STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_TO_UPDATE - &
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
@@ -3164,7 +3287,7 @@ CONTAINS
          NS = 0
          BEST_MSE = MSE
          IF (CONFIG%KEEP_BEST) THEN
-            BEST_MODEL(:) = MODEL(1:CONFIG%NUM_VARS)
+            BEST_MODEL(:) = MODEL(:)
          END IF
          ! Early stop if we don't expect to see a better solution
          !  by the time the fit operation is complete.
@@ -3194,17 +3317,30 @@ CONTAINS
       ! TODO: Parallelize the most expensive parts of the update.
       !       - the argselect for model parameters.
       ! 
-      !$OMP PARALLEL DO PRIVATE(S, E)
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(S, E)
       DO I = 0, NT-1
          S = ONE+I*NP
          E = MIN((I+ONE)*NP, CONFIG%NUM_VARS)
          ! Aggregate over computed batches and compute average gradient.
          MODEL_GRAD(S:E,1) = SUM(MODEL_GRAD(S:E,:),2) / REAL(SIZE(MODEL_GRAD,2),RT)
+         ! Mean.
          MODEL_GRAD_MEAN(S:E) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(S:E) &
               + CONFIG%STEP_MEAN_CHANGE * MODEL_GRAD(S:E,1)
+         ! Clip the mean to be small enough to be numerically stable.
+         WHERE (ABS(MODEL_GRAD_MEAN(S:E)) .GT. SQRT(HUGE(CONFIG%STEP_FACTOR)))
+            MODEL_GRAD_MEAN(S:E) = SIGN(SQRT(HUGE(CONFIG%STEP_FACTOR)), MODEL_GRAD_MEAN(S:E))
+         END WHERE
+         ! Curvature.
          MODEL_GRAD_CURV(S:E) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(S:E) &
               + CONFIG%STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(S:E) - MODEL_GRAD(S:E,1))**2
-         MODEL_GRAD_CURV(S:E) = MAX(MODEL_GRAD_CURV(S:E), EPSILON(CONFIG%STEP_FACTOR))
+         ! Clip the curvature to be large enough to be numerically stable.
+         WHERE (MODEL_GRAD_CURV(S:E) .LT. EPSILON(CONFIG%STEP_FACTOR))
+            MODEL_GRAD_CURV(S:E) = EPSILON(CONFIG%STEP_FACTOR)
+         END WHERE
+         ! Clip the curvature to be small enough to be numerically stable.
+         WHERE (ABS(MODEL_GRAD_CURV(S:E)) .GT. HUGE(CONFIG%STEP_FACTOR))
+            MODEL_GRAD_CURV(S:E) = SIGN(HUGE(CONFIG%STEP_FACTOR), MODEL_GRAD_CURV(S:E))
+         END WHERE
          ! Set the step as the mean direction (over the past few steps).
          MODEL_GRAD(S:E,1) = MODEL_GRAD_MEAN(S:E)
          ! Start scaling by step magnitude by curvature once enough data is collected.
@@ -3221,11 +3357,15 @@ CONTAINS
          ! Identify the subset of components that will be updapted this step.
          CALL ARGSELECT(-ABS(MODEL_GRAD(:,1)), &
               INT(CONFIG%NUM_TO_UPDATE, KIND=INT64), UPDATE_INDICES(:))
+         NP = MAX(ONE, CONFIG%NUM_TO_UPDATE / NT)
          ! Take the gradient steps (based on the computed "step" above).
-         MODEL(UPDATE_INDICES(1:CONFIG%NUM_TO_UPDATE)) = &
-              MODEL(UPDATE_INDICES(1:CONFIG%NUM_TO_UPDATE)) &
-              - MODEL_GRAD(UPDATE_INDICES(1:CONFIG%NUM_TO_UPDATE),1) &
-              * CONFIG%STEP_FACTOR
+         !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(S, E)
+         DO I = 0, NT-1
+            S = ONE+I*NP
+            E = MIN((I+ONE)*NP, CONFIG%NUM_VARS)
+            MODEL(UPDATE_INDICES(S:E)) = MODEL(UPDATE_INDICES(S:E)) &
+                 - MODEL_GRAD(UPDATE_INDICES(S:E),1) * CONFIG%STEP_FACTOR
+         END DO
       END IF
       CONFIG%STEPS_TAKEN = CONFIG%STEPS_TAKEN + 1
       ! Record the end of the total time.
@@ -3270,144 +3410,55 @@ CONTAINS
       END IF
     END SUBROUTINE RECORD_STATS
 
-
   END SUBROUTINE FIT_MODEL
-
 
 END MODULE AXY
 
 
 
-!2022-11-27 12:17:55
+!2023-03-14 00:18:55
 !
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! ! ! Batching.                                                      !
-         ! ! IWORK(CONFIG%SUI : CONFIG%EUI), & ! UPDATE_INDICES(NUM_VARS)     !
-         ! ! IWORK(CONFIG%SBAS : CONFIG%EBAS), & ! BATCHA_STARTS(NUM_THREADS) !
-         ! ! IWORK(CONFIG%SBAE : CONFIG%EBAE), & ! BATCHA_ENDS(NUM_THREADS)   !
-         ! ! IWORK(CONFIG%SAS : CONFIG%EAS), & ! AGG_STARTS(NUM_THREADS)      !
-         ! ! IWORK(CONFIG%SBMS : CONFIG%EBMS), & ! BATCHM_STARTS(NUM_THREADS) !
-         ! ! IWORK(CONFIG%SBME : CONFIG%EBME), & ! BATCHM_ENDS(NUM_THREADS)   !
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! ! Reset the iterators to be sequential.                 !
+! CONFIG%I_NEXT = 0                                       !
+! CONFIG%I_MULT = 1                                       !
+! CONFIG%I_STEP = 1                                       !
+! CONFIG%I_MOD = SIZE(X,2)                                !
+!                                                         !
+! AGG_ITERATORS(2,:) = 0_INT64                            !
+! AGG_ITERATORS(3,:) = 1_INT64                            !
+! AGG_ITERATORS(4,:) = 1_INT64                            !
+! AGG_ITERATORS(5,:) = AGG_ITERATORS(1,:)                 !
+!                                                         !
+! ! Reset X to zeros.                                     !
+! AX(:,:) = 0.0_RT                                        !
+! X(:,:) = 0.0_RT                                         !
+!                                                         !
+! CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &                !
+!      AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &         !
+!      X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA )       !
+! CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI, AX(:,:NA), X) !
+!                                                         !
+! PRINT *, ''                                             !
+! PRINT *, 'XI_IN:'                                       !
+! DO I = 1, SIZE(XI_IN,2)                                 !
+!    PRINT *, '  ', XI_IN(:,I)                            !
+! END DO                                                  !
+! PRINT *, ''                                             !
+! PRINT *, 'AX:'                                          !
+! DO I = 1, NA                                            !
+!    PRINT *, '  ', AX(:,I)                               !
+! END DO                                                  !
+! PRINT *, ''                                             !
+! PRINT *, 'XI:'                                          !
+! DO I = 1, SIZE(XI,2)                                    !
+!    PRINT *, '  ', XI(:,I)                               !
+! END DO                                                  !
+! PRINT *, ''                                             !
+! PRINT *, 'X:'                                           !
+! DO I = 1, SIZE(X,2)                                     !
+!    PRINT *, '  ', X(:,I)                                !
+! END DO                                                  !
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
-!2022-11-27 12:36:32
-!
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! ! UPDATE_INDICES, BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, & !
-         ! ! BATCHM_STARTS, BATCHM_ENDS, &                             !
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2022-11-27 12:59:06
-!
-     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-     ! INTEGER(KIND=INT64) :: SBAS, EBAS ! BATCHA_STARTS(NUM_THREADS) !
-     ! INTEGER(KIND=INT64) :: SBAE, EBAE ! BATCHA_ENDS(NUM_THREADS)   !
-     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2022-11-27 12:59:08
-!
-     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-     ! INTEGER(KIND=INT64) :: SBMS, EBMS ! BATCHM_STARTS(NUM_THREADS) !
-     ! INTEGER(KIND=INT64) :: SBME, EBME ! BATCHM_ENDS(NUM_THREADS)   !
-     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2022-11-27 13:00:22
-!
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! ! aggregator batch starts                              !
-    ! CONFIG%SBAS = ONE + CONFIG%IWORK_SIZE              !
-    ! CONFIG%EBAS = CONFIG%SBAS-ONE + CONFIG%NUM_THREADS !
-    ! CONFIG%IWORK_SIZE = CONFIG%EBAS                        !
-    ! ! aggregator batch ends                                !
-    ! CONFIG%SBAE = ONE + CONFIG%IWORK_SIZE              !
-    ! CONFIG%EBAE = CONFIG%SBAE-ONE + CONFIG%NUM_THREADS !
-    ! CONFIG%IWORK_SIZE = CONFIG%EBAE                        !
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2022-11-27 13:00:25
-!
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! ! model batch starts                                   !
-    ! CONFIG%SBMS = ONE + CONFIG%IWORK_SIZE              !
-    ! CONFIG%EBMS = CONFIG%SBMS-ONE + CONFIG%NUM_THREADS !
-    ! CONFIG%IWORK_SIZE = CONFIG%EBMS                        !
-    ! ! model batch ends                                     !
-    ! CONFIG%SBME = ONE + CONFIG%IWORK_SIZE              !
-    ! CONFIG%EBME = CONFIG%SBME-ONE + CONFIG%NUM_THREADS !
-    ! CONFIG%IWORK_SIZE = CONFIG%EBME                        !
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-01-25 20:56:36
-!
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! ! ! ------------------------------------------------------------------          !
-    ! ! !                DEVELOPING BATCHED EVALUATION CODE                           !
-    ! ! !    measured gradient contribution of all input points                       !
-    ! ! REAL(KIND=RT), DIMENSION(SIZE(Y,2)) :: Y_ERROR                                !
-    ! ! REAL(KIND=RT), DIMENSION(SIZE(Y,2)) :: Y_REDUCTION                            !
-    ! ! INTEGER, DIMENSION(SIZE(Y,2)) :: Y_CONSECUTIVE_STEPS                          !
-    ! ! INTEGER, DIMENSION(SIZE(Y,2)) :: Y_UNUSED_STEPS                               !
-    ! ! !    count of how many steps have been taken since last usage                 !
-    ! ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_UNUSED_STEPS                             !
-    ! ! INTEGER, DIMENSION(SIZE(X,2)) :: X_UNUSED_STEPS                               !
-    ! ! !    indices (used for sorting and selecting points for gradient computation) !
-    ! ! INTEGER, DIMENSION(SIZE(AX,2)) :: AX_INDICES                                  !
-    ! ! INTEGER, DIMENSION(SIZE(X,2)) :: X_INDICES                                    !
-    ! ! ! ------------------------------------------------------------------          !
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-01-25 21:03:01
-!
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! !       It should be a function of the AX and MX embeddings that !
-    ! !       predicts the error of the model. A linear function would !
-    ! !       suffice, since the nonlinearities in the aggregator and  !
-    ! !       model can capture any shape of this error function.      !
-    ! !                                                                !
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-01-25 21:03:10
-!
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    ! !       Then the elements that have lower predicted error can be   !
-    ! !       kept, and points that have higher predicted error can be   !
-    ! !       filtered out (this is a differentiable feature selection   !
-    ! !       method that allows nonlinear feature selection functions). !
-    ! !                                                                  !
-    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-02-18 12:42:27
-!
-          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-          ! ! Unapply shift terms to aggregator inputs.                                            !
-          ! IF ((CONFIG%NORMALIZE) .AND. (CONFIG%ADN .GT. 0)) THEN                                 !
-          !    DO I = BS, BE                                                                       !
-          !       AX(:CONFIG%ADN,I) = AX(:CONFIG%ADN,I) - AX_SHIFT(:)                              !
-          !    END DO                                                                              !
-          !    ! TODO: Unapply the multiplier.                                                     !
-          !    ! AX(:CONFIG%ADN,BS:BE) = MATMUL(TRANSPOSE(AX_RESCALE(:,:)), AX(:CONFIG%ADN,BS:BE)) !
-          ! END IF                                                                                 !
-          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-02-18 12:42:37
-!
-          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-          ! ! Unapply the X shifts.                                                             !
-          ! IF ((CONFIG%NORMALIZE) .AND. (CONFIG%MDN .GT. 0)) THEN                              !
-          !    DO I = BS, BE                                                                    !
-          !       X(:CONFIG%MDN,I) = X(:CONFIG%MDN,I) - X_SHIFT(:)                              !
-          !    END DO                                                                           !
-          !    ! TODO: Unapply the multiplier.                                                  !
-          !    ! X(:CONFIG%MDN,BS:BE) = MATMUL(TRANSPOSE(X_RESCALE(:,:)), X(:CONFIG%MDN,BS:BE)) !
-          ! END IF                                                                              !
-          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

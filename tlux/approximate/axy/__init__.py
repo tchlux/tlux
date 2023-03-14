@@ -1,5 +1,6 @@
-import os, re, math
+import os, re, math, sys
 import numpy as np
+np.set_printoptions(linewidth=1000, threshold=sys.maxsize)
 
 # Class for calling the underlying AXY model code.
 class AXY:
@@ -90,12 +91,12 @@ class AXY:
 
 
     # Unpack the model (which is in one array) into it's constituent parts.
-    def unpack(self):
+    def unpack(self, **kwargs):
         # If there is no model or configuration, return None.
         if (self.config is None) or (self.model is None):
             return None
         from tlux.approximate.axy.summary import AxyModel
-        return AxyModel(self.config, self.model, clock_rate=self.AXY.clock_rate)
+        return AxyModel(self.config, self.model, clock_rate=self.AXY.clock_rate, **kwargs)
 
 
     # Given an exit code, check to make sure it is 0 (good), if not then read
@@ -153,7 +154,7 @@ class AXY:
     def _i_encode(self, xi, xi_map):
         xi_rows = xi.shape[0]
         xi_cols = len(xi.dtype) or xi.shape[1]
-        _xi = np.zeros((xi_rows, xi_cols), dtype="int32", order="C")
+        _xi = np.zeros((xi_rows, xi_cols), dtype="int64", order="C")
         for i, i_map in enumerate(xi_map):
             # Assign all the integer embeddings.
             values = (xi[:,i].tolist() if len(xi.dtype) == 0 else xi[xi.dtype.names[i]].tolist())
@@ -163,7 +164,7 @@ class AXY:
 
 
     # Convert all inputs to the AXY model into the expected numpy format.
-    def _to_array(self, ax, axi, sizes, x, xi, y, yi):
+    def _to_array(self, ax, axi, sizes, x, xi, y=None, yi=None, yw=None):
         # Get the number of inputs.
         if   (y  is not None): nm = len(y)
         elif (yi is not None): nm = len(yi)
@@ -174,21 +175,24 @@ class AXY:
         if (y is not None):  y = np.asarray(y, dtype="float32", order="C")
         else:                y = np.zeros((nm,0), dtype="float32", order="C") 
         if (yi is not None): yi = np.asarray(yi)
-        else:                yi = np.zeros((nm,0), dtype="int32", order="C")
+        else:                yi = np.zeros((nm,0), dtype="int64", order="C")
+        if (yw is not None): yw = np.asarray(np.asarray(yw, dtype="float32").reshape((nm,-1)), order="C")
+        else:                yw = np.zeros((nm,0), dtype="float32", order="C")
         if (x is not None): x = np.asarray(x, dtype="float32", order="C")
         else:               x = np.zeros((nm,0), dtype="float32", order="C")
         if (xi is not None): xi = np.asarray(xi)
-        else:                xi = np.zeros((nm,0), dtype="int32", order="C")
-        if (sizes is not None): sizes = np.asarray(sizes, dtype="int32")
-        else:                   sizes = np.zeros(0, dtype="int32")
+        else:                xi = np.zeros((nm,0), dtype="int64", order="C")
+        if (sizes is not None): sizes = np.asarray(sizes, dtype="int64")
+        else:                   sizes = np.zeros(0, dtype="int64")
         na = sizes.sum()
         if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
         else:                ax = np.zeros((na,0), dtype="float32", order="C")
         if (axi is not None): axi = np.asarray(axi)
-        else:                 axi = np.zeros((na,0), dtype="int32", order="C")
+        else:                 axi = np.zeros((na,0), dtype="int64", order="C")
         # Make sure that all inputs have the expected shape.
         assert (len(y.shape) in {1,2}), f"Bad y shape {y.shape}, should be 1D or 2D matrix."
         assert (len(yi.shape) in {1,2}), f"Bad yi shape {yi.shape}, should be 1D or 2D matrix."
+        assert (yw.shape[1] in {0, 1, y.shape[1]}), f"Bad yw shape {yw.shape}, should have 0 columns or 1 column{' or '+str(y.shape[1])+' columns' if (y.shape[1] > 1) else ''}."
         assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
         assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
         assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
@@ -197,6 +201,7 @@ class AXY:
         # Reshape inputs to all be two dimensional (except sizes).
         if (len(y.shape) == 1): y = y.reshape((-1,1))
         if (len(yi.shape) == 1) and (len(yi.dtype) == 0): yi = yi.reshape((-1,1))
+        if (len(yw.shape) == 1): yw = yw.reshape((-1,1))
         if (len(x.shape) == 1): x = x.reshape((-1,1))
         if (len(xi.shape) == 1) and (len(xi.dtype) == 0): xi = xi.reshape((-1,1))
         if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
@@ -250,7 +255,7 @@ class AXY:
             mdo += yne-1
             self.yi_embeddings = embedded[1:]
         # Return all the shapes and numpy formatted inputs.
-        return nm, na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes
+        return nm, na, mdn, mne, mdo, adn, ane, yne, y, yw, x, xi, ax, axi, sizes
 
 
     # Fit this model.
@@ -264,22 +269,23 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        full_nm, full_na, mdn, mne, mdo, adn, ane, yne, y, x, xi, ax, axi, sizes = (
+        nm_total, na_total, mdn, mne, mdo, adn, ane, yne, y, yw, x, xi, ax, axi, sizes = (
             self._to_array(ax, axi, sizes, x, xi, y, yi)
         )
-        if (na is None): na = full_na
-        else:            na = min(na, full_na)
-        if (nm is None): nm = full_nm
-        else:            nm = min(nm, full_nm)
+        # TODO: Is this the correct retrieval of pairwise aggregation setting?
+        pairwise = kwargs.get("pairwise_aggregation", False)
+        pairwise = pairwise or self._init_kwargs.get("pairwise_aggregation", False)
+        if (self.config is not None):
+            pairwise = pairwise or self.config.pairwise_aggregation
+        # Set the number of aggregate and model input limits.
+        if (nm is None): nm = nm_total
+        else:            nm = min(nm, nm_total)
+        # Set the default NA to have space for all data.
+        if (na is None):
+            na = sum(sizes[np.argsort(sizes)[-nm:]] ** (2 if pairwise else 1))
         # Make sure NA is only as large as it practically needs to be.
-        na = min(na, sum(sizes[np.argsort(sizes)[-nm:]]))
-        # TODO: Move yw into the _to_array function?
-        # Convert yw to a numpy array (if it is not already).
-        if (yw is None):
-            yw = np.zeros((full_nm,0), dtype="float32", order="C")
         else:
-            yw = np.asarray(np.asarray(yw, dtype="float32").reshape((full_nm,-1)), order="C")
-        assert (yw.shape[1] in {0, 1, mdo}), f"Weights for points 'yw' {yw.shape} must have 1 column{' or '+str(mdo)+' columns' if (mdo > 0) else ''}."
+            na = min(na, sum(sizes[np.argsort(sizes)[-nm:]] ** (2 if pairwise else 1)))
         # Configure this model if requested (or not already done).
         self._init_kwargs.update(kwargs)
         kwargs = self._init_kwargs
@@ -308,19 +314,22 @@ class AXY:
         if (self.seed is not None):
             if (self.config.num_threads > 2):
                 import warnings
-                warnings.warn("Seeding an AXY model will deterministically initialize weights, but num_threads > 2 will result in a nondeterministic model fit.")
+                warnings.warn("Seeding an AXY model will deterministically initialize weights, but num_threads > 2 will result in a nondeterministic model fit because changing addition order changes rounding behavior.")
         # Get the number of steps for training.
         steps = kwargs.get("steps", self.steps)
         # ------------------------------------------------------------
         # Set up new work space for this minimization process.
-        self.AXY.new_fit_config(nm=nm, na=na, nmt=x.shape[0], nat=ax.shape[0],
-                                adi=axi.shape[1], mdi=xi.shape[1],
-                                seed=self.seed, config=self.config)
+        self.AXY.new_fit_config(
+            nm=nm, na=na, nmt=nm_total, nat=na_total,
+            adi=axi.shape[1], mdi=xi.shape[1],
+            seed=self.seed, config=self.config
+        )
         rwork = np.ones(self.config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
         iwork = np.ones(self.config.iwork_size, dtype="int32")
+        lwork = np.ones(self.config.lwork_size, dtype="int64")
         # Minimize the mean squared error.
         self.record = np.zeros((steps,6), dtype="float32", order="C")
-        result = self.AXY.fit_model(self.config, self.model, rwork, iwork,
+        result = self.AXY.fit_model(self.config, self.model, rwork, iwork, lwork,
                                     ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
                                     steps=steps, record=self.record.T)
         # Check for a nonzero exit code.
@@ -345,7 +354,7 @@ class AXY:
 
     # Make predictions for new data.
     def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
-                embedding=False, save_states=False, raw_scores=False, **kwargs):
+                embedding=False, save_states=False, raw_scores=False, na=None, **kwargs):
         # Evaluate the model at all data.
         assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
         assert (not (embedding and raw_scores)), "AXY.predict cannot provide both 'embedding=True' *and* 'raw_scores=True'."
@@ -353,54 +362,125 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
-        nm, na, mdn, mne, mdo, adn, ane, yne, _, x, xi, ax, axi, sizes = (
-            self._to_array(ax, axi, sizes, x, xi, None, None)
+        nmt, nat, _, _, _, _, _, _, y, _, x, xi, ax, axi, sizes = (
+            self._to_array(ax, axi, sizes, x, xi)
         )
-        # Embed the inputs into the purely positional form.
-        ade = self.config.ade
-        ads = self.config.ads
-        ado = self.config.ado
-        mde = self.config.mde
-        mds = self.config.mds
-        if (self.config.mdo != 0):
-            mdo = self.config.mdo
-        else:
-            mdo = self.config.ado
-        # Compute the true real-vector input dimensions given embeddings.
-        adn += ade
-        mdn += mde + ado
+        # Set the default "number of aggregate inputs" allowed.
+        if (na is None):
+            if (self.config.pairwise_aggregation):
+                na = sum(sizes**2)
+            else:
+                na = nat
         # Initialize holder for y output.
-        y = np.zeros((nm, mdo), dtype="float32", order="C")
+        y = np.zeros((nmt, self.config.do), dtype="float32", order="C")
         # ------------------------------------------------------------
         # Call the unerlying library to make sure input shapes are appropriate.
         info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
         # Check for a nonzero exit code.
         self._check_code(info, "check_shape")
+        # Normalize the numeric inputs.
+        _, _, info = self.AXY.normalize_inputs(self.config, self.model, ax.T, sizes, x.T)
+        self._check_code(info, "normalize_inputs")
         # ------------------------------------------------------------
-        # Initialize storage for all arrays needed at evaluation time.
-        #   If there are integer embeddings, expand "ax" and "x" to have
-        #   space to hold those embeddings.
-        if (self.config.ade > 0):
-            _ax = np.zeros((ax.shape[0],ax.shape[1]+self.config.ade), dtype="float32", order="C")
-            _ax[:,:ax.shape[1]] = ax
-            ax = _ax
+        # Handle pairwise aggregation (requires more scratch space and fetching pairs).
+        if ((self.config.pairwise_aggregation) and (nat > 0)):
+            # Initialize the config iterator to make it linearly iterate over the data..
+            temp_confg = dict(
+                nm = self.config.nm,
+                nmt = self.config.nmt,
+                na = self.config.na,
+                nat = self.config.nat,
+                i_next = self.config.i_next,
+                i_step = self.config.i_step,
+                i_mult = self.config.i_mult,
+                i_mod = self.config.i_mod,
+            )
+            self.config.nm = nmt
+            self.config.nmt = nmt
+            self.config.i_next = 0
+            self.config.i_step = 1
+            self.config.i_mult = 1
+            self.config.i_mod = nmt
+            # Initialize all aggregate input iterators.
+            fits_all = na >= sum(sizes**2)
+            agg_iterators = np.ones((5, nmt), dtype="int64", order="F")
+            for i in range(agg_iterators.shape[1]):
+                if (sizes[i] == 0):
+                    agg_iterators[:,i] = 0
+                else:
+                    agg_iterators[0,i] = sizes[i]
+                    if self.config.pairwise_aggregation:
+                        agg_iterators[0,i] = agg_iterators[0,i]**2
+                    # If all fit, use a deterministic iterators [0, 1, 2, ...]
+                    if fits_all:
+                        agg_iterators[1:,i] = (0, 1, 1, agg_iterators[0,i]) # next, step, mult, mod
+                    # Otherwise, use a random linear iterator.
+                    else:
+                        agg_iterators[1:,i] = self.AXY.initialize_iterator(
+                            i_limit=agg_iterators[0,i],
+                        )
+            # Create scratch space for all data holders.
+            self.config.na = na
+            # Save the current values as "*_in" to separate them from the scratch space.
+            ax_in = ax.T ; axi_in = axi.T ; sizes_in = sizes ; x_in = x.T ; xi_in = xi.T
+            # Create scratch space.
+            ax = np.zeros((self.config.adi, na), dtype="float32", order="F")
+            axi = np.zeros((axi_in.shape[0], na), dtype="int64", order="F")
+            sizes = np.zeros(nmt, dtype="int64", order="F")
+            x = np.zeros((self.config.mdi, nmt), dtype="float32", order="F")
+            xi = np.zeros((xi_in.shape[0], nmt), dtype="int64", order="F")
+            y_in = yw_in = np.zeros((0,nmt), dtype="float32", order="F")
+            # Use FETCH_DATA to do the pairwise aggreagtion.
+            config, agg_iterators, ax, axi, sizes, x, xi, y_in, yw_in, na = self.AXY.fetch_data(
+                config = self.config,
+                agg_iterators = agg_iterators,
+                ax_in = ax_in,
+                ax = ax,
+                axi_in = axi_in,
+                axi = axi,
+                sizes_in = sizes_in,
+                sizes = sizes,
+                x_in = x_in,
+                x = x,
+                xi_in = xi_in,
+                xi = xi,
+                y_in = y_in,
+                y = y_in,
+                yw_in = yw_in,
+                yw = yw_in,
+            )
+            # Reset the config.
+            for (name, value) in temp_confg.items():
+                setattr(self.config, name, value)
+            # Delete all scratch space.
+            del ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yw_in, agg_iterators, name, value, temp_confg
+            ax = ax[:,:na].T
+            axi = axi[:,:na].T
+            ay = np.zeros((na, config.ado+1), dtype="float32", order="F")
+            x = x.T
+            xi = xi.T
         else:
-            ax = ax.copy()
-        ay = np.zeros((na, ado+1), dtype="float32", order="F")
-        if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
-            _x = np.zeros((x.shape[0],x.shape[1]+self.config.mde+self.config.ado),
-                          dtype="float32", order="C")
-            _x[:,:x.shape[1]] = x
-            x = _x
-        else:
-            x = x.copy()
+            # ------------------------------------------------------------
+            # 
+            # Initialize storage for all arrays needed at evaluation time.
+            #   If there are integer embeddings, expand "ax" and "x" to have
+            #   space to hold those embeddings.
+            if (self.config.ade > 0):
+                _ax = np.zeros((na, self.config.adi), dtype="float32", order="C")
+                _ax[:,:self.config.adn] = ax
+                ax = _ax
+            ay = np.zeros((na, self.config.ado+1), dtype="float32", order="F")
+            if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
+                _x = np.zeros((nmt, self.config.mdi), dtype="float32", order="C")
+                _x[:,:self.config.mdn] = x
+                x = _x
         # If all internal states are being saved, the make more space, otherwise only two copies are needed.
         if (save_states):
-            a_states = np.zeros((na, ads, self.config.ans), dtype="float32", order="F")
-            m_states = np.zeros((nm, mds, self.config.mns), dtype="float32", order="F")
+            a_states = np.zeros((na, self.config.ads, self.config.ans), dtype="float32", order="F")
+            m_states = np.zeros((nmt, self.config.mds, self.config.mns), dtype="float32", order="F")
         else:
-            a_states = np.zeros((na, ads, 2), dtype="float32", order="F")
-            m_states = np.zeros((nm, mds, 2), dtype="float32", order="F")
+            a_states = np.zeros((na, self.config.ads, 2), dtype="float32", order="F")
+            m_states = np.zeros((nmt, self.config.mds, 2), dtype="float32", order="F")
         # ------------------------------------------------------------
         # Embed the categorical inputs as numeical inputs.
         self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
@@ -410,13 +490,15 @@ class AXY:
         self._check_code(result[-1], "evaluate")
         # Save the states if that's requested.
         if (save_states):
-            self.a_states = a_states
-            self.ay = ay
-            self.m_states = m_states
+            self.states = dict(
+                ax = ax,
+                a_states = a_states,
+                ay = ay,
+                x = x,
+                m_states = m_states
+            )
         else:
-            self.a_states = None
-            self.ay = None
-            self.m_states = None
+            self.states = None
         # If embeddings are desired, multiply the last state by the 2-norm
         #  of output weights for each component of that last embedding.
         if (embedding):
@@ -433,7 +515,7 @@ class AXY:
                 else:
                     state = ax
                 # Collapse the aggregate embeddings into their mean.
-                last_state = np.zeros((sizes.shape[0], state.shape[1]), dtype="float32")
+                last_state = np.zeros((nmt, state.shape[1]), dtype="float32")
                 set_start = set_end = 0
                 for i in range(sizes.shape[0]):
                     set_end += sizes[i]
@@ -446,18 +528,21 @@ class AXY:
             return last_state
         # If there are categorical outputs, then select by taking the max magnitude output.
         elif ((len(self.yi_map) > 0) and (not raw_scores)):
+            # Get the number of category outputs and the number of numeric outputs.
             yne = sum(map(len, self.yi_map))
             ynn = y.shape[1]-(yne-1)
+            # Get the numerical columns first.
             _y = [y[:,i] for i in range(ynn)]
+            # Project the categorical embedding outputs into a matrix with "yne" columns.
             y = np.matmul(y[:,ynn:], self.yi_embeddings.T)
-            past_indices = 0
+            # Iterate over each categorical output column, picking the category whose embedding had the largest value.
+            start = 0
             for i in range(len(self.yi_map)):
-                start = past_indices
                 size = len(self.yi_map[i])
                 _y.append(
                     [self.yi_inv_map[i][start+j] for j in 1+np.argmax(y[:,start:start+size], axis=1)]
                 )
-                past_indices += size
+                start += size
             return np.asarray(_y, dtype=object).T
         # Otherwise simply return the numeric predicted outputs by the model.
         else:
@@ -465,33 +550,48 @@ class AXY:
 
 
     # Save this model to a path.
-    def save(self, path):
+    def save(self, path, **encoding_kwargs):
         import json
-        with open(path, "w") as f:
-            # Get the config as a Python type.
-            if (self.config is None): config = None
-            else: config = {n:getattr(self.config, n) for (n,t) in self.config._fields_}
-            # Write the JSON file with Python types.
-            f.write(json.dumps({
-                # Create a dictionary of the known python attributes.
-                "config" : config,
-                "model"  : self.model.tolist(),
-                "record" : self.record.tolist(),
-                "embedding_transform" : self.embedding_transform.tolist(),
-                "xi_map" : [list(m.items()) for m in self.xi_map],
-                "axi_map" : [list(m.items()) for m in self.axi_map],
-                "yi_map" : [list(m.items()) for m in self.yi_map],
-                "yi_inv_map" : [list(m.items()) for m in getattr(self, "yi_inv_map", [])],
-                "yi_embeddings" : getattr(self, "yi_embeddings", np.asarray([])).tolist(),
-            }))
+        # Get the config as a Python type.
+        if (self.config is None):
+            config = None
+        else:
+            config = {n:getattr(self.config, n) for (n,t) in self.config._fields_}
+        # Open the output file and write.
+        json_model = json.dumps({
+            # Create a dictionary of the known python attributes.
+            "config" : config,
+            "model"  : self.model.tolist(),
+            "record" : self.record.tolist(),
+            "embedding_transform" : self.embedding_transform.tolist(),
+            "xi_map" : [list(m.items()) for m in self.xi_map],
+            "axi_map" : [list(m.items()) for m in self.axi_map],
+            "yi_map" : [list(m.items()) for m in self.yi_map],
+            "yi_inv_map" : [list(m.items()) for m in getattr(self, "yi_inv_map", [])],
+            "yi_embeddings" : getattr(self, "yi_embeddings", np.asarray([])).tolist(),
+        })
+        # Write the JSON contents of the model to file.
+        if (path.endswith(".gz")):
+            import gzip
+            with gzip.open(path, "wb") as f:
+                f.write(json_model.encode(**encoding_kwargs))
+        else:
+            with open(path, "w") as f:
+                f.write(json_model)
 
 
     # Load this model from a path (after having been saved).
     def load(self, path):
         # Read the file.
         import builtins, json
-        with open(path, "r") as f:
-            attrs = json.loads(f.read())
+        # Handle compressed files or regular files.
+        if path.endswith(".gz"):
+            import gzip
+            with gzip.open(path, "rb") as f:
+                attrs = json.loads(f.read().decode())
+        else:
+            with open(path, "r") as f:
+                attrs = json.loads(f.read())
         # Load the attributes of the model.
         for key, value in attrs.items():
             # Convert the categorical map keys to the appropriate type.
@@ -560,23 +660,26 @@ if __name__ == "__main__":
     seed = 0
     np.random.seed(seed)
 
-    n = 2**7
     d = 2
+    n = 2**7
+    nm = (len(functions) * n) # // 3
     new_model = True
+    pairwise_aggregation = True
     use_a = True
-    agg_dim = 64
-    agg_states = 2
-    agg_output_size = None
+    agg_dim_states = 64
+    agg_num_states = 1
+    agg_dim_output = None
     use_x = False
-    model_dim = 64
-    model_states = 2
+    model_dim_states = 64
+    model_num_states = 1
     model_dim_output = None # 0
     use_y = True
     use_yi = False
-    steps = 1000
+    steps = 2000
     keep_best = False
     num_threads = None # 50
     use_nearest_neighbor = False
+
 
     # WARNING: The following includes a curvature estimate, which
     #          is NOT only using stochastic gradient descent.
@@ -595,12 +698,13 @@ if __name__ == "__main__":
         seed=seed,
         early_stop = False,
         log_grad_norm_frequency = 1,
-        rank_check_frequency = 1,
+        rank_check_frequency = 10,
         **({"mdo":model_dim_output} if model_dim_output is not None else {}),
         ax_normalized = False,
         ay_normalized = False,
         x_normalized = False,
         y_normalized = False,
+        pairwise_aggregation = pairwise_aggregation,
         # keep_best = False,
         # **ONLY_SGD
     )
@@ -617,7 +721,7 @@ if __name__ == "__main__":
         [f.__name__ for f in functions for _ in range(n*d)],
         [i+1 for _ in range(n*len(functions)) for i in range(d)]
     )), dtype=object)
-    sizes = np.ones(n*len(functions), dtype="int32") * d
+    sizes = np.ones(n*len(functions), dtype="int64") * d
 
     # Concatenate the two different function outputs.
     y = np.concatenate([f(p) for (f,p) in zip(functions, points)], axis=0).reshape((len(functions)*n,1))
@@ -639,16 +743,6 @@ if __name__ == "__main__":
         ),
     ], dtype=object).T
 
-    print()
-    print("ax.shape:    ", ax.shape)
-    print("axi.shape:   ", axi.shape)
-    print("sizes.shape: ", sizes.shape)
-    print("x.shape:     ", x.shape)
-    print("xi.shape:    ", xi.shape)
-    print("y.shape:     ", y.shape)
-    print("yi.shape:    ", yi.shape)
-    print()
-
     # Compute the numeric values associated with each Y group (mean of values in group).
     yi_values = [{
         "bottom": y[y[:,0] <= np.percentile(y[:,0], 50)].mean(),
@@ -660,21 +754,37 @@ if __name__ == "__main__":
         "large": y[y[:,0] >= np.percentile(y[:,0], 80)].mean(),
     }]
 
+    # TOOD: Replace "yii" in "fhat" by using the following.
+    # # This is simpler, this way the fhat function doesn't need to do complicated dictionary mapping.
+    # for i in range(yi.shape[0]):
+    #     for j in range(yi.shape[1]):
+    #         yi[i,j] = yi_values[j][yi[i,j]]
+
+    print()
+    print("ax.shape:    ", ax.shape)
+    print("axi.shape:   ", axi.shape)
+    print("sizes.shape: ", sizes.shape)
+    print("x.shape:     ", x.shape)
+    print("xi.shape:    ", xi.shape)
+    print("y.shape:     ", y.shape)
+    print("yi.shape:    ", yi.shape)
+    print()
+
+
     # Train a new model or load an existing one.
-    if (new_model or (not os.path.exists('temp-model.json'))):
+    path = 'temp-model.json.gz'
+    if (new_model or (not os.path.exists(path))):
         # Initialize a new model.
         print("Fitting model..")
         m = AXY(
-            ads=agg_dim,
-            ans=agg_states,
-            ado=agg_output_size,
-            mds=model_dim,
-            mns=model_states,
+            ads=agg_dim_states,
+            ans=agg_num_states,
+            ado=agg_dim_output,
+            mds=model_dim_states,
+            mns=model_num_states,
             num_threads=num_threads,
             **settings,
         )
-        print("m: ", m)
-        print("m.config: ", m.config)
         m.fit(
             ax=(ax.copy() if use_a else None),
             axi=(axi if use_a else None),
@@ -684,17 +794,17 @@ if __name__ == "__main__":
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
             steps=steps,
-            # nm = n // 3,
+            nm = nm,
         )
         # Save and load the model.
-        m.save("temp-model.json")
+        m.save(path)
 
     # Load the saved model.
     m = AXY()
-    m.load("temp-model.json")
+    m.load(path)
     # Remove the saved model if only new models are desired.
     if new_model:
-        os.remove("temp-model.json")
+        os.remove(path)
 
     # Print the model.
     print()
@@ -733,25 +843,25 @@ if __name__ == "__main__":
             [f for _ in range(n*d)],
             [i+1 for _ in range(n) for i in range(d)]
         )), dtype=object)
-        sizes = np.ones(x.shape[0], dtype="int32") * d
+        sizes = np.ones(x.shape[0], dtype="int64") * d
         if (not use_a): ax = axi = sizes = None
         if (not use_x): x = xi = None
         if (not use_yi): yii = None
         if (not use_nearest_neighbor):
-            if (yii is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,0]
+            if (yii is None): return m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, save_states=True)[:,0]
             else:             return [yi_values[yii][v] for v in m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)[:,(y.shape[1] if use_y else 0)+yii]]
         else:
             # Use the tree to lookup the nearest neighbor.
-            emb = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True)
+            emb = m(ax=ax, axi=axi, sizes=sizes, x=x, xi=xi, embedding=True, save_states=True)
             i = tree(emb, return_distance=False)
             if (yii is None): return y[i,0]
             else:             return [yi_values[yii][v] for v in yi[i.flatten(),yii]]
 
 
-    # Generate the plot of the results.
+    # Generate the plot of the surface for the predictions.
     print("Adding to plot..")
     p = Plot()
-
+    plot_points = 3000
     # Add the two functions that are being approximated.
     if (use_y):
         # Add the provided points.
@@ -763,7 +873,7 @@ if __name__ == "__main__":
             f = f.__name__
             p.add_func(f"xi={f}", lambda x: fhat(x, f=f), *x_min_max,
                        group=i,  vectorized=True, color=i, opacity=0.8,
-                       plot_points=3000) # , mode="markers", marker_size=2)
+                       plot_points=plot_points) # , mode="markers", marker_size=2)
     if (use_yi):
         # Add the provided points.
         for i, (f, xf) in enumerate(zip(functions, points)):
@@ -774,14 +884,36 @@ if __name__ == "__main__":
         for f in functions:
             for i in range(yi.shape[1]):
                 p.add_func(f"xi={f.__name__}, yi={i}", lambda x: fhat(x, f=f.__name__, yii=i),
-                           *x_min_max, opacity=0.8, plot_points=3000,
+                           *x_min_max, opacity=0.8, plot_points=plot_points,
                            mode="markers", shade=True, marker_size=4)
+    p.plot(show=False)
 
-    # Produce the visual.
+    # Generate a visual for data projections.
+    m.predict(
+        ax=(ax.copy() if use_a else None),
+        axi=(axi if use_a else None),
+        sizes=(sizes if use_a else None),
+        x=(x.copy() if use_x else None),
+        xi=(xi if use_x else None),
+        save_states=True
+    )
+    from tlux.math import project
+    p = Plot("Data embeddings")
+    munpacked = m.unpack()
+    if (munpacked.a_embeddings.size > 0):
+        p.add("a-embs", *project(munpacked.a_embeddings.T, 3).T)
+    if (use_a):
+        p.add("ax", *project(m.states["ax"], 3).T)
+        p.add("ay", *project(m.states["ay"], 3).T)
+    if (munpacked.m_embeddings.size > 0):
+        p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
+    p.add("x", *project(m.states["x"], 3).T)
+
+    # Generate a visual for the training loss.
     print("Generating surface plot..")
     # Generate a visual of the loss function.
     if (len(getattr(globals().get("m",None), "record", [])) > 0):
-        p.plot(show=False)
+        p.show(append=True, show=False)
         print()
         print("Generating loss plot..")
         p = Plot("Mean squared error")
@@ -797,5 +929,29 @@ if __name__ == "__main__":
             p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
         p.show(append=True, show=True, y_range=[-.2, 1.2])
     else:
-        p.show()
+        p.show(append=True, show=True)
     print("", "done.", flush=True)
+
+
+# 2023-03-13 23:18:23
+# 
+##############################################################
+# from tlux.approximate.axy.summary import Details, AxyModel #
+# details = Details(self.config, steps)                      #
+# rwork = details.rwork                                      #
+# iwork = details.iwork                                      #
+# lwork = details.lwork                                      #
+##############################################################
+
+
+# 2023-03-13 23:18:31
+# 
+#######################################################################
+# print("self.record: ", self.record)                                 #
+# print("model ", self.unpack(show_vecs=True))                        #
+# m = self.model.copy()                                               #
+# m[:self.config.num_vars] = details.model_grad_mean[:]               #
+# print("model_grad_mean ", AxyModel(self.config, m, show_vecs=True)) #
+# m[:self.config.num_vars] = details.model_grad_curv[:]               #
+# print("model_grad_curv ", AxyModel(self.config, m, show_vecs=True)) #
+#######################################################################

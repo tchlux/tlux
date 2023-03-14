@@ -133,3 +133,93 @@ class AxyModel:
             f"  output vecs  {self.m_output_vecs.shape} "+to_str(self.m_output_vecs)
              if (self.m_output_vecs.size > 0) else "")
         ) + (self._timer_summary_string() if (self.show_times or show_times) else "")
+
+
+# Holder for the model and its work space (with named attributes).
+class Details(dict):
+    def __init__(self, config, steps, ydi=0, ywd=0):
+        import numpy as np
+        self.config = config
+        self.steps = steps
+        # Modify nm and na to be the smallest needed values.
+        # Generic allocations and objects.
+        ftype = dict(order="F", dtype="float32")
+        itype = dict(order="F", dtype="int32")
+        ltype = dict(order="F", dtype="int64")
+        model = np.ones(config.total_size, **ftype)
+        rwork = np.ones(config.rwork_size, **ftype)  # beware of allocation, heap vs stack
+        iwork = np.ones(config.iwork_size, **itype)
+        lwork = np.ones(config.lwork_size, **ltype)
+        agg_iterators = np.ones((5, config.nmt), **ltype)
+        record = np.zeros((6,steps), **ftype)
+        yi = np.zeros((ydi, config.nm), **ltype)
+        yw = np.zeros((ywd, config.nm), **ftype)
+        # Store source memory allocations internally.
+        self.model = model
+        self.rwork = rwork
+        self.iwork = iwork
+        self.lwork = lwork
+        self.record = record
+        self.agg_iterators = agg_iterators
+        # Declare all the special attributes.
+        self.update(dict(
+            # Model.
+            a_embeddings  = model[config.asev-1:config.aeev].reshape(config.ade, config.ane, order="F"),
+            a_input_vecs  = model[config.asiv-1:config.aeiv].reshape(config.adi, config.ads, order="F"),
+            a_input_shift = model[config.asis-1:config.aeis].reshape(config.ads, order="F"),
+            a_state_vecs  = model[config.assv-1:config.aesv].reshape(config.ads, config.ads, max(0,config.ans-1), order="F"),
+            a_state_shift = model[config.asss-1:config.aess].reshape(config.ads, max(0,config.ans-1), order="F"),
+            a_output_vecs = model[config.asov-1:config.aeov].reshape(config.adso, config.ado+1, order="F"),
+            m_embeddings  = model[config.msev-1:config.meev].reshape(config.mde, config.mne, order="F"),
+            m_input_vecs  = model[config.msiv-1:config.meiv].reshape(config.mdi, config.mds, order="F"),
+            m_input_shift = model[config.msis-1:config.meis].reshape(config.mds, order="F"),
+            m_state_vecs  = model[config.mssv-1:config.mesv].reshape(config.mds, config.mds, max(0,config.mns-1), order="F"),
+            m_state_shift = model[config.msss-1:config.mess].reshape(config.mds, max(0,config.mns-1), order="F"),
+            m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, config.mdo, order="F"),
+            ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
+            ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
+            ay_shift = model[config.aoss-1:config.aose].reshape(config.ado, order="F"),
+            x_shift = model[config.miss-1:config.mise].reshape(config.mdn, order="F") if (config.mdn > 0) else None,
+            x_rescale = model[config.mims-1:config.mime].reshape(config.mdn, config.mdn, order="F"),
+            y_shift = model[config.moss-1:config.mose].reshape(config.do, order="F"),
+            y_rescale = model[config.moms-1:config.mome].reshape(config.do, config.do, order="F"),
+            # Real work space.
+            model_grad = rwork[config.smg-1:config.emg].reshape(config.num_vars, config.num_threads, order="F"),
+            model_grad_mean = rwork[config.smgm-1:config.emgm].reshape(config.num_vars, order="F"),
+            model_grad_curv = rwork[config.smgc-1:config.emgc].reshape(config.num_vars, order="F"),
+            best_model = rwork[config.sbm-1:config.ebm].reshape(config.total_size, order="F"),
+            ax = rwork[config.saxb-1:config.eaxb].reshape(config.adi, config.na, order="F"),
+            a_emb_temp = rwork[config.saet-1:config.eaet].reshape(config.ade, config.ane, config.num_threads, order="F"),
+            a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, order="F"),
+            a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
+            ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
+            ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
+            x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nm, order="F"),
+            m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
+            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nm, config.mds, config.mns+1, order="F"),
+            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nm, config.mds, config.mns+1, order="F"),
+            y = rwork[config.smyb-1:config.emyb].reshape(config.do, config.nm, order="F"),
+            y_gradient = rwork[config.syg-1:config.eyg].reshape(config.do, config.nm, order="F"),
+            axi_shift = rwork[config.saxis-1:config.eaxis].reshape(config.ade, order="F"),
+            axi_rescale = rwork[config.saxir-1:config.eaxir].reshape(config.ade, config.ade, order="F"),
+            xi_shift = rwork[config.smxis-1:config.emxis].reshape(config.mde, order="F"),
+            xi_rescale = rwork[config.smxir-1:config.emxir].reshape(config.mde, config.mde, order="F"),
+            a_lengths = rwork[config.sal-1:config.eal].reshape(config.ads, config.num_threads, order="F"),
+            m_lengths = rwork[config.sml-1:config.eml].reshape(config.mds, config.num_threads, order="F"),
+            a_state_temp = rwork[config.sast-1:config.east].reshape(config.na, config.ads, order="F"),
+            m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nm, config.mds, order="F"),
+            # Integer work space.
+            axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi < config.eaxi) else None,
+            xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
+            sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F"),
+            a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
+            m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
+            # External space.
+            yi = yi,
+            yw = yw,
+        ))
+
+    def __getattr__(self, *args, **kwargs):
+        return self.__getitem__(*args, **kwargs)
+    def __setattr__(self, *args, **kwargs):
+        return self.__setitem__(*args, **kwargs)
