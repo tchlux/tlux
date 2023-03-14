@@ -46,7 +46,10 @@ def svd(row_vecs, steps=5, bias=1.0):
     assert (multiplier > 0), "ERROR: Provided 'row_vecs' had no nonzero entries."
     multiplier = bias / multiplier
     # Compute the covariance matrix (usually the most expensive operation).
-    covariance = np.matmul(multiplier*row_vecs.T, multiplier*row_vecs)
+    row_vecs = multiplier * row_vecs
+    center = row_vecs.mean(axis=0)
+    row_vecs -= center
+    covariance = np.matmul(row_vecs.T, row_vecs)
     # Compute the initial right singular vectors.
     right_col_vecs, lengths = orthogonalize(covariance.copy())
     # Do the power iteration.
@@ -59,6 +62,17 @@ def svd(row_vecs, steps=5, bias=1.0):
         singular_vals[singular_vals > 0]) / multiplier
     # Return the singular values and the right singular vectors.
     return singular_vals, right_col_vecs.T
+
+
+# Use the SVD routine to project data onto its first N principal components.
+def project(row_vecs, dim, **svd_kwargs):
+    # Compute the principal components via a singular value decomposition.
+    singular_values, projection_vecs = svd(row_vecs, **svd_kwargs)
+    row_vecs = row_vecs @ projection_vecs[:dim,:].T
+    # Add 0's to the end if the projection was not enough.
+    if (dim > row_vecs.shape[1]):
+        row_vecs = np.concatenate((row_vecs, np.zeros((row_vecs.shape[0], dim - row_vecs.shape[1]))), axis=1)
+    return row_vecs
 
 
 # Given "d" categories that need to be converted into real space,
