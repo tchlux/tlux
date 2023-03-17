@@ -2,8 +2,27 @@ import numpy as np
 import fmodpy
 
 # Matrix operations module.
-rand = fmodpy.fimport("../random.f90", name="fortran_random", blas=True, lapack=True).random
-mops = fmodpy.fimport("../matrix_operations.f90", blas=True, lapack=True).matrix_operations
+rand = fmodpy.fimport("../random.f90", name="fortran_random",
+                      blas=True, lapack=True).random
+mops = fmodpy.fimport("../matrix_operations.f90", name="fortran_matrix_operations",
+                      blas=True, lapack=True).matrix_operations
+
+
+# Make sure that the random integer generation has desired behavior.
+def _test_random_integer():
+    counts = {}
+    trials = 1000000
+    bins = 3
+    for i in range(trials):
+        val = rand.random_integer(max_value=bins)
+        counts[val] = counts.get(val,0) + 1
+    total_count = sum(counts.values())
+    for (v,c) in sorted(counts.items()):
+        ratio = (c / total_count)
+        error = abs(ratio - 1/bins)
+        assert (error < 0.001), f"Bad ratio of random integers had value {v} when generating with max_value = {bins}.\n  Ratio was {ratio}\n  Expected {1/bins}"
+
+_test_random_integer()
 
 
 # --------------------------------------------------------------------

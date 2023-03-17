@@ -1,6 +1,6 @@
 import os, re, math, sys
 import numpy as np
-np.set_printoptions(linewidth=1000, threshold=sys.maxsize)
+
 
 # Class for calling the underlying AXY model code.
 class AXY:
@@ -258,9 +258,11 @@ class AXY:
         return nm, na, mdn, mne, mdo, adn, ane, yne, y, yw, x, xi, ax, axi, sizes
 
 
-    # Fit this model.
+    # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
+    # 
     # TODO: When sizes for Aggregator are set, but aggregate data has
     #       zero shape, then reset the aggregator sizes to be zeros.
+    # 
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, nm=None, na=None, **kwargs):
         # Ensure that 'y' values were provided.
@@ -506,12 +508,19 @@ class AXY:
             #  as well as the "last_weights" that preceed output.
             if (self.config.mdo > 0):
                 if (self.config.mns > 0):
-                    last_state = m_states[:,:,-2]
+                    if (m_states.shape[-1] < self.config.mns):
+                        last_state = m_states[:,:,-2]
+                    else:
+                        last_state = m_states[:,:,-1]
                 else:
                     last_state = x
             else:  # There is only an aggregator, no model follows.
                 if (self.config.ans > 0):
-                    state = a_states[:,:,-2]
+                    if (a_states.shape[-1] < self.config.ans):
+                        last_state = a_states[:,:,-2]
+                    else:
+                        last_state = a_states[:,:,-1]
+                    state = a_states[:,:,-1]
                 else:
                     state = ax
                 # Collapse the aggregate embeddings into their mean.
@@ -609,6 +618,7 @@ class AXY:
 
 
 if __name__ == "__main__":
+    np.set_printoptions(linewidth=1000) #, threshold=sys.max something?)
     print("_"*70)
     print(" TESTING AXY MODULE")
 
@@ -664,48 +674,42 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    pairwise_aggregation = True
     use_a = True
-    agg_dim_states = 64
-    agg_num_states = 1
-    agg_dim_output = None
     use_x = False
-    model_dim_states = 64
-    model_num_states = 1
-    model_dim_output = None # 0
     use_y = True
     use_yi = False
-    steps = 2000
-    keep_best = False
-    num_threads = None # 50
     use_nearest_neighbor = False
 
-
-    # WARNING: The following includes a curvature estimate, which
-    #          is NOT only using stochastic gradient descent.
     ONLY_SGD = dict(
         faster_rate = 1.0,
         slower_rate = 1.0,
         update_ratio_step = 0.0,
         step_factor = 0.001,
         step_mean_change = 0.1,
-        step_curv_change = 0.01,
-        keep_best = keep_best,
+        step_curv_change = 0.00,
+        # initial_curv_estimate = 1.0,
         basis_replacement = False,
     )
 
     settings = dict(
         seed=seed,
-        early_stop = False,
+        ads = 64,
+        ans = 1,
+        ado = None,
+        mds = 64,
+        mns = 1,
+        # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
+        steps = 2000,
+        num_threads = None,
         log_grad_norm_frequency = 1,
         rank_check_frequency = 10,
-        **({"mdo":model_dim_output} if model_dim_output is not None else {}),
+        early_stop = False,
         ax_normalized = False,
         ay_normalized = False,
         x_normalized = False,
         y_normalized = False,
-        pairwise_aggregation = pairwise_aggregation,
-        # keep_best = False,
+        pairwise_aggregation = True,
+        keep_best = True,
         # **ONLY_SGD
     )
 
@@ -777,12 +781,6 @@ if __name__ == "__main__":
         # Initialize a new model.
         print("Fitting model..")
         m = AXY(
-            ads=agg_dim_states,
-            ans=agg_num_states,
-            ado=agg_dim_output,
-            mds=model_dim_states,
-            mns=model_num_states,
-            num_threads=num_threads,
             **settings,
         )
         m.fit(
@@ -793,7 +791,6 @@ if __name__ == "__main__":
             xi=(xi if use_x else None),
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
-            steps=steps,
             nm = nm,
         )
         # Save and load the model.
@@ -820,22 +817,23 @@ if __name__ == "__main__":
     if (use_nearest_neighbor):
         from tlux.approximate.balltree import BallTree
         embeddings = m(
-            ax=(ax if use_a else None),
+            ax=(ax.copy() if use_a else None),
             axi=(axi if use_a else None),
             sizes=(sizes if use_a else None),
-            x=(x if use_x else None),
+            x=(x.copy() if use_x else None),
             xi=(xi if use_x else None),
             embedding=True
         )
         print("embeddings.shape: ", embeddings.shape)
         tree = BallTree(embeddings, build=False)
+
         print("Tree:")
         print(tree)
 
 
     # Define a function that evaluates the model with some different presets.
     def fhat(x, f=functions[0].__name__, yii=None):
-        x = np.asarray(x, dtype="float32").reshape((-1,d))
+        x = np.asarray(x, dtype="float32").reshape((-1,d)).copy()
         n = x.shape[0]
         xi = np.asarray([f]*n, dtype=object).reshape((-1,1))
         ax = x.reshape((-1,1)).copy()
@@ -907,7 +905,8 @@ if __name__ == "__main__":
         p.add("ay", *project(m.states["ay"], 3).T)
     if (munpacked.m_embeddings.size > 0):
         p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
-    p.add("x", *project(m.states["x"], 3).T)
+    if (m.states["x"].size > 0):
+        p.add("x", *project(m.states["x"], 3).T)
 
     # Generate a visual for the training loss.
     print("Generating surface plot..")

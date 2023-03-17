@@ -209,9 +209,9 @@ class Details(dict):
             a_state_temp = rwork[config.sast-1:config.east].reshape(config.na, config.ads, order="F"),
             m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nm, config.mds, order="F"),
             # Integer work space.
-            axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi < config.eaxi) else None,
+            axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi < config.eaxi) else np.zeros((0,0), dtype=int),
             xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
-            sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F"),
+            sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, dtype=int),
             a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
             m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
             # External space.

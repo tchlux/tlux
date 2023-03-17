@@ -32,20 +32,22 @@ SCENARIO = dict(
 )
 
 
-# Get the directory for the AXY compiled source code.
-AXY = fmodpy.fimport(
-    input_fortran_file = "../axy.f90",
-    dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
-    name = "test_axy_module",
-    blas = True,
-    lapack = True,
-    omp = True,
-    wrap = True,
-    # rebuild = True,
-    verbose = False,
-    f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-).axy
-# help(AXY)
+# # Get the directory for the AXY compiled source code.
+# AXY = fmodpy.fimport(
+#     input_fortran_file = "../axy.f90",
+#     dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
+#     name = "test_axy_module",
+#     blas = True,
+#     lapack = True,
+#     omp = True,
+#     wrap = True,
+#     # rebuild = True,
+#     verbose = False,
+#     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+# ).axy
+# # help(AXY)
+from tlux.approximate.axy.axy import axy as AXY
+
 
 
 # Check the exit code values.

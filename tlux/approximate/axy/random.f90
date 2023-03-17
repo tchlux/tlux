@@ -5,6 +5,20 @@ MODULE RANDOM
 
 CONTAINS
 
+  ! Define a function for generating random integers.
+  ! Optional MAX_VALUE is a noninclusive upper bound for the value generated.
+  FUNCTION RANDOM_INTEGER(MAX_VALUE) RESULT(RANDOM_INT)
+    REAL(KIND=RT) :: R
+    INTEGER(KIND=IT), INTENT(IN), OPTIONAL :: MAX_VALUE
+    INTEGER(KIND=IT) :: RANDOM_INT
+    CALL RANDOM_NUMBER(R)
+    IF (PRESENT(MAX_VALUE)) THEN
+       RANDOM_INT = INT(R * MAX_VALUE, KIND=IT)
+    ELSE
+       RANDOM_INT = INT(R * HUGE(RANDOM_INT), KIND=IT)
+    END IF
+  END FUNCTION RANDOM_INTEGER
+
   ! Generate randomly distributed vectors on the N-sphere.
   SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: COLUMN_VECTORS

@@ -658,9 +658,9 @@ def _test_model_gradient():
     # Generate a scenario.
     s = SCENARIO.copy()
     s["input_aggregate_categorical"] = True
-    s["input_aggregate_numeric"] = False
-    s["input_fixed_categorical"] = False
-    s["input_fixed_numeric"] = False
+    s["input_aggregate_numeric"] = True
+    s["input_fixed_categorical"] = True
+    s["input_fixed_numeric"] = True
     s["batch_aggregate_constrained"] = False
     s["batch_fixed_constrained"] = False
     s["model_aggregate_layered"] = False
@@ -1110,7 +1110,7 @@ def _test_normalize_data():
         #  - assert that the AY are radialized (ready for second model)
         #  - assert that the embedded AXI and XI are radialized
         #  - run this routine with inf and NaN inputs
-        #  - run this routine with huge data (make sure memory usage doesn't explode)
+        #  - run this routine with huge amounts of data (make sure memory usage doesn't explode)
         # 
 
 # _test_normalize_data()
