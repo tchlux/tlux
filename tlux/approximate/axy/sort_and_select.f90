@@ -179,12 +179,8 @@ CONTAINS
        ! I = SIZE(INDICES,KIND=IT) / 2
        ! CALL ARGSELECT(VALUES, INDICES, I)
        ! ---------------------------------------------------------------
-       !$OMP PARALLEL SECTIONS NUM_THREADS(2)
-       !$OMP SECTION
        CALL ARGSORT(VALUES(:), INDICES(:I-1_IT), MS, INIT_INDS=.FALSE.)
-       !$OMP SECTION
        CALL ARGSORT(VALUES(:), INDICES(I+1_IT:), MS, INIT_INDS=.FALSE.)
-       !$OMP END PARALLEL SECTIONS
     END IF
   END SUBROUTINE ARGSORT
 

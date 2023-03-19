@@ -101,7 +101,7 @@ class AXY:
 
     # Given an exit code, check to make sure it is 0 (good), if not then read
     #  the source file to return a reason for the code if it can be found.
-    def _check_code(self, exit_code, method):
+    def _check_code(self, exit_code, method, **info):
         if (exit_code != 0):
             # Read the reason from the Fortran source file.
             source = ""
@@ -115,6 +115,53 @@ class AXY:
                 reason = reason[reason.index("!")+1:].strip()
             else:
                 reason = ""
+            # Show the record if the crash was during a fit.
+            if (method == "fit_model"):
+                print()
+                from tlux.plot import Plot
+                p = Plot("Model training record")
+                # Rescale the columns of the record for visualization.
+                record = self.record
+                i = record.shape[0]
+                step_indices = list(range(1,i+1))
+                p.add("MSE", step_indices, record[:i,0], color=1, mode="lines")
+                p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines")
+                p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines")
+                p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines")
+                p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines")
+                p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines")
+                p.show(show=False, y_range=[-.2, 1.2])
+                from tlux.math import project
+                from tlux.approximate.axy.summary import Details
+                p = Plot("Data and weight projections")
+                deets = Details(config=self.config, model=self.model, **info)
+                for (attr,val) in sorted(deets.items()):
+                    if ((attr in {"record", "model_grad", "agg_iterators", "a_order", "m_order", "a_lengths", "m_lengths"}) or
+                        (not hasattr(val, "size")) or
+                        (val.size <= 0) or
+                        (not hasattr(val, "shape")) or
+                        (len(val.shape) not in {2,3})
+                    ): continue
+                    # Handle possible matrices of data.
+                    if (len(val.shape) == 2):
+                        print(f" plotting '{attr}'.. {val.shape}")
+                        if (attr == "ay"):
+                            val = val.T
+                        minval = np.nanmin(val)
+                        maxval = np.nanmax(val)
+                        p.add(attr+f" ({minval:.2e}, {maxval:.2e})",
+                              *project(val[:1000,:1000].T, 2).T)
+                    # Handle possible stacked matrices (state weights, state values).
+                    elif (len(val.shape) == 3):
+                        print(f" plotting '{attr}'..")
+                        for i in range(val.shape[-1]):
+                            print(f"   {i+1}.. {val[:,:,i].shape}")
+                            minval = np.nanmin(val)
+                            maxval = np.nanmax(val)
+                            p.add(attr+f" {i+1} ({minval:.2e}, {maxval:.2e})",
+                                  *project(val[:1000,:1000,i].T, 2).T)
+                print()
+                p.show(append=True, show=True)
             # Raise an assertion error.
             assert (exit_code == 0), f"AXY.{method} returned nonzero exit code {exit_code}. {reason}"
 
@@ -157,7 +204,7 @@ class AXY:
         _xi = np.zeros((xi_rows, xi_cols), dtype="int64", order="C")
         for i, i_map in enumerate(xi_map):
             # Assign all the integer embeddings.
-            values = (xi[:,i].tolist() if len(xi.dtype) == 0 else xi[xi.dtype.names[i]].tolist())
+            values = (xi[:,i] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
             for j,v in enumerate(values):
                 _xi[j,i] = i_map.get(v, 0)
         return _xi
@@ -292,6 +339,11 @@ class AXY:
         self._init_kwargs.update(kwargs)
         kwargs = self._init_kwargs
         if (new_model or (self.config is None)):
+            # Remove "None" valued configs and presume their value should be inferred.
+            if (('ado' in kwargs) and (kwargs['ado'] is None)):
+                kwargs.pop("ado")
+            if (('mdo' in kwargs) and (kwargs['mdo'] is None)):
+                kwargs.pop("mdo")
             # Ensure that the config is compatible with the data.
             kwargs.update({
                 "adn":adn,
@@ -335,7 +387,7 @@ class AXY:
                                     ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
                                     steps=steps, record=self.record.T)
         # Check for a nonzero exit code.
-        self._check_code(result[-1], "fit_model")
+        self._check_code(result[-1], "fit_model", steps=steps, rwork=rwork, iwork=iwork, lwork=lwork)
         # Store the multiplier to be used in embeddings (to level the norm contribution).
         if (self.config.mdo > 0):
             last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
@@ -677,41 +729,52 @@ if __name__ == "__main__":
     use_a = True
     use_x = False
     use_y = True
-    use_yi = False
+    use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
 
-    ONLY_SGD = dict(
-        faster_rate = 1.0,
-        slower_rate = 1.0,
-        update_ratio_step = 0.0,
-        step_factor = 0.001,
-        step_mean_change = 0.1,
-        step_curv_change = 0.00,
-        # initial_curv_estimate = 1.0,
-        basis_replacement = False,
-    )
+    # ONLY_SGD = dict(
+    #     faster_rate = 1.0,
+    #     slower_rate = 1.0,
+    #     update_ratio_step = 0.0,
+    #     step_factor = 0.001,
+    #     step_mean_change = 0.1,
+    #     step_curv_change = 0.00,
+    #     # initial_curv_estimate = 1.0,
+    #     basis_replacement = False,
+    # )
 
     settings = dict(
         seed=seed,
         ads = 64,
-        ans = 1,
+        ans = 2,
         ado = None,
         mds = 64,
-        mns = 1,
+        mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 2000,
-        num_threads = None,
+        # steps = 10000,
+        # initial_curv_estimate = 1.0,
+        # step_factor = 0.005,
+        # faster_rate = 1.01,
+        # slower_rate = 0.998,
+        # min_update_ratio = 1.0,
+        # max_step_factor = 0.005,
+        # min_step_factor = 0.001,
+        # num_threads = 20,
+        # granular_parallelism = True,
         log_grad_norm_frequency = 1,
         rank_check_frequency = 10,
         early_stop = False,
-        ax_normalized = False,
-        ay_normalized = False,
-        x_normalized = False,
-        y_normalized = False,
-        pairwise_aggregation = True,
-        keep_best = True,
+        # ax_normalized = True,
+        # ay_normalized = True,
+        # x_normalized = True,
+        # y_normalized = True,
+        # pairwise_aggregation = True,
+        # keep_best = False,
         # **ONLY_SGD
     )
+
+    # 11 second fit  granular = False
+    # 14 second fit  granular = True
 
     # Generate data bounds.
     x_min_max = [[-.1, 1.1], [-.1, 1.1]]
@@ -877,11 +940,11 @@ if __name__ == "__main__":
         for i, (f, xf) in enumerate(zip(functions, points)):
             for j in range(2):
                 p.add(f"xi={f.__name__} yi={j}", *xf.T, [yi_values[j][v] for v in yi[:,j]],
-                      color=j, group=j, shade=True, marker_size=5)
+                      color=j, group=f'c{j}', shade=True, marker_size=5)
         # Add the function approximations.
         for f in functions:
             for i in range(yi.shape[1]):
-                p.add_func(f"xi={f.__name__}, yi={i}", lambda x: fhat(x, f=f.__name__, yii=i),
+                p.add_func(f"xi={f.__name__}, fyi={i}", lambda x: fhat(x, f=f.__name__, yii=i),
                            *x_min_max, opacity=0.8, plot_points=plot_points,
                            mode="markers", shade=True, marker_size=4)
     p.plot(show=False)

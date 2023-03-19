@@ -1,9 +1,13 @@
 MODULE RANDOM
-  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, IT => INT64
+  USE ISO_FORTRAN_ENV, ONLY: RT => REAL32, IT => INT64, INT32
+  USE ISO_C_BINDING, ONLY: LT => C_BOOL
 
   IMPLICIT NONE
 
+  INTEGER(KIND=IT), PARAMETER :: ONE = 1_IT
+
 CONTAINS
+
 
   ! Define a function for generating random integers.
   ! Optional MAX_VALUE is a noninclusive upper bound for the value generated.
@@ -18,6 +22,7 @@ CONTAINS
        RANDOM_INT = INT(R * HUGE(RANDOM_INT), KIND=IT)
     END IF
   END FUNCTION RANDOM_INTEGER
+
 
   ! Generate randomly distributed vectors on the N-sphere.
   SUBROUTINE RANDOM_UNIT_VECTORS(COLUMN_VECTORS)
@@ -79,13 +84,99 @@ CONTAINS
     END IF
   END SUBROUTINE RANDOM_UNIT_VECTORS
 
-  ! Generate a new RANGE_STATE for a random number generator that creates random
-  ! numbers in a range in a cyclic, covering, and nonrepeating fashion using
-  ! a linear random number generator.
-  SUBROUTINE RANDOM_RANGE(FIRST, LAST, STEP, COUNT, STATE)
-    INTEGER(KIND=IT), INTENT(IN) :: FIRST
-    INTEGER(KIND=IT), INTENT(IN), OPTIONAL :: LAST, STEP, COUNT
-    INTEGER(KIND=IT), INTENT(OUT) :: STATE ! TODO: This needs to be custom type.
-  END SUBROUTINE RANDOM_RANGE
+
+  ! Given the variables for a linear iterator, initialize it.
+  SUBROUTINE INITIALIZE_ITERATOR(I_LIMIT, I_NEXT, I_MULT, I_STEP, I_MOD, SEED)
+    INTEGER(KIND=IT), INTENT(IN) :: I_LIMIT
+    INTEGER(KIND=IT), INTENT(OUT) :: I_NEXT, I_MULT, I_STEP, I_MOD
+    INTEGER(KIND=IT), INTENT(IN), OPTIONAL :: SEED
+    !  Storage for seeding the random number generator (for repeatability). LOCAL ALLOCATION
+    INTEGER, DIMENSION(:), ALLOCATABLE :: SEED_ARRAY
+    INTEGER :: I
+    ! Set a random seed, if one was provided (otherwise leave default).
+    IF (PRESENT(SEED)) THEN
+       CALL RANDOM_SEED(SIZE=I)
+       ALLOCATE(SEED_ARRAY(I))
+       SEED_ARRAY(:) = INT(SEED)
+       CALL RANDOM_SEED(PUT=SEED_ARRAY(:))
+       DEALLOCATE(SEED_ARRAY)
+    END IF
+    ! 
+    ! Construct an additive term, multiplier, and modulus for a linear
+    ! congruential generator. These generators are cyclic and do not
+    ! repeat when they maintain the properties:
+    ! 
+    !   1) "modulus" and "additive term" are relatively prime.
+    !   2) ["multiplier" - 1] is divisible by all prime factors of "modulus".
+    !   3) ["multiplier" - 1] is divisible by 4 if "modulus" is divisible by 4.
+    ! 
+    I_NEXT = RANDOM_INTEGER(MAX_VALUE=I_LIMIT) ! Pick a random initial value.
+    I_MULT = ONE + 4_IT * (I_LIMIT + RANDOM_INTEGER(MAX_VALUE=I_LIMIT)) ! Pick a multiplier 1 greater than a multiple of 4.
+    I_STEP = ONE + 2_IT * RANDOM_INTEGER(MAX_VALUE=I_LIMIT) ! Pick a random odd-valued additive term.
+    I_MOD = 2_IT ** CEILING(LOG(REAL(I_LIMIT)) / LOG(2.0)) ! Pick a power-of-2 modulus just big enough to generate all numbers.
+    ! Cap the multiplier and step by the "I_MOD" (since it doesn't matter if they are larger).
+    I_MULT = MOD(I_MULT, I_MOD)
+    I_STEP = MOD(I_STEP, I_MOD)
+    ! Unseed the random number generator if it was seeded.
+    IF (PRESENT(SEED)) THEN
+       CALL RANDOM_SEED()
+    END IF
+  END SUBROUTINE INITIALIZE_ITERATOR
+
+  
+  ! Map an integer I in the range [1, MAX_VALUE**2] to a unique pair
+  !  of integers PAIR1 and PAIR2 with both in the range [1, MAX_VALUE].
+  SUBROUTINE INDEX_TO_PAIR(MAX_VALUE, I, PAIR1, PAIR2)
+    INTEGER(KIND=IT), INTENT(IN) :: MAX_VALUE, I
+    INTEGER(KIND=IT), INTENT(OUT) :: PAIR1, PAIR2
+    ! I = (PAIR1-ONE) * MAX_VALUE + PAIR2 ! 123456789
+    PAIR1 = ONE + (I-ONE) / MAX_VALUE     ! 111222333
+    PAIR2 = ONE + MOD((I-ONE), MAX_VALUE) ! 123123123
+  END SUBROUTINE INDEX_TO_PAIR
+
+
+  ! Map a pair of integers PAIR1 and PAIR2 in the range [1, MAX_VALUE]
+  !  to an integer I in the range [1, MAX_VALUE**2].
+  SUBROUTINE PAIR_TO_INDEX(MAX_VALUE, PAIR1, PAIR2, I)
+    INTEGER(KIND=IT), INTENT(IN) :: MAX_VALUE, PAIR1, PAIR2
+    INTEGER(KIND=IT), INTENT(OUT) :: I
+    ! PAIR1 = ONE + (I-ONE) / MAX_VALUE     ! 111222333
+    ! PAIR2 = ONE + MOD((I-ONE), MAX_VALUE) ! 123123123
+    I = (PAIR1-ONE) * MAX_VALUE + PAIR2     ! 123456789
+  END SUBROUTINE PAIR_TO_INDEX
+
+
+  ! Get the next index in the model point iterator.
+  FUNCTION GET_NEXT_INDEX(I_LIMIT, I_NEXT, I_MULT, I_STEP, I_MOD, RESHUFFLE) RESULT(NEXT_I)
+    INTEGER(KIND=IT), INTENT(IN) :: I_LIMIT
+    INTEGER(KIND=IT), INTENT(INOUT) :: I_NEXT, I_MULT, I_STEP, I_MOD
+    LOGICAL(KIND=LT), INTENT(IN), OPTIONAL :: RESHUFFLE
+    INTEGER(KIND=IT) :: NEXT_I, I
+    ! If the I_NEXT is not within the limit, cycle it until it is.
+    next_candidate : DO I = 1, I_LIMIT
+       IF (I_NEXT .LT. I_LIMIT) THEN
+          EXIT next_candidate
+       END IF
+       I_NEXT = MOD(I_NEXT * I_MULT + I_STEP, I_MOD)
+    END DO next_candidate
+    IF (I_NEXT .GE. I_LIMIT) THEN
+       PRINT *, 'ERROR: Iterator failed to arrive at valid value after cycling the full limit.', &
+            I_LIMIT, I_NEXT, I_MULT, I_STEP, I_MOD
+       NEXT_I = 0
+       RETURN
+    END IF
+    ! Store the "NEXT_I" that is currently set (and add 1 to make the range [1,limit]).
+    NEXT_I = I_NEXT + ONE
+    ! Reshuffle this data iterator if that behavior is desired.
+    IF (PRESENT(RESHUFFLE)) THEN
+       IF (NEXT_I .EQ. I_LIMIT) THEN
+          CALL INITIALIZE_ITERATOR(I_LIMIT, I_NEXT, I_MULT, I_STEP, I_MOD)
+          I_NEXT = NEXT_I - ONE
+       END IF
+    END IF
+    ! Cycle I_NEXT to the next value in the sequence.
+    I_NEXT = MOD(I_NEXT * I_MULT + I_STEP, I_MOD)
+  END FUNCTION GET_NEXT_INDEX
+
 
 END MODULE RANDOM

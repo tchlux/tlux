@@ -42,8 +42,21 @@ def svd(row_vecs, steps=5, bias=1.0):
     # Initialize a holder for the singular values and the right
     #   singular vectors (the principal components).
     # Rescale the data for stability control, exit early when given only zeros.
-    multiplier = abs(row_vecs).max()
-    assert (multiplier > 0), "ERROR: Provided 'row_vecs' had no nonzero entries."
+    multiplier = max(abs(np.nanmax(row_vecs)), abs(np.nanmin(row_vecs)))
+    # Handle the case of 0-variance data.
+    if (multiplier <= 0):
+        singular_vals = np.zeros(row_vecs.shape[1])
+        right_col_vecs = np.zeros((row_vecs.shape[1], row_vecs.shape[1]))
+        return singular_vals, right_col_vecs
+    # If there are any nan values, replace them with the mean.
+    elif (np.any(np.isnan(row_vecs))):
+        mean = np.nanmean(row_vecs, axis=0)
+        row_vecs = np.where(
+            np.isnan(row_vecs),
+            mean,
+            row_vecs
+        )
+    # Create the multiplier for rescaling (for stability).
     multiplier = bias / multiplier
     # Compute the covariance matrix (usually the most expensive operation).
     row_vecs = multiplier * row_vecs
