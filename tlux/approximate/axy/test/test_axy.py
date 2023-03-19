@@ -4,11 +4,28 @@
 #  - Create a function for visualizing all of the basis functions in a model.
 #  - Make sure the above function works in higher dimension (use PCA?).
 
+import fmodpy
+# Get the directory for the AXY compiled source code.
+AXY = fmodpy.fimport(
+    input_fortran_file = "../axy.f90",
+    dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
+    name = "test_axy_module",
+    blas = True,
+    lapack = True,
+    omp = True,
+    wrap = True,
+    # rebuild = True,
+    verbose = False,
+    f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+).axy
+# help(AXY)
+
+
 from tlux.plot import Plot
 from tlux.approximate.axy.summary import AxyModel
 from tlux.approximate.axy.test.scenarios import (
     SCENARIO,
-    AXY,
+    # AXY,
     Details,
     check_code,
     spawn_model,
@@ -306,7 +323,6 @@ def _test_fetch_data():
                     seen = set()
                     *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])
                     for _ in range(agg_iterators[0,i]):
-                        # while (next_i not in seen):
                         seen.add(next_i)
                         *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])                        
                     seen = tuple( sorted(seen) )
@@ -334,8 +350,15 @@ def _test_fetch_data():
                 config.i_step = 1
                 config.i_mult = 1
                 config.i_mod = nm
+                # If all data can fit, make the aggregate iterators simple linear generators.
+                if ((config.nm >= x_in.shape[1]) and (config.na >= ax_in.shape[1]) and (not pairwise)):
+                    agg_iterators[1,:] = 0  # next
+                    agg_iterators[2,:] = 1  # mult
+                    agg_iterators[3,:] = 1  # step
+                    agg_iterators[4,:] = agg_iterators[0,:]  # mod = limit
+                # Call the Fortran library code.
                 (
-                    config, agg_iterators, ax, axi, f_sizes, x, xi, y, yw, f_na
+                    f_config, f_agg_iterators, f_ax, f_axi, f_sizes, f_x, f_xi, f_y, f_yw, f_na
                 ) = AXY.fetch_data(
                     config, agg_iterators, ax_in, ax, axi_in, axi, sizes_in, sizes,
                     x_in, x, xi_in, xi, y_in, y, yw_in, yw
@@ -343,7 +366,18 @@ def _test_fetch_data():
                 assert (py_na == f_na), f"Number of aggregate points did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_na}\n  fortran: {f_na}\n"
                 assert (tuple(sorted(py_sizes.tolist())) == tuple(sorted(f_sizes.tolist()))), f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
                 assert max(abs(py_sizes-f_sizes)) in {0,1}, f"Sizes did not match. dict(nm = {nm}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
-                # TODO: Verify that when (nm >= nm_in) and (na >= na_in) that we get ALL inputs!
+                # Verify that when (nm >= nm_in) and (na >= na_in) that we get ALL inputs!
+                if (config.nm >= x_in.shape[1]):
+                    assert np.all(x_in == f_x), f"There was enough room for all x, but they were not there (in order).\n\n  x:   {x_in}\n  f_x: {f_x}"
+                    assert np.all(xi_in == f_xi), f"There was enough room for all xi, but they were not there (in order).\n\n  xi:   {xi_in}\n  f_xi: {f_xi}"
+                    assert np.all(y_in == f_y), f"There was enough room for all y, but they were not there (in order).\n\n  y:   {y_in}\n  f_y: {f_y}"
+                    assert np.all(yw_in == f_yw), f"There was enough room for all yw, but they were not there (in order).\n\n  yw:   {yw_in}\n  f_yw: {f_yw}"
+                    if ((config.na >= ax_in.shape[1]) and (not pairwise)):
+                        assert np.all(sizes_in == f_sizes), f"There was enough room for all sizes, but they were not there (in order).\n\n  sizes:   {sizes_in}\n  f_sizes: {f_sizes}"
+                        assert np.all(ax_in == f_ax[:,:ax_in.shape[1]]), f"There was enough room for all ax, but they were not there (in order).\n\n  ax:   {ax_in}\n  f_ax: {f_ax}"
+                        assert np.all(axi_in == f_axi[:,:axi_in.shape[1]]), f"There was enough room for all axi, but they were not there (in order).\n\n  axi:   {axi_in}\n  f_axi: {f_axi}"
+
+
     print(" passed")
 
 _test_fetch_data()
