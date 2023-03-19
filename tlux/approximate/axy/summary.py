@@ -137,19 +137,24 @@ class AxyModel:
 
 # Holder for the model and its work space (with named attributes).
 class Details(dict):
-    def __init__(self, config, steps, ydi=0, ywd=0):
+    def __init__(self, config, steps=10, ydi=0, ywd=0,
+                 model=None, rwork=None, iwork=None, lwork=None,
+                 agg_iterators=None, record=None):
         import numpy as np
         self.config = config
         self.steps = steps
-        # Modify nm and na to be the smallest needed values.
         # Generic allocations and objects.
         ftype = dict(order="F", dtype="float32")
         itype = dict(order="F", dtype="int32")
         ltype = dict(order="F", dtype="int64")
-        model = np.ones(config.total_size, **ftype)
-        rwork = np.ones(config.rwork_size, **ftype)  # beware of allocation, heap vs stack
-        iwork = np.ones(config.iwork_size, **itype)
-        lwork = np.ones(config.lwork_size, **ltype)
+        if (model is None):
+            model = np.ones(config.total_size, **ftype)
+        if (rwork is None):
+            rwork = np.ones(config.rwork_size, **ftype)  # beware of allocation, heap vs stack
+        if (iwork is None):
+            iwork = np.ones(config.iwork_size, **itype)
+        if (lwork is None):
+            lwork = np.ones(config.lwork_size, **ltype)
         agg_iterators = np.ones((5, config.nmt), **ltype)
         record = np.zeros((6,steps), **ftype)
         yi = np.zeros((ydi, config.nm), **ltype)
