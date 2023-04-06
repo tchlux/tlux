@@ -2064,7 +2064,6 @@ CONTAINS
          YW_MASK(SIZE(YW,1), SIZE(YW,2)), &
          Y_SCALE(SIZE(Y_RESCALE,1), SIZE(Y_RESCALE,2)) &
     )
-    PRINT *, "axy.f90 Line 2066: "
     ! Get some data to use in the normalization process.
     CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
          AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
@@ -2075,7 +2074,6 @@ CONTAINS
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     END IF
     ! AX
-    PRINT *, "axy.f90 Line 2077: "
     IF ((.NOT. CONFIG%AX_NORMALIZED) .AND. (CONFIG%ADN .GT. 0)) THEN
        IF (CONFIG%RESCALE_AX) THEN
           TO_FLATTEN = CONFIG%ADN
@@ -2107,7 +2105,6 @@ CONTAINS
        END WHERE
     END IF
     ! AXI
-    PRINT *, "axy.f90 Line 2104: "
     IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
        CALL RADIALIZE(AX(CONFIG%ADN+1:CONFIG%ADN+CONFIG%ADE,:NA), AXI_SHIFT(:), AXI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
@@ -2128,7 +2125,6 @@ CONTAINS
        CONFIG%AXI_NORMALIZED = .TRUE.
     END IF
     ! X
-    PRINT *, "axy.f90 Line 2125: "
     IF ((.NOT. CONFIG%X_NORMALIZED) .AND. (CONFIG%MDN .GT. 0)) THEN
        IF (CONFIG%RESCALE_X) THEN
           TO_FLATTEN = CONFIG%MDN
@@ -2160,7 +2156,6 @@ CONTAINS
        END WHERE
     END IF
     ! XI
-    PRINT *, "axy.f90 Line 2152: "
     IF ((.NOT. CONFIG%XI_NORMALIZED) .AND. (CONFIG%MDE .GT. 0)) THEN
        CALL RADIALIZE(X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:), XI_SHIFT(:), XI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
@@ -2181,7 +2176,6 @@ CONTAINS
        CONFIG%XI_NORMALIZED = .TRUE.
     END IF
     ! Y
-    PRINT *, "axy.f90 Line 2173: "
     IF (.NOT. CONFIG%Y_NORMALIZED) THEN
        IF (CONFIG%RESCALE_Y) THEN
           TO_FLATTEN = CONFIG%DO
@@ -2213,7 +2207,6 @@ CONTAINS
        END WHERE
     END IF
     ! YW
-    PRINT *, "axy.f90 Line 2200: "
     IF (SIZE(YW_IN,KIND=INT64) .GT. 0) THEN
        ! Divide by the average YW to make its mean 1 (separately for negative and positive YW).
        YW_MASK(:,:) = (YW_IN .GE. 0.0_RT)
@@ -2232,7 +2225,6 @@ CONTAINS
     END IF
     ! 
     ! Normalize AY (AX must already be normalized, EVALUATE contains parallelization).
-    PRINT *, "axy.f90 Line 2219: "
     IF ((.NOT. CONFIG%AY_NORMALIZED) .AND. (CONFIG%ADO .GT. 0)) THEN
        AY_SHIFT(:) = 0.0_RT
        ! Only apply the normalization to AY if there is a model afterwards.
@@ -2817,7 +2809,6 @@ CONTAINS
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
     CALL CPU_TIME(CPU_TIME_START)
-    PRINT *, "axy.f90 Line 2796: "
     ! Check for a valid data shape given the model.
     INFO = 0
     ! Check the shape of all inputs (to make sure they match this model).
@@ -2856,7 +2847,6 @@ CONTAINS
     ! Initialize RWORK to be zeros because it holds lots of gradients.
     RWORK(:) = 0.0_RT
     RWORK(CONFIG%SMGC:CONFIG%EMGC) = CONFIG%INITIAL_CURV_ESTIMATE
-    PRINT *, "axy.f90 Line 2835: "
     ! 
     ! TODO: For deciding which points to keep when doing batching:
     !        track the trailing average error CHANGE for all points (E^.5)
@@ -3008,7 +2998,6 @@ CONTAINS
       ! Disable the application of SHIFT (since data is / will be normalized).
       NORMALIZE = CONFIG%NORMALIZE
       CONFIG%NORMALIZE = .FALSE.
-      PRINT *, "axy.f90 Line 2987: "
       ! Initialize the aggregate iterators.
       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) &
       !$OMP& IF((CONFIG%NUM_THREADS > 0) .AND. (SIZE(SIZES_IN) > 0))
@@ -3029,7 +3018,6 @@ CONTAINS
             )
          END IF
       END DO
-      PRINT *, "axy.f90 Line 3008: "
       ! Make all iterators deterministic when all pairs will fit into the model.
       NA = SUM(AGG_ITERATORS(1,:))
       IF (NA .LE. CONFIG%NA) THEN
@@ -3052,7 +3040,6 @@ CONTAINS
       ! 
       ! 
       ! Normalize the *_IN data before fitting the model.
-      PRINT *, "axy.f90 Line 3031: "
       CALL NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
            AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
            AX, AXI, SIZES, X, XI, Y, YW, &
@@ -3065,7 +3052,6 @@ CONTAINS
            A_EMB_VECS, M_EMB_VECS, &
            A_OUT_VECS, A_STATES, AY, INFO)
       IF (INFO .NE. 0) RETURN
-      PRINT *, "axy.f90 Line 3044: "
       ! 
       ! TODO: Compute batches once, reuse for all of training.
       ! 
@@ -3466,90 +3452,3 @@ CONTAINS
 
 END MODULE AXY
 
-
-
-!2023-03-14 00:18:55
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! ! Reset the iterators to be sequential.                 !
-! CONFIG%I_NEXT = 0                                       !
-! CONFIG%I_MULT = 1                                       !
-! CONFIG%I_STEP = 1                                       !
-! CONFIG%I_MOD = SIZE(X,2)                                !
-!                                                         !
-! AGG_ITERATORS(2,:) = 0_INT64                            !
-! AGG_ITERATORS(3,:) = 1_INT64                            !
-! AGG_ITERATORS(4,:) = 1_INT64                            !
-! AGG_ITERATORS(5,:) = AGG_ITERATORS(1,:)                 !
-!                                                         !
-! ! Reset X to zeros.                                     !
-! AX(:,:) = 0.0_RT                                        !
-! X(:,:) = 0.0_RT                                         !
-!                                                         !
-! CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &                !
-!      AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &         !
-!      X_IN, X, XI_IN, XI, Y_IN, Y, YW_IN, YW, NA )       !
-! CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI, AX(:,:NA), X) !
-!                                                         !
-! PRINT *, ''                                             !
-! PRINT *, 'XI_IN:'                                       !
-! DO I = 1, SIZE(XI_IN,2)                                 !
-!    PRINT *, '  ', XI_IN(:,I)                            !
-! END DO                                                  !
-! PRINT *, ''                                             !
-! PRINT *, 'AX:'                                          !
-! DO I = 1, NA                                            !
-!    PRINT *, '  ', AX(:,I)                               !
-! END DO                                                  !
-! PRINT *, ''                                             !
-! PRINT *, 'XI:'                                          !
-! DO I = 1, SIZE(XI,2)                                    !
-!    PRINT *, '  ', XI(:,I)                               !
-! END DO                                                  !
-! PRINT *, ''                                             !
-! PRINT *, 'X:'                                           !
-! DO I = 1, SIZE(X,2)                                     !
-!    PRINT *, '  ', X(:,I)                                !
-! END DO                                                  !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-
-
-!2023-03-15 08:26:26
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -           !
-! !             Evaluate the model at all points, storing states.                   !
-! ! Embed all integer inputs into real vector inputs.                               !
-! CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI, AX(:,:NA), X)                           !
-! ! Evaluate the model, storing internal states (for gradient calculation).         !
-! ! If we are checking rank, we need to store evaluations and gradients separately. !
-! IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &                                  !
-!      (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN                       !
-!    CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY(:NA,:), SIZES, &                    !
-!         X, Y_GRADIENT, A_STATES(:NA,:,:), M_STATES, INFO)                         !
-!    ! Copy the state values into holders for the gradients.                        !
-!    A_GRADS(:NA,:,:) = A_STATES(:NA,:,:)                                           !
-!    M_GRADS(:,:,:) = M_STATES(:,:,:)                                               !
-!    AY_GRADIENT(:NA,:) = AY(:NA,:)                                                 !
-! ! Here we can reuse the same memory from evaluation for gradient computation.     !
-! ELSE                                                                              !
-!    CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY_GRADIENT(:NA,:), SIZES, &           !
-!         X, Y_GRADIENT, A_GRADS(:NA,:,:), M_GRADS, INFO)                           !
-! END IF                                                                            !
-! IF (INFO .NE. 0) RETURN                                                           !
-! !                                                                                 !
-! ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -           !
-! !                       Compute model gradient                                    !
-! !                                                                                 !
-! ! Sum the gradient over all data. If a rank check will be                         !
-! !  performed then store the states separate from the gradients.                   !
-! !  Otherwise, only compute the gradients and reuse that memory space.             !
-! CALL MODEL_GRADIENT(CONFIG, MODEL(:), &                                           !
-!      AX(:,:NA), AXI(:,:NA), SIZES(:), X(:,:), XI(:,:), Y(:,:), YW(:,:), &         !
-!      SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:,:),  &               !
-!      Y_GRADIENT(:,:), A_GRADS(:NA,:,:), M_GRADS(:,:,:), &                         !
-!      A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:))                                        !
-! IF (INFO .NE. 0) RETURN                                                           !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

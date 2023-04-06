@@ -409,7 +409,6 @@ CONTAINS
     INTEGER :: TO_FLATTEN
     D = SIZE(X,1,KIND=INT64)
     N = SIZE(X,2,KIND=INT64)
-    PRINT *, "matrix_operations.f90 Line 313: "
     ! LOCAL ALLOCATION
     ALLOCATE( &
          VALIDITY_MASK(N, D), &
@@ -419,7 +418,6 @@ CONTAINS
          SCALAR(D), &
          X1(D, N) &
     )
-    PRINT *, "matrix_operations.f90 Line 323: "
     ! Set the default value for "FLAT".
     IF (PRESENT(MAX_TO_FLATTEN)) THEN
        TO_FLATTEN = MAX(0, MIN(MAX_TO_FLATTEN, INT(D)))
@@ -438,7 +436,6 @@ CONTAINS
     ELSE
        NMAX = MIN(10000000_INT64, N)
     END IF
-    PRINT *, "matrix_operations.f90 Line 342: "
     ! Shift the data to be be centered about the origin.
     !$OMP PARALLEL DO
     DO I = 1, D
@@ -481,14 +478,12 @@ CONTAINS
        ! Reincorporate the [0,1] rescaling into the shift term.
        SHIFT(I) = SHIFT(I) * SCALAR(I) - MINS(I)
     END DO
-    PRINT *, "matrix_operations.f90 Line 385: "
     ! Set the unused portion of the "VECS" matrix to the identity.
     VECS(:,D+1:) = 0.0_RT
     VECS(D+1:,1:D) = 0.0_RT
     DO I = D+1, MIN(SIZE(VECS,1,KIND=INT64), SIZE(VECS,2,KIND=INT64))
        VECS(I,I) = 1.0_RT
     END DO
-    PRINT *, "matrix_operations.f90 Line 392: "
     ! Find the directions along which the data is most elongated.
     CALL SVD(X(:,:NMAX), VALS, VECS(1:D,1:D), STEPS=SVD_STEPS)
     ! Update the singular values associated with each vector (based on desired flatness outcome).
@@ -501,7 +496,6 @@ CONTAINS
           VALS(:) = VALS(1) / SQRT(RN)  ! First, max, singular value.
        END IF
     END IF
-    PRINT *, "matrix_operations.f90 Line 405: "
     ! Compute the inverse of the transformation if requested (BEFORE updating VECS).
     IF (PRESENT(INVERSE)) THEN
        ! Since the vectors are orthonormal, the inverse is the transpose. We also
