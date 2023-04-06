@@ -3,6 +3,7 @@ from . import DEFAULT_WAIT, DEFAULT_MAX_DISPLAY, \
     DEFAULT_MAX_STR_LEN, FILE_SAMPLE_SIZE, EXTRA_CATEGORY_KEY, \
     GENERATOR_TYPE, MISSING_SAMPLE_SIZE, NP_TYPES, SEPARATORS
 
+
 # TODO:  Read data that has new lines in the column values.
 # TODO:  Instead of just checking file size, check number of columns too,
 #        use a sample by default if the #columns is large (speed!).
@@ -60,14 +61,17 @@ def is_iterable(obj):
 # Given an object of (nested) iterable(s), expand it in one list. Try
 # using a built-in flatten method for the object, if that fails, do it
 # the (slow) python way.
-def flatten(obj):
-    try: return obj.flatten()
-    except AttributeError:
-        if is_iterable(obj):
-            output = []
-            for v in obj: output += flatten(v)
-        else: output = [obj]
-        return output
+def flatten(obj, depth=1):
+    if (hasattr(obj, "flatten")):
+        output = obj.flatten()
+    elif (hasattr(obj, "__len__") and (len(obj) == 1)):
+        output = [obj[0]]
+    elif (is_iterable(obj)):
+        output = []
+        for v in obj: output += flatten(v, depth=depth+1)
+    else:
+        output = [obj]
+    return output
 
 # Given two data objects, merge all their contents on a given column.
 def merge_on_column(d1, d2, column, d1_name="left", d2_name="right"):

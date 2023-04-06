@@ -2051,6 +2051,7 @@ CONTAINS
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: Y_SCALE ! LOCAL ALLOCATION
     LOGICAL(KIND=C_BOOL) :: NORMALIZE
     INTEGER(KIND=INT64) :: D, E, NA
+    INTEGER :: TO_FLATTEN
     REAL(KIND=RT) :: SCALAR
     REAL :: CPU_TIME_START, CPU_TIME_END
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
@@ -2063,6 +2064,7 @@ CONTAINS
          YW_MASK(SIZE(YW,1), SIZE(YW,2)), &
          Y_SCALE(SIZE(Y_RESCALE,1), SIZE(Y_RESCALE,2)) &
     )
+    PRINT *, "axy.f90 Line 2066: "
     ! Get some data to use in the normalization process.
     CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
          AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
@@ -2073,9 +2075,15 @@ CONTAINS
        CALL EMBED(CONFIG, MODEL, AXI, XI, AX, X)
     END IF
     ! AX
+    PRINT *, "axy.f90 Line 2077: "
     IF ((.NOT. CONFIG%AX_NORMALIZED) .AND. (CONFIG%ADN .GT. 0)) THEN
+       IF (CONFIG%RESCALE_AX) THEN
+          TO_FLATTEN = CONFIG%ADN
+       ELSE
+          TO_FLATTEN = 0
+       END IF
        CALL RADIALIZE(AX(:CONFIG%ADN,:NA), AX_SHIFT(:), AX_RESCALE(:,:), &
-            FLATTEN=LOGICAL(CONFIG%RESCALE_AX), MAXBOUND=.TRUE.)
+            MAX_TO_FLATTEN=TO_FLATTEN, MAXBOUND=.TRUE.)
        !$OMP PARALLEL DO
        DO D = 1, CONFIG%ADN
           AX_IN(D,:) = AX_IN(D,:) + AX_SHIFT(D)
@@ -2099,6 +2107,7 @@ CONTAINS
        END WHERE
     END IF
     ! AXI
+    PRINT *, "axy.f90 Line 2104: "
     IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
        CALL RADIALIZE(AX(CONFIG%ADN+1:CONFIG%ADN+CONFIG%ADE,:NA), AXI_SHIFT(:), AXI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
@@ -2119,14 +2128,20 @@ CONTAINS
        CONFIG%AXI_NORMALIZED = .TRUE.
     END IF
     ! X
+    PRINT *, "axy.f90 Line 2125: "
     IF ((.NOT. CONFIG%X_NORMALIZED) .AND. (CONFIG%MDN .GT. 0)) THEN
+       IF (CONFIG%RESCALE_X) THEN
+          TO_FLATTEN = CONFIG%MDN
+       ELSE
+          TO_FLATTEN = 0
+       END IF
        CALL RADIALIZE(X(:CONFIG%MDN,:), X_SHIFT(:), X_RESCALE(:,:), &
-            FLATTEN=LOGICAL(CONFIG%RESCALE_X), MAXBOUND=.TRUE.)
-       !$OMP PARALLEL DO
+            MAX_TO_FLATTEN=TO_FLATTEN, MAXBOUND=.TRUE.)
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%MDN
           X_IN(D,:) = X_IN(D,:) + X_SHIFT(D)
        END DO
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, SIZE(X_IN,2,INT64)
           X_IN(:,D) = MATMUL(X_IN(:,D), X_RESCALE(:,:))
        END DO
@@ -2145,15 +2160,16 @@ CONTAINS
        END WHERE
     END IF
     ! XI
+    PRINT *, "axy.f90 Line 2152: "
     IF ((.NOT. CONFIG%XI_NORMALIZED) .AND. (CONFIG%MDE .GT. 0)) THEN
        CALL RADIALIZE(X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:), XI_SHIFT(:), XI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%MDE
           M_EMB_VECS(D,:) = M_EMB_VECS(D,:) + XI_SHIFT(D)
        END DO
        ! Apply the transformation to the source embeddings.
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, SIZE(M_EMB_VECS,2,INT64)
           M_EMB_VECS(:,D) = MATMUL(M_EMB_VECS(:,D), XI_RESCALE(:,:))
        END DO
@@ -2165,14 +2181,20 @@ CONTAINS
        CONFIG%XI_NORMALIZED = .TRUE.
     END IF
     ! Y
+    PRINT *, "axy.f90 Line 2173: "
     IF (.NOT. CONFIG%Y_NORMALIZED) THEN
+       IF (CONFIG%RESCALE_Y) THEN
+          TO_FLATTEN = CONFIG%DO
+       ELSE
+          TO_FLATTEN = 0
+       END IF
        CALL RADIALIZE(Y(:,:), Y_SHIFT(:), Y_SCALE(:,:), &
-            INVERSE=Y_RESCALE(:,:), FLATTEN=LOGICAL(CONFIG%RESCALE_Y))
-       !$OMP PARALLEL DO
+            INVERSE=Y_RESCALE(:,:), MAX_TO_FLATTEN=TO_FLATTEN)
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%DO
           Y_IN(D,:) = Y_IN(D,:) + Y_SHIFT(D)
        END DO
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, SIZE(Y_IN,2,INT64)
           Y_IN(:,D) = MATMUL(Y_IN(:,D), Y_SCALE(:,:))
        END DO
@@ -2191,6 +2213,7 @@ CONTAINS
        END WHERE
     END IF
     ! YW
+    PRINT *, "axy.f90 Line 2200: "
     IF (SIZE(YW_IN,KIND=INT64) .GT. 0) THEN
        ! Divide by the average YW to make its mean 1 (separately for negative and positive YW).
        YW_MASK(:,:) = (YW_IN .GE. 0.0_RT)
@@ -2209,6 +2232,7 @@ CONTAINS
     END IF
     ! 
     ! Normalize AY (AX must already be normalized, EVALUATE contains parallelization).
+    PRINT *, "axy.f90 Line 2219: "
     IF ((.NOT. CONFIG%AY_NORMALIZED) .AND. (CONFIG%ADO .GT. 0)) THEN
        AY_SHIFT(:) = 0.0_RT
        ! Only apply the normalization to AY if there is a model afterwards.
@@ -2793,6 +2817,7 @@ CONTAINS
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
     CALL CPU_TIME(CPU_TIME_START)
+    PRINT *, "axy.f90 Line 2796: "
     ! Check for a valid data shape given the model.
     INFO = 0
     ! Check the shape of all inputs (to make sure they match this model).
@@ -2831,6 +2856,7 @@ CONTAINS
     ! Initialize RWORK to be zeros because it holds lots of gradients.
     RWORK(:) = 0.0_RT
     RWORK(CONFIG%SMGC:CONFIG%EMGC) = CONFIG%INITIAL_CURV_ESTIMATE
+    PRINT *, "axy.f90 Line 2835: "
     ! 
     ! TODO: For deciding which points to keep when doing batching:
     !        track the trailing average error CHANGE for all points (E^.5)
@@ -2982,6 +3008,7 @@ CONTAINS
       ! Disable the application of SHIFT (since data is / will be normalized).
       NORMALIZE = CONFIG%NORMALIZE
       CONFIG%NORMALIZE = .FALSE.
+      PRINT *, "axy.f90 Line 2987: "
       ! Initialize the aggregate iterators.
       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) &
       !$OMP& IF((CONFIG%NUM_THREADS > 0) .AND. (SIZE(SIZES_IN) > 0))
@@ -3002,6 +3029,7 @@ CONTAINS
             )
          END IF
       END DO
+      PRINT *, "axy.f90 Line 3008: "
       ! Make all iterators deterministic when all pairs will fit into the model.
       NA = SUM(AGG_ITERATORS(1,:))
       IF (NA .LE. CONFIG%NA) THEN
@@ -3024,6 +3052,7 @@ CONTAINS
       ! 
       ! 
       ! Normalize the *_IN data before fitting the model.
+      PRINT *, "axy.f90 Line 3031: "
       CALL NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
            AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
            AX, AXI, SIZES, X, XI, Y, YW, &
@@ -3036,6 +3065,7 @@ CONTAINS
            A_EMB_VECS, M_EMB_VECS, &
            A_OUT_VECS, A_STATES, AY, INFO)
       IF (INFO .NE. 0) RETURN
+      PRINT *, "axy.f90 Line 3044: "
       ! 
       ! TODO: Compute batches once, reuse for all of training.
       ! 

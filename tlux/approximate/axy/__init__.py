@@ -1,5 +1,19 @@
-import os, re, math, sys
+import os, re, math, sys, logging
 import numpy as np
+from tlux.approximate.axy.preprocessing import to_array
+
+# TODO:
+#  - _i_map and _i_encode need to be converted to a library
+#  - enforce either int64 or str type on the contents
+#  - write library that takes either int64 or string types,
+#    constructs the maps, and transforms the data to appropriate
+#    values (with parallelism)
+#  - make "gradient" an accessible function that calls the model gradient code
+#    and propogates an output gradient back to the inputs
+#  - python fallback that supports the basic evaluation of
+#    a model (but no support for training new models).
+#  - _i_encode is very slow and doesn't use any parallelism right now,
+#    could be much faster for large data by paralellizing.
 
 
 # Class for calling the underlying AXY model code.
@@ -7,20 +21,31 @@ class AXY:
     # Make the string function return the unpacked model.
     def __str__(self): return str(self.unpack())
 
+
+    # Unpack the model (which is in one array) into it's constituent parts.
+    def unpack(self, **kwargs):
+        # If there is no model or configuration, return None.
+        if (self.config is None) or (self.model is None):
+            return None
+        from tlux.approximate.axy.summary import AxyModel
+        return AxyModel(self.config, self.model, clock_rate=self.AXY.clock_rate, **kwargs)
+
+
     # Initialize a new AXY model.
     def __init__(self, **kwargs):
         try:
             # Store the Fortran module as an attribute.
             from tlux.approximate.axy.axy import axy
+            from tlux.approximate.axy.axy_random import random
             self.AXY = axy
+            self.random = random
         except:
             from tlux.setup import build_axy
             try:
-                self.AXY = build_axy().axy
+                axy, random = build_axy()
+                self.AXY = axy.axy
+                self.random = random.random
             except:
-                # TODO:
-                #  - python fallback that supports the basic evaluation of
-                #    a model (but no support for training new models).
                 raise(NotImplementedError("The Fortran source was not loaded successfully."))
         # Set defaults for standard internal parameters.
         self.steps = 1000
@@ -34,6 +59,8 @@ class AXY:
         self.axi_map = []
         self.xi_map = []
         self.yi_map = []
+        self.yi_inv_map = []
+        self.yi_embeddings = np.zeros(0, dtype="float32")
         # Initialize the attributes of the model that can be initialized.
         self._init_kwargs = kwargs
         self._init_model(**kwargs)
@@ -76,27 +103,6 @@ class AXY:
             self.AXY.init_model(self.config, self.model, seed=self.seed,
                                 initial_shift_range=initial_shift_range,
                                 initial_output_scale=initial_output_scale)
-
-
-    # Generate the string containing all the configuration information for this model.
-    def config_str(self):
-        s = ""
-        max_n_len = max(map(len,(n for (n,t) in self.config._fields_)))
-        max_t_len = max(map(len,(str(t).split("'")[1].split('.')[1]
-                                 for (n,t) in self.config._fields_)))
-        for (n,t) in self.config._fields_:
-            t = str(t).split("'")[1].split('.')[1]
-            s += f"  {str(t):{max_t_len}s}  {n:{max_n_len}s}  =  {getattr(self.config,n)}\n"
-        return s
-
-
-    # Unpack the model (which is in one array) into it's constituent parts.
-    def unpack(self, **kwargs):
-        # If there is no model or configuration, return None.
-        if (self.config is None) or (self.model is None):
-            return None
-        from tlux.approximate.axy.summary import AxyModel
-        return AxyModel(self.config, self.model, clock_rate=self.AXY.clock_rate, **kwargs)
 
 
     # Given an exit code, check to make sure it is 0 (good), if not then read
@@ -166,150 +172,7 @@ class AXY:
             assert (exit_code == 0), f"AXY.{method} returned nonzero exit code {exit_code}. {reason}"
 
 
-    # Given a categorical input array, construct a dictionary for
-    #  mapping the unique values in the columns of the array to integers.
-    def _i_map(self, xi):
-        sort_key = lambda i: i if isinstance(i,str) else str(i)
-        # Generate the map (ordered list of unique values).
-        if (len(xi.dtype) > 0):
-            xi_list = [sorted(set(xi[n].tolist()), key=sort_key) for n in xi.dtype.names]
-        else:
-            xi_list = [sorted(set(xi[:,i].tolist()), key=sort_key) for i in range(xi.shape[1])]
-        # Generate the lookup table (value -> integer index).
-        base = 1
-        xi_map = []
-        for i, xij_list in enumerate(xi_list):
-            # If a categorical input has no variance, it will have no embedding.
-            if (len(xij_list) <= 1):
-                xi_map.append({})
-            # Otherwise, add entries for mapping the unique values to integers.
-            else:
-                xi_map.append(
-                    {v:base+j for j,v in enumerate(xij_list)}
-                )
-                base += len(xij_list)
-        # Return the map and the lookup.
-        return xi_map
-
-
-    # Given a categorical input array (either 2D or struct), map this
-    #  array to an integer encoding matrix with the same number of
-    #  columns, but unique integers assigned to each unique value.
-    # 
-    # TODO: This is very slow and doesn't use any parallelism right now,
-    #       could be much faster for large data by paralellizing.
-    def _i_encode(self, xi, xi_map):
-        xi_rows = xi.shape[0]
-        xi_cols = len(xi.dtype) or xi.shape[1]
-        _xi = np.zeros((xi_rows, xi_cols), dtype="int64", order="C")
-        for i, i_map in enumerate(xi_map):
-            # Assign all the integer embeddings.
-            values = (xi[:,i] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
-            for j,v in enumerate(values):
-                _xi[j,i] = i_map.get(v, 0)
-        return _xi
-
-
-    # Convert all inputs to the AXY model into the expected numpy format.
-    def _to_array(self, ax, axi, sizes, x, xi, y=None, yi=None, yw=None):
-        # Get the number of inputs.
-        if   (y  is not None): nm = len(y)
-        elif (yi is not None): nm = len(yi)
-        elif (x  is not None): nm = len(x)
-        elif (xi is not None): nm = len(xi)
-        elif (sizes is not None): nm = len(sizes)
-        # Make sure that all inputs are numpy arrays.
-        if (y is not None):  y = np.asarray(y, dtype="float32", order="C")
-        else:                y = np.zeros((nm,0), dtype="float32", order="C") 
-        if (yi is not None): yi = np.asarray(yi)
-        else:                yi = np.zeros((nm,0), dtype="int64", order="C")
-        if (yw is not None): yw = np.asarray(np.asarray(yw, dtype="float32").reshape((nm,-1)), order="C")
-        else:                yw = np.zeros((nm,0), dtype="float32", order="C")
-        if (x is not None): x = np.asarray(x, dtype="float32", order="C")
-        else:               x = np.zeros((nm,0), dtype="float32", order="C")
-        if (xi is not None): xi = np.asarray(xi)
-        else:                xi = np.zeros((nm,0), dtype="int64", order="C")
-        if (sizes is not None): sizes = np.asarray(sizes, dtype="int64")
-        else:                   sizes = np.zeros(0, dtype="int64")
-        na = sizes.sum()
-        if (ax is not None): ax = np.asarray(ax, dtype="float32", order="C")
-        else:                ax = np.zeros((na,0), dtype="float32", order="C")
-        if (axi is not None): axi = np.asarray(axi)
-        else:                 axi = np.zeros((na,0), dtype="int64", order="C")
-        # Make sure that all inputs have the expected shape.
-        assert (len(y.shape) in {1,2}), f"Bad y shape {y.shape}, should be 1D or 2D matrix."
-        assert (len(yi.shape) in {1,2}), f"Bad yi shape {yi.shape}, should be 1D or 2D matrix."
-        assert (yw.shape[1] in {0, 1, y.shape[1]}), f"Bad yw shape {yw.shape}, should have 0 columns or 1 column{' or '+str(y.shape[1])+' columns' if (y.shape[1] > 1) else ''}."
-        assert (len(x.shape) in {1,2}), f"Bad x shape {x.shape}, should be 1D or 2D matrix."
-        assert (len(xi.shape) in {1,2}), f"Bad xi shape {xi.shape}, should be 1D or 2D matrix."
-        assert (len(ax.shape) in {1,2}), f"Bad ax shape {ax.shape}, should be 1D or 2D matrix."
-        assert (len(axi.shape) in {1,2}), f"Bad axi shape {axi.shape}, should be 1D or 2D matrix."
-        assert (len(sizes.shape) == 1), f"Bad sizes shape {sizes.shape}, should be 1D int vector."
-        # Reshape inputs to all be two dimensional (except sizes).
-        if (len(y.shape) == 1): y = y.reshape((-1,1))
-        if (len(yi.shape) == 1) and (len(yi.dtype) == 0): yi = yi.reshape((-1,1))
-        if (len(yw.shape) == 1): yw = yw.reshape((-1,1))
-        if (len(x.shape) == 1): x = x.reshape((-1,1))
-        if (len(xi.shape) == 1) and (len(xi.dtype) == 0): xi = xi.reshape((-1,1))
-        if (len(ax.shape) == 1): ax = ax.reshape((-1,1))
-        if ((len(axi.shape) == 1) and (len(axi.dtype) == 0)): axi = axi.reshape((-1,1))
-        mdo = y.shape[1]
-        mdn = x.shape[1]
-        adn = ax.shape[1]
-        # Handle mapping "xi" into integer encodings.
-        xi_cols = len(xi.dtype) or xi.shape[1]
-        if (xi_cols > 0):
-            if (len(self.xi_map) == 0):
-                self.xi_map = self._i_map(xi)
-            else:
-                assert (xi_cols == len(self.xi_map)), f"Bad number of columns in 'xi', {xi_cols}, expected {len(self.xi_map)} columns."
-            xi = self._i_encode(xi, self.xi_map)
-            mne = sum(map(len, self.xi_map))
-        else: mne = 0
-        # Handle mapping "axi" into integer encodings.
-        axi_cols = len(axi.dtype) or axi.shape[1]
-        if (axi_cols > 0):
-            if (len(self.axi_map) == 0):
-                self.axi_map = self._i_map(axi)
-            else:
-                assert (axi_cols == len(self.axi_map)), f"Bad number of columns in 'axi', {axi_cols}, expected {len(self.axi_map)} columns."
-            axi = self._i_encode(axi, self.axi_map)
-            ane = sum(map(len, self.axi_map))
-        else: ane = 0
-        # Handle mapping "yi" into integer encodings.
-        yi_cols = len(yi.dtype) or yi.shape[1]
-        if (yi_cols > 0):
-            if (len(self.yi_map) == 0):
-                self.yi_map = self._i_map(yi)
-                self.yi_inv_map = [{v:k for (k,v) in m.items()} for m in self.yi_map]
-            else:
-                assert (yi_cols == len(self.yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(self.yi_map)} columns."
-            yi = self._i_encode(yi, self.yi_map)
-            yne = sum(map(len, self.yi_map))
-        else: yne = 0
-        # Handle mapping integer encoded "yi" into a single real valued y.
-        if (yne > 0):
-            # Use a regular simplex to construct equally spaced embeddings for the categories.
-            from tlux.math import regular_simplex
-            embedded = np.concatenate((
-                np.zeros((1,yne-1), dtype="float32"),
-                regular_simplex(yne).astype("float32")), axis=0)
-            _y = np.zeros((nm, mdo+yne-1), dtype="float32")
-            _y[:,:mdo] = y[:,:]
-            for i in range(yi.shape[1]):
-                _y[:,mdo:] += embedded[yi[:,i]]
-            y = _y
-            mdo += yne-1
-            self.yi_embeddings = embedded[1:]
-        # Return all the shapes and numpy formatted inputs.
-        return nm, na, mdn, mne, mdo, adn, ane, yne, y, yw, x, xi, ax, axi, sizes
-
-
     # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
-    # 
-    # TODO: When sizes for Aggregator are set, but aggregate data has
-    #       zero shape, then reset the aggregator sizes to be zeros.
-    # 
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, nm=None, na=None, **kwargs):
         # Ensure that 'y' values were provided.
@@ -318,9 +181,13 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        nm_total, na_total, mdn, mne, mdo, adn, ane, yne, y, yw, x, xi, ax, axi, sizes = (
-            self._to_array(ax, axi, sizes, x, xi, y, yi)
+        nm_total, na_total, ax, axi, sizes, x, xi, y, yw, shapes, maps = (
+            to_array(ax, axi, sizes, x, xi, y, yi, maps=dict(
+                axi_map=self.axi_map, xi_map=self.xi_map,
+                yi_map=self.yi_map, yi_inv_map=self.yi_inv_map, yi_embeddings=self.yi_embeddings,
+            ))
         )
+        for (k,v) in maps.items(): setattr(self, k, v)
         # TODO: Is this the correct retrieval of pairwise aggregation setting?
         pairwise = kwargs.get("pairwise_aggregation", False)
         pairwise = pairwise or self._init_kwargs.get("pairwise_aggregation", False)
@@ -346,12 +213,12 @@ class AXY:
                 kwargs.pop("mdo")
             # Ensure that the config is compatible with the data.
             kwargs.update({
-                "adn":adn,
-                "ane":max(ane, kwargs.get("ane",0)),
-                "ado":kwargs.get("ado", (mdo if (kwargs.get("mdo",None) == 0) else None)),
-                "mdn":mdn,
-                "mne":max(mne, kwargs.get("mne",0)),
-                "mdo":kwargs.get("mdo", mdo),
+                "adn":shapes["adn"],
+                "ane":max(shapes["ane"], kwargs.get("ane",0)),
+                "ado":kwargs.get("ado", (shapes["mdo"] if (kwargs.get("mdo",None) == 0) else None)),
+                "mdn":shapes["mdn"],
+                "mne":max(shapes["mne"], kwargs.get("mne",0)),
+                "mdo":kwargs.get("mdo", shapes["mdo"]),
             })
             self._init_model(**kwargs)
         else:
@@ -416,8 +283,8 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
-        nmt, nat, _, _, _, _, _, _, y, _, x, xi, ax, axi, sizes = (
-            self._to_array(ax, axi, sizes, x, xi)
+        nmt, nat, ax, axi, sizes, x, xi, _, _, _, _ = (
+            to_array(ax, axi, sizes, x, xi, maps=dict(axi_map=self.axi_map, xi_map=self.xi_map))
         )
         # Set the default "number of aggregate inputs" allowed.
         if (na is None):
@@ -470,7 +337,9 @@ class AXY:
                         agg_iterators[1:,i] = (0, 1, 1, agg_iterators[0,i]) # next, step, mult, mod
                     # Otherwise, use a random linear iterator.
                     else:
-                        agg_iterators[1:,i] = self.AXY.initialize_iterator(
+                        # TODO: This line of code will break since INITIALIZE_ITERATOR
+                        #       now lives in the RANDOM module.
+                        agg_iterators[1:,i] = self.random.initialize_iterator(
                             i_limit=agg_iterators[0,i],
                         )
             # Create scratch space for all data holders.
@@ -628,8 +497,8 @@ class AXY:
             "xi_map" : [list(m.items()) for m in self.xi_map],
             "axi_map" : [list(m.items()) for m in self.axi_map],
             "yi_map" : [list(m.items()) for m in self.yi_map],
-            "yi_inv_map" : [list(m.items()) for m in getattr(self, "yi_inv_map", [])],
-            "yi_embeddings" : getattr(self, "yi_embeddings", np.asarray([])).tolist(),
+            "yi_inv_map" : [list(m.items()) for m in self.yi_inv_map],
+            "yi_embeddings" : self.yi_embeddings.tolist(),
         })
         # Write the JSON contents of the model to file.
         if (path.endswith(".gz")):
@@ -674,25 +543,26 @@ if __name__ == "__main__":
     print("_"*70)
     print(" TESTING AXY MODULE")
 
-    # # Remove the compiled object if modifications have been made to sources.
-    # import os
-    # f9 = os.path.dirname(os.path.abspath(__file__))
-    # f9 = [os.path.join(f9,p) for p in os.listdir(f9) if p.endswith(".f90")]
-    # so = os.path.expanduser("~/Git/tlux/tlux/approximate/axy/axy/axy.arm64.so")
-    # if os.path.exists(so) and (max(map(os.path.getmtime, f9)) > os.path.getmtime(so)):
-    #     os.remove(so)
-
+    # Compile and import testing version of the modules (with testing related compilation flags).
     import fmodpy
+    RANDOM_MOD = fmodpy.fimport(
+        input_fortran_file = "axy_random.f90",
+        name = "axy_random",
+        wrap = True,
+        # rebuild = True,
+        verbose = False,
+        f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+    ).random
     AXY_MOD = fmodpy.fimport(
         input_fortran_file = "axy.f90",
-        dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
+        dependencies = ["axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
         name = "axy",
         blas = True,
         lapack = True,
         omp = True,
         wrap = True,
         # rebuild = True,
-        verbose = False,
+        verbose = True,
         f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
     ).axy
 
@@ -717,7 +587,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1, f2, f3]
+    functions = [f1]#, f2, f3]
 
     seed = 0
     np.random.seed(seed)
@@ -728,7 +598,7 @@ if __name__ == "__main__":
     new_model = True
     use_a = True
     use_x = False
-    use_y = True
+    use_y = False
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
 
@@ -826,6 +696,18 @@ if __name__ == "__main__":
     # for i in range(yi.shape[0]):
     #     for j in range(yi.shape[1]):
     #         yi[i,j] = yi_values[j][yi[i,j]]
+
+    # 
+    # import json
+    # print()
+    # print(json.dumps(dict(
+    #     x=[[round(v,3) for v in row] for row in x.tolist()],
+    #     y=[[round(v,3) for v in row] for row in y.tolist()],
+    #     fx=[[0.633, 0.544]],
+    # )))
+    # print()
+    # print()
+    # exit()
 
     print()
     print("ax.shape:    ", ax.shape)

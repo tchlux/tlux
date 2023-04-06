@@ -274,7 +274,7 @@ def test_data():
         assert(tuple(a["0"]) == tuple(b["0"]))
         os.remove("a-test.dill.gz")
     except Data.MissingModule:
-        print("(skipping dill test)")
+        print("(skipping dill test)..", end=" ")
 
     # Verify load and save of a gzipped csv file
     a.save("a-test.csv.gz")
@@ -500,7 +500,6 @@ Size: (11 x 3)
                         "def", "ghi", ("jk",tuple("lmn"))]
     simplified_sequence = (1,2,3)+tuple('abcdefghijklmn')
     assert(tuple(flatten(complex_sequence)) == simplified_sequence)
-
 
     # Verify that merging two data sets works as expected.
     d1 = Data(

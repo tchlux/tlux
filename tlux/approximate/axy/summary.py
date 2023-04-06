@@ -135,6 +135,19 @@ class AxyModel:
         ) + (self._timer_summary_string() if (self.show_times or show_times) else "")
 
 
+    # Generate the string containing all the configuration information for this model.
+    def config_str(self):
+        s = ""
+        max_n_len = max(map(len,(n for (n,t) in self.config._fields_)))
+        max_t_len = max(map(len,(str(t).split("'")[1].split('.')[1]
+                                 for (n,t) in self.config._fields_)))
+        for (n,t) in self.config._fields_:
+            t = str(t).split("'")[1].split('.')[1]
+            s += f"  {str(t):{max_t_len}s}  {n:{max_n_len}s}  =  {getattr(self.config,n)}\n"
+        return s
+
+
+
 # Holder for the model and its work space (with named attributes).
 class Details(dict):
     def __init__(self, config, steps=10, ydi=0, ywd=0,

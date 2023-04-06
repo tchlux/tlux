@@ -8,7 +8,7 @@ import fmodpy
 # Get the directory for the AXY compiled source code.
 AXY = fmodpy.fimport(
     input_fortran_file = "../axy.f90",
-    dependencies = ["random.f90", "matrix_operations.f90", "sort_and_select.f90", "axy.f90"],
+    dependencies = ["axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
     name = "test_axy_module",
     blas = True,
     lapack = True,

@@ -2,96 +2,15 @@ import numpy as np
 import fmodpy
 
 # Matrix operations module.
-rand = fmodpy.fimport("../random.f90", name="fortran_random",
-                      blas=True, lapack=True).random
-mops = fmodpy.fimport("../matrix_operations.f90", name="fortran_matrix_operations",
-                      blas=True, lapack=True).matrix_operations
-
-
-# Make sure that the random integer generation has desired behavior.
-def _test_random_integer():
-    counts = {}
-    trials = 1000000
-    bins = 3
-    for i in range(trials):
-        val = rand.random_integer(max_value=bins)
-        counts[val] = counts.get(val,0) + 1
-    total_count = sum(counts.values())
-    for (v,c) in sorted(counts.items()):
-        ratio = (c / total_count)
-        error = abs(ratio - 1/bins)
-        assert (error < 0.001), f"Bad ratio of random integers had value {v} when generating with max_value = {bins}.\n  Ratio was {ratio}\n  Expected {1/bins}"
-
-_test_random_integer()
-
-
-# --------------------------------------------------------------------
-#                            STABLE_MEAN
-
-def _test_stable_mean():
-    from tlux.math import Fraction
-    shift = 1e11
-    scale = 1e3
-    n = 100000
-    d = 4
-    # Generate data that has a mean and is offset from the origin.
-    target_mean = ((np.random.random(size=(d,)) - 0.5)*2).astype("float32")
-    matrix = np.random.normal(target_mean, size=(n,d)).astype("float32")
-    print("matrix: ", matrix)
-    matrix = matrix * scale + shift
-    target_mean = target_mean * scale + shift
-    print(matrix)
-    # Compute the "true mean" with exact arithmetic.
-    exact_transpose = [[Fraction(v) for v in col] for col in matrix.T]
-    true_mean = np.asarray([sum(col) / len(col) for col in exact_transpose], dtype=object)
-    # Compute the stable mean.
-    mean = np.zeros((d,), dtype="float32")
-    mops.stable_mean(matrix.T, mean, dim=2)
-    print("true mean:     ", (true_mean.astype("float32")).tolist())
-    print("computed mean: ", mean.tolist())
-    print("difference:    ", (true_mean.astype("float32") - mean).tolist())
-    print()
-
-# _test_stable_mean()
-# exit()
-
-
-# --------------------------------------------------------------------
-#                        RANDOM_UNIT_VECTORS
-
-# TODO: Add test with large number of vectors, ensure no Inf or Nan generated.
-def _test_random_unit_vectors():
-    # Generate test data.
-    n = 100 # number of points
-    d = 3   # dimenion of points
-
-    bd = 2 # full number of outputs
-    br = 1 # reduced rank approximation
-
-    # Random unit vectors.
-    a = np.zeros((n,d), dtype="float32")
-    rand.random_unit_vectors(a.T)
-
-    from tlux.plot import Plot
-    p = Plot()
-    for i in range(n):
-        l = np.vstack([[0]*d, a[i]])
-        p.add(str(i), *l.T, mode="lines")
-    p.show()
-
-    # Generate target outptus.
-    x = np.zeros((bd,d), dtype="float32").T
-    rand.random_unit_vectors(x)
-    b = np.array(np.matmul(a, x), order="F", dtype="float32")
-
-_test_random_unit_vectors()
-exit()
+mops = fmodpy.fimport("../axy_matrix_operations.f90", blas=True, lapack=True).matrix_operations
+print()
 
 
 # --------------------------------------------------------------------
 #                         ORTHOGONALIZE
 
-def _test_orthogonalize(max_dimension=32, trials=1000, precision=4):
+# Tested up to ~400 dimension, where it fails witih precision=5.
+def _test_orthogonalize(max_dimension=64, trials=100, precision=5):
     # Test orthogonalization.
     np.set_printoptions(linewidth=1000)
     for dimension in range(1, max_dimension+1):
@@ -126,25 +45,8 @@ def _test_orthogonalize(max_dimension=32, trials=1000, precision=4):
                 f"mops.orthogonalize(ortho.T, lengths)\n" \
                 f"bad_result = ortho @ ortho.T"
 
+_test_orthogonalize()
 
-# matrix = np.asarray([[0.8701241612434387, 0.5822769403457642], [0.2788389325141907, 0.18591123819351196]], dtype='float32')
-# lengths = np.zeros(2, dtype='float32')
-# ortho = matrix.copy()
-# mops.orthogonalize(ortho.T, lengths)
-# bad_result = ortho.T @ ortho
-# print()
-# print(matrix)
-# print()
-# print(lengths)
-# print()
-# print(ortho)
-# print()
-# print(bad_result)
-# print()
-# exit()
-
-# _test_orthogonalize()
-# exit()
 
 # --------------------------------------------------------------------
 #                         RADIALIZE
@@ -199,7 +101,7 @@ def _test_radialize():
         descriptor = 'radialized' if to_flatten else 'normalized'
         xr, shift, transform, inverse = mops.radialize(
             x=(x.copy()).T, shift=shift, vecs=transform, inverse=inverse,
-            flatten=to_flatten
+            max_to_flatten=(0 if to_flatten else None),
         )
         p.add(f"{i+1} {descriptor}", *xr, marker_size=3)
 
