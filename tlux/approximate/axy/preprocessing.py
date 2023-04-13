@@ -1,27 +1,40 @@
+from tlux.unique import unique, to_int
+import multiprocessing
 import numpy as np
+
+
+# Convert a numpy array to a set of unique values.
+def to_set(array): return set(array.tolist())
+
+
+# Insert 'value' into 'array' in sorted order, left of anything
+#  with equal 'key' if 'unique=False', otherwise skipped for equal keys.
+def insert_sorted(array, value, key=lambda i:i, unique=True):
+    low = 0
+    high = len(array)
+    index = (low + high) // 2
+    while high != low:
+        if key(array[index]) > key(value):   high = index
+        elif key(array[index]) < key(value):  low = index + 1
+        elif unique: return
+        index = (low + high) // 2
+    if ((len(array) == 0) or (array[index] != value) or (not unique)):
+        array.insert(index, value)
+
 
 # Given a categorical input array, construct a dictionary for
 #  mapping the unique values in the columns of the array to integers.
 def i_map(xi, xi_map):
-    # "Prettier" formatting for Emacs
-    sort_key = lambda i: i if isinstance(i,str) else str(i)
     # Generate the map (ordered list of unique values).
     if (len(xi.dtype) > 0):
-        xi_list = [sorted(set(xi[n].tolist()), key=sort_key) for n in xi.dtype.names]
+        for n in xi.dtype.names:
+            xi_map.append(xi[n]) 
     else:
-        xi_list = [sorted(set(xi[:,i].tolist()), key=sort_key) for i in range(xi.shape[1])]
-    # Generate the lookup table (value -> integer index).
-    base = 1
-    for i, xij_list in enumerate(xi_list):
-        # If a categorical input has no variance, it will have no embedding.
-        if (len(xij_list) <= 1):
-            xi_map.append({})
-        # Otherwise, add entries for mapping the unique values to integers.
-        else:
-            xi_map.append(
-                {v:base+j for j,v in enumerate(xij_list)}
-            )
-            base += len(xij_list)
+        for i in range(xi.shape[1]):
+            xi_map.append(xi[:,i])
+    # Use parallel processing to get the unique values from the set.
+    for i in range(len(xi_map)):
+        xi_map[i] = unique(xi_map[i])
     # Return the map and the lookup.
     return xi_map
 
@@ -33,11 +46,15 @@ def i_encode(xi, xi_map):
     xi_rows = xi.shape[0]
     xi_cols = len(xi.dtype) or xi.shape[1]
     _xi = np.zeros((xi_rows, xi_cols), dtype="int64", order="C")
+    base = 0
     for i, i_map in enumerate(xi_map):
         # Assign all the integer embeddings.
         values = (xi[:,i] if len(xi.dtype) == 0 else xi[xi.dtype.names[i]])
-        for j,v in enumerate(values):
-            _xi[j,i] = i_map.get(v, 0)
+        if (len(i_map) > 1):
+            ix = to_int(values, i_map)
+            ix[ix > 0] += base
+            _xi[:,i] = ix
+            base += len(i_map)
     return _xi
 
 
@@ -48,13 +65,11 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         axi_map = list()
         xi_map = list()
         yi_map = list()
-        yi_inv_map = list()
         yi_embeddings = None
     else:
         axi_map = maps.get("axi_map", list())
         xi_map = maps.get("xi_map", list())
         yi_map = maps.get("yi_map", list())
-        yi_inv_map = maps.get("yi_inv_map", list())
         yi_embeddings = maps.get("yi_embeddings", None)
     # Get the number of inputs.
     if   (y  is not None): nm = len(y)
@@ -128,10 +143,8 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
     yi_cols = len(yi.dtype) or yi.shape[1]
     if (yi_cols > 0):
         assert (yi_map is not None), f"Provided data for 'yi' has {yi_cols} columns, 'yi_map' is None."
-        assert (yi_inv_map is not None), f"Provided data for 'yi' has {yi_cols} columns, 'yi_inv_map' is None."
         if (len(yi_map) == 0):
             yi_map = i_map(yi, yi_map)
-            yi_inv_map = [{v:k for (k,v) in m.items()} for m in yi_map]
         else:
             assert (yi_cols == len(yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(yi_map)} columns based on provided 'yi_map' map."
         yi = i_encode(yi, yi_map)
@@ -160,7 +173,6 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         axi_map = axi_map,
         xi_map = xi_map,
         yi_map = yi_map,
-        yi_inv_map = yi_inv_map,
         yi_embeddings = yi_embeddings,
     ))
     # Return all the shapes and numpy formatted inputs.
@@ -173,4 +185,3 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         yne = yne,
     )
     return nm, na, ax, axi, sizes, x, xi, y, yw, shapes, maps
-

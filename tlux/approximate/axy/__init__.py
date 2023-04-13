@@ -1,6 +1,7 @@
 import os, re, math, sys, logging
 import numpy as np
 from tlux.approximate.axy.preprocessing import to_array
+from tlux.unique import StringArray
 
 # TODO:
 #  - _i_map and _i_encode need to be converted to a library
@@ -59,7 +60,6 @@ class AXY:
         self.axi_map = []
         self.xi_map = []
         self.yi_map = []
-        self.yi_inv_map = []
         self.yi_embeddings = np.zeros(0, dtype="float32")
         # Initialize the attributes of the model that can be initialized.
         self._init_kwargs = kwargs
@@ -184,7 +184,7 @@ class AXY:
         nm_total, na_total, ax, axi, sizes, x, xi, y, yw, shapes, maps = (
             to_array(ax, axi, sizes, x, xi, y, yi, maps=dict(
                 axi_map=self.axi_map, xi_map=self.xi_map,
-                yi_map=self.yi_map, yi_inv_map=self.yi_inv_map, yi_embeddings=self.yi_embeddings,
+                yi_map=self.yi_map, yi_embeddings=self.yi_embeddings,
             ))
         )
         for (k,v) in maps.items(): setattr(self, k, v)
@@ -470,7 +470,7 @@ class AXY:
             for i in range(len(self.yi_map)):
                 size = len(self.yi_map[i])
                 _y.append(
-                    [self.yi_inv_map[i][start+j] for j in 1+np.argmax(y[:,start:start+size], axis=1)]
+                    [self.yi_map[i][j] for j in np.argmax(y[:,start:start+size], axis=1)]
                 )
                 start += size
             return np.asarray(_y, dtype=object).T
@@ -494,10 +494,9 @@ class AXY:
             "model"  : self.model.tolist(),
             "record" : self.record.tolist(),
             "embedding_transform" : self.embedding_transform.tolist(),
-            "xi_map" : [list(m.items()) for m in self.xi_map],
-            "axi_map" : [list(m.items()) for m in self.axi_map],
-            "yi_map" : [list(m.items()) for m in self.yi_map],
-            "yi_inv_map" : [list(m.items()) for m in self.yi_inv_map],
+            "xi_map" : [m.tolist() for m in self.xi_map],
+            "axi_map" : [m.tolist() for m in self.axi_map],
+            "yi_map" : [m.tolist() for m in self.yi_map],
             "yi_embeddings" : self.yi_embeddings.tolist(),
         })
         # Write the JSON contents of the model to file.
@@ -526,7 +525,7 @@ class AXY:
         for key, value in attrs.items():
             # Convert the categorical map keys to the appropriate type.
             if (key.endswith("_map")):
-                value = list(map(dict, value))
+                value = list(map(StringArray, value))
             # Otherwise all lists are actually numpy arrays (weights).
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
@@ -587,7 +586,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1]#, f2, f3]
+    functions = [f1, f2, f3]
 
     seed = 0
     np.random.seed(seed)
@@ -597,8 +596,8 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = False
-    use_y = False
+    use_x = True
+    use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
 
@@ -721,7 +720,7 @@ if __name__ == "__main__":
 
 
     # Train a new model or load an existing one.
-    path = 'temp-model.json.gz'
+    path = 'temp-model.json'
     if (new_model or (not os.path.exists(path))):
         # Initialize a new model.
         print("Fitting model..")
@@ -739,8 +738,10 @@ if __name__ == "__main__":
             nm = nm,
         )
         # Save and load the model.
+        print("  saving..", flush=True)
         m.save(path)
 
+    print("Done fitting, loading..", flush=True)
     # Load the saved model.
     m = AXY()
     m.load(path)

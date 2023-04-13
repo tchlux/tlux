@@ -3,7 +3,6 @@
 # Any python code that should be executed (as if __main__) during
 # setup should go here to prepare the module on a new computer.
 
-import numpy as np
 
 # Function to run during module setup.
 def setup():
@@ -15,6 +14,7 @@ def setup():
         build_balltree()
         build_delaunay()
         build_regex()
+        build_unique()
     except Exception as exc:
         print(f"WARNING: 'tlux' encountered exception while trying to build compiled libraries.")
         print()
@@ -124,3 +124,30 @@ def build_regex():
         _regex = ctypes.CDLL(_clib_bin)
     # Return the compiled module.
     return _regex
+
+
+# Build the unique library.
+def build_unique():
+    import os, ctypes
+    # Configure the compilation.
+    _c_compiler = "gfortran"
+    _lib_dir = os.path.dirname(os.path.abspath(__file__))
+    _lib_path = os.path.join(_lib_dir, "unique", "unique.so")
+    _src_path = os.path.join(_lib_dir, "unique", "unique.c")
+    try:
+        _unique = ctypes.cdll.LoadLibrary(_lib_path)
+    except:
+        # Compile the shared library.
+        import sys
+        py_version = f"{sys.version_info[0]}.{sys.version_info[1]}"
+        py_include = "$(python3-config --includes)"
+        py_link = f"$(python3-config --ldflags) -lpython{py_version}"
+        cmd = f'{_c_compiler} -shared -fPIC -fopenmp -O3 -o "{_lib_path}" {py_include} {py_link} "{_src_path}"'
+        print(" ", cmd, flush=True)
+        os.system(f'echo "  {cmd}"')
+        os.system(cmd)
+        print(flush=True)
+        # Load the shared library
+        _unique = ctypes.cdll.LoadLibrary(_lib_path)
+    # Return the compiled module.
+    return _unique
