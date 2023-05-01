@@ -26,6 +26,29 @@ _test_random_integer()
 
 
 # --------------------------------------------------------------------
+#                    INDEX_TO_PAIR     PAIR_TO_INDEX
+
+def _test_index_to_pair():
+    print("INDEX_TO_PAIR")
+    mv = 30
+    all_pairs = set()
+    # Verify that the pair mapping works forwards and backwards.
+    for i in range(1, mv**2+1):
+        pair1, pair2 = rand.index_to_pair(max_value=mv, i=i)
+        all_pairs.add((pair1, pair2))
+        j = rand.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
+        assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
+    # Verify that all pairs were actually generated.
+    for i in range(1,mv+1):
+        for j in range(1,mv+1):
+            assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
+    print(" passed")
+
+_test_index_to_pair()
+
+
+
+# --------------------------------------------------------------------
 #                        RANDOM_UNIT_VECTORS
 
 # TODO: Add test with large number of vectors, ensure no Inf or Nan generated.

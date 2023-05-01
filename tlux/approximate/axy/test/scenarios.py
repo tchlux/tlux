@@ -5,6 +5,7 @@
 
 from tlux.approximate.axy.summary import Details
 from tlux.approximate.axy.axy import axy as AXY
+from tlux.approximate.axy.axy_random import random
 
 
 # Most combinations of these define the possible uses of the model.
@@ -383,7 +384,7 @@ def initialize_agg_iterator(config, agg_iterators, sizes_in):
             agg_iterators[0,i] = sizes_in[i]
             if config.pairwise_aggregation:
                 agg_iterators[0,i] = agg_iterators[0,i]**2
-            agg_iterators[1:,i] = AXY.initialize_iterator(
+            agg_iterators[1:,i] = random.initialize_iterator(
                 i_limit=agg_iterators[0,i],
             )
 

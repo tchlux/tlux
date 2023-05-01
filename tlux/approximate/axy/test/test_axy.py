@@ -23,6 +23,7 @@ AXY = fmodpy.fimport(
 
 from tlux.plot import Plot
 from tlux.approximate.axy.summary import AxyModel
+from tlux.approximate.axy.axy_random import random
 from tlux.approximate.axy.test.scenarios import (
     SCENARIO,
     # AXY,
@@ -248,29 +249,6 @@ def _test_compute_batches():
 
 
 # --------------------------------------------------------------------
-#                    INDEX_TO_PAIR     PAIR_TO_INDEX
-
-def _test_index_to_pair():
-    print("INDEX_TO_PAIR")
-    mv = 30
-    all_pairs = set()
-    # Verify that the pair mapping works forwards and backwards.
-    for i in range(1, mv**2+1):
-        pair1, pair2 = AXY.index_to_pair(max_value=mv, i=i)
-        all_pairs.add((pair1, pair2))
-        j = AXY.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
-        assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
-    # Verify that all pairs were actually generated.
-    for i in range(1,mv+1):
-        for j in range(1,mv+1):
-            assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
-    print(" passed")
-
-_test_index_to_pair()
-
-
-
-# --------------------------------------------------------------------
 #                           FETCH_DATA
 
 # Python implementation of an algorithm for clipping the sizes to fit.
@@ -321,10 +299,10 @@ def _test_fetch_data():
                 for i in range(nm_in):
                     # Get next and do a full "circle" around the iterator, verifying its correctness.
                     seen = set()
-                    *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])
+                    *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i])
                     for _ in range(agg_iterators[0,i]):
                         seen.add(next_i)
-                        *agg_iterators[1:,i], next_i = AXY.get_next_index(*agg_iterators[:,i])                        
+                        *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i])                        
                     seen = tuple( sorted(seen) )
                     expected = tuple( range(1,sizes_in[i]**(2 if pairwise else 1) + 1) )
                     assert (seen == expected), \
@@ -468,7 +446,7 @@ def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_
             if (e > 0) and (e <= config.ane):
                 ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
             elif (e > config.ane):
-                e1, e2 = AXY.index_to_pair(max_value=config.ane+1, i=e-config.ane)
+                e1, e2 = random.index_to_pair(max_value=config.ane+1, i=e-config.ane)
                 ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1-1] - m.a_embeddings[:,e2-1-1]
         if (axi.shape[0] > 1):
             ax_embedded[-config.ade:,n] /= axi.shape[0]
@@ -482,7 +460,7 @@ def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_
             if (e > 0) and (e <= config.mne):
                 x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
             elif (e > config.mne):
-                e1, e2 = AXY.index_to_pair(max_value=config.mne, i=e)
+                e1, e2 = random.index_to_pair(max_value=config.mne, i=e)
                 x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
         if (xi.shape[0] > 1):
             x_embedded[-config.mde:,n] /= xi.shape[0]

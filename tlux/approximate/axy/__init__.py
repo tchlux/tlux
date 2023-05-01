@@ -1,21 +1,18 @@
 import os, re, math, sys, logging
 import numpy as np
 from tlux.approximate.axy.preprocessing import to_array
-from tlux.unique import StringArray
+from tlux.unique import ByteArray
 
 # TODO:
-#  - _i_map and _i_encode need to be converted to a library
-#  - enforce either int64 or str type on the contents
-#  - write library that takes either int64 or string types,
-#    constructs the maps, and transforms the data to appropriate
-#    values (with parallelism)
+#  - find cause of seg fault for CIFAR training (i_encode fail)
+#  - draft solution to very slow data preparation for high dimensional "y",
+#    either generate "well spaced" values in lower dimension, or project.
 #  - make "gradient" an accessible function that calls the model gradient code
-#    and propogates an output gradient back to the inputs
+#    and propogates an output gradient back to the inputs (+1 for all outputs).
 #  - python fallback that supports the basic evaluation of
 #    a model (but no support for training new models).
-#  - _i_encode is very slow and doesn't use any parallelism right now,
-#    could be much faster for large data by paralellizing.
 
+SHOW_FAILURE_PLOT = False
 
 # Class for calling the underlying AXY model code.
 class AXY:
@@ -122,7 +119,7 @@ class AXY:
             else:
                 reason = ""
             # Show the record if the crash was during a fit.
-            if (method == "fit_model"):
+            if ((method == "fit_model") and (SHOW_FAILURE_PLOT)):
                 print()
                 from tlux.plot import Plot
                 p = Plot("Model training record")
@@ -525,7 +522,7 @@ class AXY:
         for key, value in attrs.items():
             # Convert the categorical map keys to the appropriate type.
             if (key.endswith("_map")):
-                value = list(map(StringArray, value))
+                value = list(map(ByteArray.fromlist, value))
             # Otherwise all lists are actually numpy arrays (weights).
             elif (type(value) is list): 
                 value = np.asarray(value, dtype="float32")
@@ -535,6 +532,28 @@ class AXY:
             self.config = self.AXY.MODEL_CONFIG(**self.config)
         # Return self in case an assignment was made.
         return self
+
+
+    # Generate a plot of the fit process.
+    def plot(self, p=None, fit=True, append=True, show=True):
+        if (p is None):
+            from tlux.plot import Plot
+            p = Plot("Mean squared error")
+        # Plot the fit process.
+        if fit:
+            record = self.record
+            for i in range(0, record.shape[0]+1, max(1,record.shape[0] // 100)):
+                step_indices = list(range(1,i+1))
+                p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
+                p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
+                p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines", frame=i)
+                p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
+                p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
+                p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
+            p.show(append=append, show=show, y_range=[-.2, 1.2])
+        # TODO: Plot the internal vectors.
+        # TODO: Add ability to use different plotting functions.
+        return p
 
 
 if __name__ == "__main__":
@@ -586,7 +605,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1, f2, f3]
+    functions = [f1]#, f2, f3]
 
     seed = 0
     np.random.seed(seed)
@@ -876,27 +895,3 @@ if __name__ == "__main__":
     else:
         p.show(append=True, show=True)
     print("", "done.", flush=True)
-
-
-# 2023-03-13 23:18:23
-# 
-##############################################################
-# from tlux.approximate.axy.summary import Details, AxyModel #
-# details = Details(self.config, steps)                      #
-# rwork = details.rwork                                      #
-# iwork = details.iwork                                      #
-# lwork = details.lwork                                      #
-##############################################################
-
-
-# 2023-03-13 23:18:31
-# 
-#######################################################################
-# print("self.record: ", self.record)                                 #
-# print("model ", self.unpack(show_vecs=True))                        #
-# m = self.model.copy()                                               #
-# m[:self.config.num_vars] = details.model_grad_mean[:]               #
-# print("model_grad_mean ", AxyModel(self.config, m, show_vecs=True)) #
-# m[:self.config.num_vars] = details.model_grad_curv[:]               #
-# print("model_grad_curv ", AxyModel(self.config, m, show_vecs=True)) #
-#######################################################################

@@ -1,113 +1,76 @@
 /*
 
-This C extension to Python is designed to quick identify unique elements
-in an array and then map subsequent (and similar) arrays to integer format
+This C library is designed to quick identify unique elements in an
+array and then map subsequent (and similar) arrays to integer format
 where each unique value is replaced by a unique integer in the range
-[0, n) where 'n' is the number of unique values in total.
+[0, n] where 'n' is the number of unique values in total and 0 is
+reserved for representing "unrecognized" values.
 
 Where possible, it utilizes OpenMP shared-memory parallelism to accelerate
-the loops of similar actions. The main barrier to parallelism is the
-Global Interpreter Lock (GIL), which is required for all meaningful PyObject
-actions (like converting any object to a string).
+the loops of similar actions. Define the preprocessor variable _UNIQUE_SINGLE_THREADED
+to disable all OpenMP parallelism (and disable the inclusion of 'omp.h').
+
+Define the preprocessor variable _UNIQUE_DEBUG_ENABLED to enable
+verbose logging of internal operations for debugging purposes to stderr.
+
+Author: Thomas C.H. Lux
+License: MIT
+Modification history:
+   April 2023 -- Created and tested. (704 lines total)
 
 */
 
 
 // Debugging definitions.
-// #define DEBUG_ENABLED
-// #define FORCE_SINGLE_THREADED
-// #define Py_DEBUG
-// #define Py_TRACE_REFS
+/* #define _UNIQUE_DEBUG_ENABLED */
 
+// Max to show in debug mode.
+#define _UNIQUE_HALF_MAX_EXAMPLES 50
 
-// As per recommended on https://docs.python.org/3/c-api/intro.html#include-files we
-//  are including Python.h FIRST, before standard libraries, and defining PY_SSIZE_T_CLEAN.
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>  // PyObject, Py_None, PyUnicode_Check, PyUnicode_AsUTF8, PyObject_str, Py_DECREF
+// Whether local functions are allowed (required for comparison of custom width objects).
+// #define _UNIQUE_ALLOW_LOCAL_FUNCTIONS
+
+// Use if OpenMP doesn't exist, or if only single threaded behavior is desired.
+// #define _UNIQUE_SINGLE_THREADED
 
 // Standard libraries.
 #include <stdio.h>  // printf
-#include <stdlib.h>  // malloc
-#include <string.h>  // strdup
+#include <stdlib.h>  // malloc, free
+#include <string.h>  // strlen, strcpy
 
-// Parallelism.
-#include <omp.h> // omp_get_thread_num, omp_get_num_threads, omp_get_max_threads */
-
-
-// Use the following to disable OpenMP parallelism.
-#ifdef FORCE_SINGLE_THREADED
-// Define the OpenMP library functions if it does not exists.
+// Handle parallelism (only use OpenMP if _UNIQUE_SINGLE_THREADED is not defined).
+#ifdef _UNIQUE_SINGLE_THREADED
+// Define the OpenMP library functions to return values that correspond to single threaded behavior.
 int omp_get_thread_num() { return 0; }
 int omp_get_max_threads() { return 1; }
 int omp_get_num_threads() { return 1; }
+#else
+#include <omp.h> // omp_get_thread_num, omp_get_num_threads, omp_get_max_threads
 #endif
 
 
-// Convert a Python object into a string.
-//  WARNING: Result is ALLOCATED, must be FREED.
-char* to_str(PyObject* obj) {
-  char* cstr = NULL;
-  // Handle C null objects.
-  if (!obj) {
-    cstr = strdup("NULL");
-  }
-  // Handle None objects.
-  else if (obj == Py_None) {
-    cstr = strdup("None");
-  }
-  // Check if the object is already a string.
-  else if (PyUnicode_Check(obj)) {
-    // Get the UTF8 character sequence from the string.
-    const char* str = PyUnicode_AsUTF8(obj);
-    if (!str) {
-      cstr = strdup("NULL.UTF8");
-    } else {
-      cstr = strdup(str);
-    }
-  }
-  // Otherwise, the object is not already a string, we must cast it.
-  else {
-    // The following section must be single-threaded to be GIL-safe.
-    #pragma omp critical
-    {
-      // Ensure the GIL is obtained before converting an object to a string.
-      PyGILState_STATE state = PyGILState_Ensure();
-      PyObject* str_obj = PyObject_Str(obj);
-      // Check for any python errors.
-      if (PyErr_Occurred()) {
-        PyErr_Print();
-        cstr = strdup("ERROR: C Python exception encountered on converting object to string.");
-      }
-      // Check for an invalid string object (some serious error probably occurred).
-      else if (!str_obj) {
-        cstr = strdup("NULL.str");
-      }
-      // Get the UTF8 character sequence from the string form of the object.
-      else {
-        const char* str = PyUnicode_AsUTF8(str_obj);
-        if (!str) {
-          cstr = strdup("NULL.str.UTF8");
-        } else {
-          cstr = strdup(str);
-        }
-        Py_DECREF(str_obj);
-      }
-      // Release the GIL.
-      PyGILState_Release(state);
-    }
-  }
-
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"  unique.c[to_str] -- Made C string '%s' at %u\n", cstr, cstr);
-  #endif
-
-  // Return the char* string.
-  return cstr;
+// -------------------------------------------------------------------------------------------------
+// Return 1 if the two provided arrays overlap with each other, 0 if they
+//  do not overlap with each other.
+const unsigned char arrays_overlap(const int element_width,
+                                   const long n1, const void* array1,
+                                   const long n2, const void* array2) {
+  const long start_a1 = (long) array1;
+  const long end_a1 = ((long) array1) + (element_width * n1) - 1;
+  const long start_a2 = (long) array2;
+  const long end_a2 = ((long) array2) + (element_width * n2) - 1;
+  const unsigned char overlap = (
+    ((start_a1 >= start_a2) && (start_a1 <= end_a2)) ||
+    ((end_a1 >= start_a2) && (end_a1 <= end_a2))
+  ) ? 1 : 0;
+  return overlap;
 }
 
-
+// -------------------------------------------------------------------------------------------------
 // Compare two strings.
-int string_compare_function(const char* a, const char* b) {
+int str_compare(const void* a_in, const void* b_in) {
+  const char* a = *(const char**) a_in;
+  const char* b = *(const char**) b_in;
   int a_len = strlen(a);
   int b_len = strlen(b);
   int comparison_result = 0;
@@ -127,130 +90,266 @@ int string_compare_function(const char* a, const char* b) {
       }
     }
   }
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"  unique.c[cmp] -- '%s' <= '%s'  =  %d""\n", a, b, comparison_result);
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"  unique.c[str_cmp] -- '%s' <= '%s'  =  %d\n", a, b, comparison_result);
   #endif
   return comparison_result;
 }
 
-
-// Create a function for comparing strings that are stored as void pointers.
-int void_compare_function(const void* a, const void* b) {
-  const char* a_str = *(const char**)a;
-  const char* b_str = *(const char**)b;
-  return string_compare_function(a_str, b_str);
+// -------------------------------------------------------------------------------------------------
+// Compare two characters (or any 1 byte elements).
+int char_compare(const void* a_in, const void* b_in) {
+  const unsigned char* a = *((const unsigned char**) a_in);
+  const unsigned char* b = *((const unsigned char**) b_in);
+  int comparison_result = 0;
+  if (*a < *b) {
+    comparison_result = -1;
+  } else if (*a > *b) {
+    comparison_result = 1;
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"  unique.c[char_cmp] -- %d <= %d  =  %d\n", *a, *b, comparison_result);
+  #endif
+  return comparison_result;
 }
 
+// -------------------------------------------------------------------------------------------------
+// Compare two integers (or any 4 byte elements).
+int int_compare(const void* a_in, const void* b_in) {
+  const int* a = *((const int**) a_in);
+  const int* b = *((const int**) b_in);
+  int comparison_result = 0;
+  if (*a < *b) {
+    comparison_result = -1;
+  } else if (*a > *b) {
+    comparison_result = 1;
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"  unique.c[int_cmp] -- %d <= %d  =  %d\n", *a, *b, comparison_result);
+  #endif
+  return comparison_result;
+}
 
-// Given an array of Python objects, generate a sorted list of unique strings.
-void unique(const long n, PyObject **arr_obj, long * num_unique, char *** sorted_unique) {
-  #ifdef DEBUG_ENABLED  
+// -------------------------------------------------------------------------------------------------
+// Compare two longs (or any 8 byte elements).
+int long_compare(const void* a_in, const void* b_in) {
+  const long* a = *((const long**) a_in);
+  const long* b = *((const long**) b_in);
+  int comparison_result = 0;
+  if (*a < *b) {
+    comparison_result = -1;
+  } else if (*a > *b) {
+    comparison_result = 1;
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"  unique.c[long_cmp] -- %ld <= %ld  =  %d\n", *a, *b, comparison_result);
+  #endif
+  return comparison_result;
+}
+
+// -------------------------------------------------------------------------------------------------
+// Given an array of fixefd width objects (or strings), generate a sorted list of unique values.
+void unique(char**restrict array_in, const long num_elements, const int width,
+            long*restrict num_unique, char***restrict sorted_unique) {
+  #ifdef _UNIQUE_DEBUG_ENABLED
   fprintf(stderr,"=============> unique <---------------\n");
+  fprintf(stderr,"unique.c[unique] Array at %lu with length %ld and byte width %d.\n",
+          (unsigned long) array_in, num_elements, width);
   #endif
+  // If the byte-size width is positive, then we need to allocate and fill an
+  //  array of pointers assuming the provided pointer is to contiguous memory.
+  char**restrict array;
+  if (width == -1) {
+    array = array_in;
+  } else {
+    array = (char**) malloc(num_elements * sizeof(char*)); // ALLOCATION: pointer variant of (flat) array_in
+    // Check for memory overlap between 'array' and the provided 'array_in'.
+    while (arrays_overlap(width, num_elements, array_in, num_elements, array)) {
+      fprintf(stderr,"ERROR unique.c[unique] -- Overlap in allocated memory locations for array[%lu:%lu] and provided array_in[%lu:%lu].\n",
+              (unsigned long) array, ((unsigned long)(&(array[num_elements]))) + (width-1), 
+              (unsigned long) array_in, ((unsigned long)(&(array_in[num_elements]))) + (width-1));
+      // This should NEVER happen if 'malloc' is working correctly, but since it DOES happen
+      //  occasionally in testing (macOS 13.2, python 3.11.2, numpy 1.24.2, gfortran 12.2.0),
+      //  we will allocate a new array until we create one that doesn't overlap.
+      char** old_array = array;
+      array = (char**) malloc(num_elements * sizeof(char*)); // ALLOCATION: pointer variant of (flat) array_in
+      free(old_array); // DEALLOCATION: pointer variant of (flat) array_in
+      fprintf(stderr,"unique.c Line 177: long at %lu (array in at %lu)\n", (unsigned long)array, (unsigned long)array_in);
+    }
+
+    /* fprintf(stderr,"unique.c[unique] -- Allocated memory locations for array[%lu:%lu], provided array_in[%lu:%lu].\n", */
+    /*         (unsigned long) array, ((unsigned long)(&(array[num_elements]))) + (width-1),  */
+    /*         (unsigned long) array_in, ((unsigned long)(&(array_in[num_elements]))) + (width-1)); */
+
+    for (long i=0; i<num_elements; i++) {
+      array[i] = &(((char*)array_in)[i*width]);
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      if ((i <= _UNIQUE_HALF_MAX_EXAMPLES) || (i >= num_elements-_UNIQUE_HALF_MAX_EXAMPLES)) {
+        if (width == -1) {
+          fprintf(stderr," unique.c[unique] -- array[%ld] = '%s' is at %lu\n", i, array[i], (unsigned long)(array[i]));
+        } else if (width == 1) {
+          fprintf(stderr," unique.c[unique] -- array[%ld] = %u is at %lu\n", i, *((unsigned char*)(array[i])), (unsigned long)(array[i]));
+        } else if (width == 4) {
+          fprintf(stderr," unique.c[unique] -- array[%ld] = %d is at %lu\n", i, *((int*)(array[i])), (unsigned long)(array[i]));
+        } else if (width == 8) {
+          fprintf(stderr," unique.c[unique] -- array[%ld] = %lu is at %lu\n", i, *(((long**)array)[i]), (unsigned long)(array[i]));
+        } else {
+          fprintf(stderr," unique.c[unique] -- array[%ld] is at %lu\n", i, (unsigned long)(array[i]));
+        }
+      }
+      #endif
+    }
+  }
+  // Set the comparison function based on byte width.
+  int (*byte_compare)(const void*, const void*);
+  if (width == -1) {
+    byte_compare = &str_compare;
+  } else if (width == 1) {
+    byte_compare = &char_compare;
+  } else if (width == 4) {
+    byte_compare = &int_compare;
+  } else if (width == 8) {
+    byte_compare = &long_compare;
+  } else {
+    #ifdef _UNIQUE_ALLOW_LOCAL_FUNCTIONS
+    // Compare two fixed size arrays, treat as unsigned integers.
+    int custom_compare(const void* a_in, const void* b_in) {
+      const unsigned char* a = *(const unsigned char**) a_in;
+      const unsigned char* b = *(const unsigned char**) b_in;
+      int comparison_result = 0;
+      // These strings have equal length, compare their characters.
+      for (int i = 0; i < width; i++) {
+        if (a[i] < b[i]) {
+          comparison_result = -1;
+          break;
+        } else if (a[i] > b[i]) {
+          comparison_result = 1;
+          break;
+        }
+      }
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      fprintf(stderr,"  unique.c[custom_cmp] -- %lu <= %lu  =  %d\n", a, b, comparison_result);
+      #endif
+      return comparison_result;
+    }
+    byte_compare = &custom_compare;
+    #else
+    fprintf(stderr,"ERROR unique.c[unique] There is no known comparison function for elements of %d bytes.\n", width);
+    (*num_unique) = -1;
+    (*sorted_unique) = NULL;
+    return;
+    #endif
+  }
   // Set the number of parallel threads to use.
-  int nt = omp_get_max_threads();
-  if (n < nt) nt = 1;
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[unique] -- Array[0:%ld] (%d thread%s\n", n, nt, (nt > 1 ? "s)" : ")"));
+  int num_threads = omp_get_max_threads();
+  if (num_elements < num_threads) num_threads = 1;
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[unique] -- Array[0:%ld] (%d thread%s\n", num_elements, num_threads, (num_threads > 1 ? "s)" : ")"));
   #endif
-  // Allocate space for all python object strings.
-  char **strings = malloc(n * sizeof(char*));
-
-  // Convert all of the objects to strings (as parallel as possible, with Global Interpreter Lock).
-  #pragma omp parallel for num_threads(nt) if(nt > 1)
-  for (long i=0; i<n; i++) {
-    strings[i] = to_str(arr_obj[i]);
-  }
-
   // Generate the start and end indices of chunks of the array for parallel sorting.
-  long * chunk_indices = malloc(nt * sizeof(long));
-  long * chunk_ends = malloc(nt * sizeof(long));
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[unique] -- Allocated chunk_indices at %u and chunk_ends at %u.\n", chunk_indices, chunk_ends);
+  long*restrict chunk_indices = (long*) malloc(num_threads * sizeof(long)); // ALLOCATION: chunk indices
+  long*restrict chunk_ends = (long*) malloc(num_threads * sizeof(long)); // ALLOCATION: chunk ends
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[unique] -- Allocated chunk_indices at %lu and chunk_ends at %lu.\n",
+          (unsigned long) chunk_indices, (unsigned long) chunk_ends);
   #endif
-  long chunk_size = n / nt;
+  const long chunk_size = num_elements / num_threads;
   chunk_indices[0] = 0;
-  for (int i=0; i < (n%nt); i++) {
+  for (int i=0; i < (num_elements%num_threads); i++) {
     chunk_ends[i] = chunk_indices[i] + chunk_size + 1;
-    if (i+1 < nt) {
+    if (i+1 < num_threads) {
       chunk_indices[i+1] = chunk_ends[i];
     }
   }
-  for (int i=(n%nt); i < nt; i++) {
+  for (int i=(num_elements%num_threads); i < num_threads; i++) {
     chunk_ends[i] = chunk_indices[i] + chunk_size;
-    if (i+1 < nt) {
+    if (i+1 < num_threads) {
       chunk_indices[i+1] = chunk_ends[i];
     }
   }
-  #ifdef DEBUG_ENABLED
+  #ifdef _UNIQUE_DEBUG_ENABLED
   fprintf(stderr,"unique.c[unique] -- Chunk size %ld\n", chunk_size);
-  for (int i=0; i<nt; i++) {
+  for (int i=0; i<num_threads; i++) {
     fprintf(stderr,"  unique.c[unique] -- Chunk %d covers [%ld, %ld)\n", i, chunk_indices[i], chunk_ends[i]);
   }
   #endif
-
   // Sort chunks of the array (in parallel).
-  #pragma omp parallel num_threads(nt) if(nt > 1)
+  #pragma omp parallel num_threads(num_threads) if(num_threads > 1)
   {
-    int tid = omp_get_thread_num();  // [0, .., nt-1].
-    long start = chunk_indices[tid]; // Index of first element.
-    long end = chunk_ends[tid];      // EXCLUSIVE, end = last element + 1.
-    #ifdef DEBUG_ENABLED
-    fprintf(stderr,"unique.c[unique] -- Thread %d sorting Array[%ld:%ld]\n", tid, start, end);
+    const int tid = omp_get_thread_num();  // [0, .., nt-1].
+    const unsigned long start = chunk_indices[tid]; // Index of first element.
+    const unsigned long end = chunk_ends[tid];      // EXCLUSIVE, end = last element + 1.
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    fprintf(stderr,"unique.c[unique] -- Thread %d sorting Array[%lu:%lu]\n", tid, start, end);
     #endif
-    qsort(&strings[start], end - start, sizeof(char*), void_compare_function);
+    qsort(&array[start], end - start, sizeof(char*), *byte_compare);
   }
-
-  #ifdef DEBUG_ENABLED
+  #ifdef _UNIQUE_DEBUG_ENABLED
   // Show a sample of the results.
-  for (int i=0; i<n; i += (n < 10) ? 1 : (n / 10)) {
-    fprintf(stderr,"unique.c[unique] -- Array[%d] = %s\n", i, strings[i]);
+  for (int i=0; i<num_elements; i += (num_elements < 10) ? 1 : (num_elements / 10)) {
+    if (width == -1) {
+      fprintf(stderr,"unique.c[unique] -- array[%d] = '%s'\n", i, array[i]);
+    } else if (width == 1) {
+      fprintf(stderr,"unique.c[unique] -- array[%d] = %u\n", i, *((unsigned char*)(array[i])));
+    } else if (width == 4) {
+      fprintf(stderr,"unique.c[unique] -- array[%d] = %d\n", i, *((int*)(array[i])));
+    } else if (width == 8) {
+      fprintf(stderr,"unique.c[unique] -- array[%d] = %ld\n", i, *((long*)(array[i])));
+    } else {
+      fprintf(stderr,"unique.c[unique] -- array[%d] at %lu\n", i, (unsigned long) array[i]);
+    }
   }
   #endif
-
-  // Initialize space and variables for computing unique strings.
-  (*sorted_unique) = malloc(n * sizeof(char*));
+  // Initialize space and variables for computing unique elements.
+  (*sorted_unique) = (char**) malloc(num_elements * sizeof(char*)); // ALLOCATION: tentative unique words holder
+  while (arrays_overlap(width, num_elements, array_in, num_elements, (*sorted_unique))) {
+    fprintf(stderr,"ERROR unique.c[unique] -- Overlap in allocated memory locations for sorted_unique[%lu:%lu] and provided array_in[%lu:%lu].\n",
+            (unsigned long) (*sorted_unique), ((unsigned long)(&((*sorted_unique)[num_elements]))) + (width-1),
+            (unsigned long) array_in, ((unsigned long)(&(array_in[num_elements]))) + (width-1));
+    // This should NEVER happen if 'malloc' is working correctly, but since it DOES happen
+    //  occasionally in testing (macOS 13.2, python 3.11.2, numpy 1.24.2, gfortran 12.2.0),
+    //  we will allocate a new array until we create one that doesn't overlap.
+    char** old_array = (*sorted_unique);
+    (*sorted_unique) = (char**) malloc(num_elements * sizeof(char*)); // ALLOCATION: tentative unique words holder
+    free(old_array); // DEALLOCATION: tentative unique words holder
+  }
   (*num_unique) = 0;
-  char * c_prev = NULL;
-  char * c_next = "init";
+  char* v_prev = NULL;
+  char* v_next = "init"; // Initial value doesn't matter as long as it's not NULL.
   int i_next = -1;
-
-  #ifdef DEBUG_ENABLED  
-  fprintf(stderr,"unique.c[unique] -- Allocated space for %ld unique values at %u, finding unique values..\n",
-          n, (*sorted_unique));
+  #ifdef _UNIQUE_DEBUG_ENABLED  
+  fprintf(stderr,"unique.c[unique] -- Allocated space for %ld unique values at %lu, finding unique values..\n",
+          num_elements, (unsigned long) (*sorted_unique));
   #endif
-
-  // Loop and collect all the unique strings.
-  while (c_next != NULL) {
-    c_next = NULL;
+  // Loop and collect all the unique elements.
+  while (v_next != NULL) {
+    v_next = NULL;
     i_next = -1;
-
     // If there was a previous value added, then rotate all chunks until getting
     //  to a "new" value in each of the chunks arrays (or exhausting the array).
-    if (c_prev != NULL) {
-      for (int j = 0; j < nt; j++) {
+    if (v_prev != NULL) {
+      for (int j = 0; j < num_threads; j++) {
         // Rotate to the next string in this chunk until we find a new value.
         while ((chunk_indices[j] < chunk_ends[j])
-               && (string_compare_function(c_prev, strings[chunk_indices[j]]) == 0)) {
+               && ((*byte_compare)(&v_prev, &array[chunk_indices[j]]) == 0)) {
           chunk_indices[j]++;
         }
       }
     }
-
     // Find the "least" string from each of the chunks to add next.
-    for (int j = 0; j < nt; j++) {
+    for (int j = 0; j < num_threads; j++) {
       // If there is another value in this chunk to consider, then..
       if (chunk_indices[j] < chunk_ends[j]) {
         // If there is not a previous candidate.
-        if (c_next == NULL) {
-          c_next = strings[chunk_indices[j]];
+        if (v_next == NULL) {
+          v_next = array[chunk_indices[j]];
           i_next = j;
         } else {
-          char * alternative = strings[chunk_indices[j]];
-          int comparison = string_compare_function(alternative, c_next);
+          char* alternative = array[chunk_indices[j]];
+          int comparison = (*byte_compare)(&alternative, &v_next);
           // If the new string is lesser, then store it as the next candidate.
           if (comparison < 0) {
-            c_next = alternative;
+            v_next = alternative;
             i_next = j;
           }
           // If the string was equal to the current candidate, iterate that chunk (duplicate).
@@ -258,134 +357,319 @@ void unique(const long n, PyObject **arr_obj, long * num_unique, char *** sorted
             chunk_indices[j]++;
           }
           // Otherwise, the string was greater, so it's not getting added this time.
-        } // END if (c_next == NULL)
+        } // END if (v_next == NULL)
       } // END if (chunk_indices[j] < chunk_ends[j])
     } // END for (int j = 0; j < nt; n++) {
-
     // Store the next unique value and increment our index.
-    if (c_next != NULL) {
-      #ifdef DEBUG_ENABLED
-      fprintf(stderr,"unique.c[unique] -- Found next '%s'.\n", c_next);
+    if (v_next != NULL) {
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      if (width == -1) {
+        fprintf(stderr,"unique.c[unique] -- Found next '%s' at %lu.\n", v_next, (unsigned long) v_next);
+      } else if (width == 1) {
+        fprintf(stderr,"unique.c[unique] -- Found next %u at %lu.\n", *((unsigned char*)(v_next)), (unsigned long) v_next);
+      } else if (width == 4) {
+        fprintf(stderr,"unique.c[unique] -- Found next %d at %lu.\n", *((int*)(v_next)), (unsigned long) v_next);
+      } else if (width == 8) {
+        fprintf(stderr,"unique.c[unique] -- Found next %ld at %lu.\n", *((long*)(v_next)), (unsigned long) v_next);
+      } else {
+        fprintf(stderr,"unique.c[unique] -- Found next at %lu.\n", (unsigned long) v_next);
+      }
       #endif
       // Increment the subgroup that we are pulling the next element from.
       chunk_indices[i_next]++;
-      c_prev = c_next;
+      v_prev = v_next;
       // Store the unique value and increment the number of unique values found.
-      (*sorted_unique)[*num_unique] = c_next;
+      (*sorted_unique)[*num_unique] = v_next;
       (*num_unique)++;
     }
-
   } // END while (checked > 0)
-
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[unique] -- Freeing chunk_indices at %u and chunk_ends at %u.\n", chunk_indices, chunk_ends);
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[unique] -- Freeing chunk_indices at %lu and chunk_ends at %lu.\n",
+          (unsigned long) chunk_indices, (unsigned long) chunk_ends);
   #endif
-  free(chunk_indices);
-  free(chunk_ends);
-
+  free(chunk_indices); // DEALLOCATION: chunk indices
+  free(chunk_ends); // DEALLOCATION: chunk ends
   // Reallocate the space for all of the unique words (shrinking the array unless all were unique).
-  if ((*num_unique) < n) {
-    char **old_unique = (*sorted_unique);
-    (*sorted_unique) = malloc((*num_unique) * sizeof(char*));
-    #ifdef DEBUG_ENABLED
-    fprintf(stderr,"unique.c[unique] -- Allocating smaller sorted unique with size %ld and moving from %u to %u\n",
-           (*num_unique), old_unique, *sorted_unique);
+  if ((*num_unique) < num_elements) {
+    char** old_unique = (*sorted_unique);
+    (*sorted_unique) = (char**) malloc((*num_unique) * sizeof(char*)); // ALLOCATION: sorted unique pointers
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    fprintf(stderr,"unique.c[unique] -- Allocating smaller sorted unique with size %ld and moving from %lu to %lu\n",
+            (*num_unique), (unsigned long) old_unique, (unsigned long)(*sorted_unique));
     #endif
     for (long i=0; i<(*num_unique); i++) {
       (*sorted_unique)[i] = old_unique[i];
     }
-    free(old_unique);
+    free(old_unique); // DEALLOCATION: tentative unique words holder
   }
   // Count the total number of characters (including null terminators).
   long total_chars = 0;
-  for (long i=0; i<(*num_unique); i++) {
-    total_chars += strlen((*sorted_unique)[i]) + 1;
+  if (width == -1) {
+    for (long i=0; i<(*num_unique); i++) {
+      total_chars += strlen((*sorted_unique)[i]) + 1;
+    }
+  } else {
+    total_chars = width * (*num_unique);
   }
   // Allocate space for all words to be packed into one contiguous block of memory.
-  char* unique_words = malloc(total_chars * sizeof(char));
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[unique] -- Allocated spaced for %ld characters at [%u,%u].\n",
-         total_chars, unique_words, unique_words+(total_chars * sizeof(char)));
+  char*restrict unique_words = (char*) malloc(total_chars * sizeof(char)); // ALLOCATION: packed unique words
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[unique] -- Allocated space for %ld bytes at [%lu,%lu].\n",
+          total_chars, (unsigned long) unique_words,
+          ((unsigned long) unique_words)+(total_chars * sizeof(char)));
   #endif
   // Copy the string for each word into the contiguous block (and free old memory).
   long j = 0;
   for (long i=0; i<(*num_unique); i++) {
     char* old_word = (*sorted_unique)[i];
     char* new_word = &unique_words[j];
-    strcpy(new_word, old_word);
-    #ifdef DEBUG_ENABLED
-    fprintf(stderr,"unique.c[unique] -- Moved '%s' at %u to '%s' at %u.\n",
-           old_word, old_word, new_word, new_word);
+    if (width == -1) {
+      strcpy(new_word, old_word);
+    } else {
+      for (int wi=0; wi<width; wi++) {
+        new_word[wi] = old_word[wi];
+      }
+    }
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    if (width == -1) {
+      fprintf(stderr,"unique.c[unique] -- Moved '%s' at %lu to '%s' at %lu.\n",
+              old_word, (unsigned long) old_word, new_word, (unsigned long) new_word);
+    } else if (width == 1) {
+      fprintf(stderr,"unique.c[unique] -- Moved %u at %lu to %u at %lu.\n",
+              *((unsigned char*)(old_word)), (unsigned long) old_word, *((unsigned char*)(new_word)), (unsigned long) new_word);
+    } else if (width == 4) {
+      fprintf(stderr,"unique.c[unique] -- Moved %d at %lu to %d at %lu.\n",
+              *((int*)(old_word)), (unsigned long) old_word, *((int*)(new_word)), (unsigned long) new_word);
+    } else if (width == 8) {
+      fprintf(stderr,"unique.c[unique] -- Moved %ld at %lu to %ld at %lu.\n",
+              *((long*)(old_word)), (unsigned long) old_word, *((long*)(new_word)), (unsigned long) new_word);
+    } else {
+      fprintf(stderr,"unique.c[unique] -- Moved value at %lu to %lu.\n", (unsigned long) old_word, (unsigned long) new_word);
+    }
     #endif
     (*sorted_unique)[i] = new_word;
-    j += strlen(new_word) + 1;
-  }
-  // Free allocated words and top-level array that was allocated to hold the strings.
-  for (long i=0; i<n; i++) {
-    // Free the memory for this (duplicate) string.
-    if (strings[i] != NULL) {
-      #ifdef DEBUG_ENABLED
-      fprintf(stderr," unique.c[unique] -- Freeing string '%s' at %u.\n", strings[i], strings[i]);
-      #endif
-      free(strings[i]);
+    // Increment the starting position based on the size of the element.
+    if (width == -1) {
+      j += strlen(new_word) + 1;
+    } else {
+      j += width;
     }
   }
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr," unique.c[unique] -- Freeing pointers to all %ld strings at %u.\n", n, strings);
-  #endif
-  free(strings);
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[unique] -- Final sorted %ld unique elements stored at %u.\n",
-         (*num_unique), (*sorted_unique));
+  // Deallocate temporary space for "array" if it was created.
+  if (width != -1) {
+    free(array); // DEALLOCATION: pointer variant of (flat) array_in
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[unique] -- Final sorted %ld unique elements stored at %lu with array of pointers at %lu.\n",
+          (*num_unique), (unsigned long) (**sorted_unique), (unsigned long) (*sorted_unique));
   fprintf(stderr,"<------------- unique ===============>\n");
   #endif
 }
 
+// -------------------------------------------------------------------------------------------------
+// This function can be used to free the memory for the sorted unique words from python.
+void free_unique(char***restrict sorted_unique, long*restrict num_unique, const int*restrict width) {
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"=============> free_unique <---------------\n");
+  fprintf(stderr,"unique.c[free_unique] -- %ld word pointers (width of %d) are at %lu.\n", *num_unique, *width, (unsigned long)(*sorted_unique));
+  for (long i=0; i<(*num_unique); i++) {
+    if (*width == -1) {
+      fprintf(stderr,"  unique.c[free_unique] -- Word %ld = '%s' at %lu.\n", i+1,
+              (*sorted_unique)[i], (unsigned long)((*sorted_unique)[i]));
+    } else if (*width == 1) {
+      fprintf(stderr,"  unique.c[free_unique] -- Word %ld = %u at %lu.\n", i+1,
+              *((unsigned char*)((*sorted_unique)[i])), (unsigned long)((*sorted_unique)[i]));
+    } else if (*width == 4) {
+      fprintf(stderr,"  unique.c[free_unique] -- Word %ld = %d at %lu.\n", i+1,
+              *((int*)((*sorted_unique)[i])), (unsigned long)((*sorted_unique)[i]));
+    } else if (*width == 8) {
+      fprintf(stderr,"  unique.c[free_unique] -- Word %ld = %ld at %lu.\n", i+1,
+              *((long*)((*sorted_unique)[i])), (unsigned long)((*sorted_unique)[i]));
+    } else {
+      fprintf(stderr,"  unique.c[free_unique] -- Word %ld at %lu.\n", i+1, (unsigned long)((*sorted_unique)[i]));
+    }
+  }
+  fprintf(stderr,"unique.c[free_unique] -- Freeing all words at %lu.\n", (unsigned long)((*sorted_unique)[0]));
+  #endif
+  // Free all of the unique words (they were allocated as one big block).
+  if ((*sorted_unique)[0] != NULL) {
+    free((*sorted_unique)[0]); // DEALLOCATION: packed unique words
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[free_unique] -- Freeing pointers to %ld words from %lu\n", *num_unique, (unsigned long)(*sorted_unique));
+  #endif
+  // Free the array of pointers to the words.
+  if (sorted_unique != NULL) {
+    free((*sorted_unique)); // DEALLOCATION: sorted unique pointers
+  }
+  // Set the total count to zero.
+  (*num_unique) = 0;
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"<------------- free_unique ===============>\n");
+  #endif
+}
 
-// Given an array of Python objects and , generate a sorted list of unique strings.
-void to_int(const long n, PyObject **obj_arr,
-            const long num_unique, char ***sorted_unique,
-            long *int_arr) {
-  #ifdef DEBUG_ENABLED  
+// -------------------------------------------------------------------------------------------------
+// Given an array of Python objects and , generate a sorted list of unique elements.
+void to_int(const int width, const long n, char**restrict array_in,
+            const long num_unique, char**restrict sorted_unique,
+            long*restrict int_arr) {
+  #ifdef _UNIQUE_DEBUG_ENABLED  
   fprintf(stderr,"=============> to_int <---------------\n");
   #endif
+  // Check for memory overlap between 'array_in' and 'sorted_unique'.
+  if (arrays_overlap(width, n, array_in, num_unique, sorted_unique)) {
+    fprintf(stderr,"ERROR unique.c[to_int] -- Overlap in provided memory locations for array_in[%lu:%lu] and provided sorted_unique[%lu:%lu].\n",
+            (unsigned long) array_in, ((unsigned long)(&(array_in[n]))) + (width-1),
+            (unsigned long) sorted_unique, ((unsigned long)(&(sorted_unique[num_unique]))) + (width-1));
+  }
+  // If the byte-size width is positive, then we need to allocate and fill an
+  //  array of pointers assuming the provided pointer is to contiguous memory.
+  char**restrict array;
+  if (width == -1) {
+    array = array_in;
+  } else {
+    array = (char**) malloc(n * sizeof(char*)); // ALLOCATION: pointer variant of (flat) array_in
+    // Check for memory overlap between 'array' and the provided 'sorted_unique'.
+    while (arrays_overlap(width, num_unique, sorted_unique, n, array)) {
+      fprintf(stderr,"ERROR unique.c[to_int] -- Overlap in allocated memory locations for array[%lu:%lu] and provided sorted_unique[%lu:%lu].\n",
+              (unsigned long) array, ((unsigned long)(&(array[n]))) + (width-1), 
+              (unsigned long) sorted_unique, ((unsigned long)(&(sorted_unique[num_unique]))) + (width-1));
+      char** old_array = array;
+      array = (char**) malloc(n * sizeof(char*)); // ALLOCATION: pointer variant of (flat) array_in
+      free(old_array); // DEALLOCATION: pointer variant of (flat) array_in
+    }
+    // Check for memory overlap between 'array' and the provided 'array_in'.
+    while (arrays_overlap(width, n, array_in, n, array)) {
+      fprintf(stderr,"ERROR unique.c[to_int] -- Overlap in allocated memory locations for array[%lu:%lu] and provided array_in[%lu:%lu].\n",
+              (unsigned long) array, ((unsigned long)(&(array[n]))) + (width-1), 
+              (unsigned long) array_in, ((unsigned long)(&(array_in[n]))) + (width-1));
+      // This should NEVER happen if 'malloc' is working correctly, but since it DOES happen
+      //  occasionally in testing (macOS 13.2, python 3.11.2, numpy 1.24.2, gfortran 12.2.0),
+      //  we will allocate a new array until we create one that doesn't overlap.
+      char** old_array = array;
+      array = (char**) malloc(n * sizeof(char*)); // ALLOCATION: pointer variant of (flat) array_in
+      free(old_array); // DEALLOCATION: pointer variant of (flat) array_in
+    }
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    fprintf(stderr," unique.c[to_int] -- Allocated pointer array[%lu:%lu]\n",
+            (unsigned long) array, ((unsigned long) array) + (n*sizeof(char*)));
+    #endif
+    for (long i=0; i<n; i++) {
+      array[i] = &(((char*)array_in)[i*width]);
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      if ((i <= _UNIQUE_HALF_MAX_EXAMPLES) || (i >= n-_UNIQUE_HALF_MAX_EXAMPLES)) {
+        if (width == -1) {
+          fprintf(stderr," unique.c[to_int] -- array[%ld] = '%s' is at %lu\n", i, array[i], (unsigned long)(array[i]));
+        } else if (width == 1) {
+          fprintf(stderr," unique.c[to_int] -- array[%ld] = %u is at %lu\n", i, *((unsigned char*)(array[i])), (unsigned long)(array[i]));
+        } else if (width == 4) {
+          fprintf(stderr," unique.c[to_int] -- array[%ld] = %d is at %lu\n", i, *((int*)(array[i])), (unsigned long)(array[i]));
+        } else if (width == 8) {
+          fprintf(stderr," unique.c[to_int] -- array[%ld] = %ld is at %lu\n", i, *((long*)(array[i])), (unsigned long)(array[i]));
+        } else {
+          fprintf(stderr," unique.c[to_int] -- array[%ld] is at %lu\n", i, (unsigned long)(array[i]));
+        }
+      }
+      #endif
+    }
+  }
   // Set the number of parallel threads to use.
   int nt = omp_get_max_threads();
   if (n < nt) nt = 1;
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[to_int] -- given Array[0:%ld] and Unique[0:%ld] (%d thread%s\n",
-         n, num_unique, nt, (nt > 1 ? "s)" : ")"));
+  #ifdef _UNIQUE_DEBUG_ENABLED
+  fprintf(stderr,"unique.c[to_int] -- given Array[0:%ld] at %lu and Unique[0:%ld] at %lu (%d thread%s\n",
+          n, (unsigned long) array, num_unique, (unsigned long) sorted_unique, nt, (nt > 1 ? "s)" : ")"));
   #endif
-
-  // Convert all of the objects to strings (as parallel as possible, with Global Interpreter Lock).
+  // Set the byte comparison function based on the element width.
+  int (*byte_compare)(const void*, const void*);
+  if (width == -1) {
+    byte_compare = &str_compare;
+  } else if (width == 1) {
+    byte_compare = &char_compare;
+  } else if (width == 4) {
+    byte_compare = &int_compare;
+  } else if (width == 8) {
+    byte_compare = &long_compare;
+  } else {
+    #ifdef _UNIQUE_ALLOW_LOCAL_FUNCTIONS
+    // Compare two fixed size arrays, treat as unsigned integers.
+    int custom_compare(const void* a_in, const void* b_in) {
+      const unsigned char* a = *(const unsigned char**) a_in;
+      const unsigned char* b = *(const unsigned char**) b_in;
+      int comparison_result = 0;
+      // These strings have equal length, compare their characters.
+      for (int i = 0; i < width; i++) {
+        if (a[i] < b[i]) {
+          comparison_result = -1;
+          break;
+        } else if (a[i] > b[i]) {
+          comparison_result = 1;
+          break;
+        }
+      }
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      fprintf(stderr,"  unique.c[custom_cmp] -- %lu <= %lu  =  %d\n", a, b, comparison_result);
+      #endif
+      return comparison_result;
+    }
+    byte_compare = &custom_compare;
+    #else
+    fprintf(stderr,"ERROR unique.c[unique] There is no known comparison function for elements of %d bytes.\n", width);
+    for (long i=0; i<n; i++) {
+      int_arr[i] = -1;
+    }
+    return;
+    #endif
+  }
+  // Parallel loop for mapping elements to integers.
   #pragma omp parallel for num_threads(nt) if(nt > 1)
   for (long i=0; i<n; i++) {
-    // Get the string version of the specific element.
-    char *str = to_str(obj_arr[i]);
-    #ifdef DEBUG_ENABLED
-    fprintf(stderr,"unique.c[to_int] -- i = %ld  '%s'\n", i, str);
+    // Get the local copy of the specific element.
+    char* value = array[i];
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    if ((i <= _UNIQUE_HALF_MAX_EXAMPLES) || (i >= n-_UNIQUE_HALF_MAX_EXAMPLES)) {
+      if (width == -1) {
+        fprintf(stderr,"\nunique.c[to_int] -- array[%ld] = '%s' at %lu\n", i, value, (unsigned long) value);
+      } else if (width == 1) {
+        fprintf(stderr,"\nunique.c[to_int] -- array[%ld] = %u at %lu\n", i, *((unsigned char*)(value)), (unsigned long) value);
+      } else if (width == 4) {
+        fprintf(stderr,"\nunique.c[to_int] -- array[%ld] = %d at %lu\n", i, *((int*)(value)), (unsigned long) value);
+      } else if (width == 8) {
+        fprintf(stderr,"\nunique.c[to_int] -- array[%ld] = %ld at %lu\n", i, *((long*)(value)), (unsigned long) value);
+      } else {
+        fprintf(stderr,"\nunique.c[to_int] -- array[%ld] at %lu\n", i, (unsigned long) value);
+      }
+    }
     #endif
-    // Find the index of that string in the sorted list.
+    // Find the index of that value in the sorted list.
     long low = 0;
     long high = num_unique;
     long index = (low + high) / 2;
     int comparison = 0;
     while (high != low) {
-      #ifdef DEBUG_ENABLED
-      fprintf(stderr,"  unique.c[to_int] (low %ld) (high %ld) (index %ld)", low, high, index);
-      fprintf(stderr,"  unique.c[to_int] checking %d '%s' against '%s'\n", index, (*sorted_unique)[index], str);
+      #ifdef _UNIQUE_DEBUG_ENABLED
+      if ((i <= _UNIQUE_HALF_MAX_EXAMPLES) || (i >= n-_UNIQUE_HALF_MAX_EXAMPLES)) {
+        fprintf(stderr," unique.c[to_int] (low %ld) (high %ld) (index %ld)\n", low, high, index);
+        if (width == -1) {
+          fprintf(stderr," unique.c[to_int] comparing with '%s' at %lu\n", sorted_unique[index], (unsigned long)(sorted_unique[index]));
+        } else if (width == 1) {
+          fprintf(stderr," unique.c[to_int] comparing with %u at %lu\n", *((unsigned char*)(sorted_unique[index])), (unsigned long)(sorted_unique[index]));
+        } else if (width == 4) {
+          fprintf(stderr," unique.c[to_int] comparing with %d at %lu\n", *((int*)(sorted_unique[index])), (unsigned long)(sorted_unique[index]));
+        } else if (width == 8) {
+          fprintf(stderr," unique.c[to_int] comparing with %ld at %lu\n", *((long*)(sorted_unique[index])), (unsigned long)(sorted_unique[index]));
+        } else {
+          fprintf(stderr," unique.c[to_int] comparing with value at %lu\n", (unsigned long)(sorted_unique[index]));
+        }
+      }
       #endif
-      comparison = string_compare_function((*sorted_unique)[index], str);
+      comparison = byte_compare(&sorted_unique[index], &value);
       if (comparison == 0) { break; } 
       else if (comparison > 0)    { high = index; }
       else /* (comparison < 0) */ { low = index + 1; }
       index = (low + high) / 2;
     }
-    /* TODO: Is the following check required for correctness?
-    if ((comparison != 0) && (index < num_unique)) {
-      comparison = string_compare_function((*sorted_unique)[index], str);
-    }
-    */
     // Convert the final comparison result into a final index.
     if (comparison != 0) {
       index = 0;
@@ -394,40 +678,27 @@ void to_int(const long n, PyObject **obj_arr,
     }
     // Place the (1's) index into the output integer array.
     int_arr[i] = index;
-    #ifdef DEBUG_ENABLED
-    fprintf(stderr," unique.c[to_int] '%s' assigned %ld\n", str, index);
-    #endif
-    // Free the allocated string.
-    free(str);
+    #ifdef _UNIQUE_DEBUG_ENABLED
+    if ((i <= _UNIQUE_HALF_MAX_EXAMPLES) || (i >= n-_UNIQUE_HALF_MAX_EXAMPLES)) {
+      if (width == -1) {
+        fprintf(stderr," unique.c[to_int] '%s' assigned %ld\n", value, index);
+      } else if (width == 1) {
+        fprintf(stderr," unique.c[to_int] %u assigned %ld\n", *((unsigned char*)(value)), index);
+      } else if (width == 4) {
+        fprintf(stderr," unique.c[to_int] %d assigned %ld\n", *((int*)(value)), index);
+      } else if (width == 8) {
+        fprintf(stderr," unique.c[to_int] %ld assigned %ld\n", *((long*)(value)), index);
+      } else {
+        fprintf(stderr," unique.c[to_int] value at %lu assigned %ld\n", (unsigned long) value, index);
+      }
+    }
+    #endif 
   }
-  #ifdef DEBUG_ENABLED
+  // Deallocate space for pointers if that was created.
+  if (width != -1) {
+    free(array); // DEALLOCATION: pointer variant of (flat) array_in
+  }
+  #ifdef _UNIQUE_DEBUG_ENABLED
   fprintf(stderr,"<------------- to_int ===============>\n");
   #endif
-}
-
-
-// This function can be used to free the memory for the sorted unique words from python.
-void free_unique(long * num_unique, char *** sorted_unique) {
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[free_unique] -- Word pointers are at %u.\n", sorted_unique);
-  for (long i=0; i<(*num_unique); i++) {
-    fprintf(stderr,"  unique.c[free_unique] -- Word %ld '%s' at %u.\n", i+1, sorted_unique[i], sorted_unique[i]);
-  }
-  fprintf(stderr,"unique.c[free_unique] -- Freeing all words at %u.\n", sorted_unique[0]);
-  #endif
-  // Free all of the unique words (they were allocated as one big block).
-  if (sorted_unique[0] != NULL) {
-    free(sorted_unique[0]);
-  }
-
-  #ifdef DEBUG_ENABLED
-  fprintf(stderr,"unique.c[free_unique] -- Freeing pointers to %ld words from %u\n", *num_unique, sorted_unique);
-  #endif
-  // Free the array of pointers to the words.
-  if (sorted_unique != NULL) {
-    free(sorted_unique);
-  }
-
-  // Set the total count to zero.
-  (*num_unique) = 0;
 }

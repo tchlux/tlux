@@ -52,6 +52,9 @@ if __name__ == "__main__":
     if (hasattr(unique, "show_profile")): unique.show_profile()
     if (hasattr(i_map, "show_profile")): i_map.show_profile()
 
+    for i,m in enumerate(xi_map):
+        print(f" map {i} (len {len(m)})", m)
+
     # Encode the data in integer format.
     print("Calling i_encode..", flush=True)
     final_xi = i_encode(xi, xi_map)

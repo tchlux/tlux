@@ -30,7 +30,7 @@ def build_axy():
     _dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approximate", "axy")
     # Import the RANDOM module, it is self contained and simple.
     _random = fmodpy.fimport(
-        input_fortran_file = os.path.join(_dir, "random.f90"),
+        input_fortran_file = os.path.join(_dir, "axy_random.f90"),
         output_dir = _dir
     )
     # Import the AXY module, it has many dependencies and uses BLAS and LAPACK libraries.
@@ -128,9 +128,16 @@ def build_regex():
 
 # Build the unique library.
 def build_unique():
-    import os, ctypes
+    import os, ctypes, fmodpy
     # Configure the compilation.
-    _c_compiler = "gfortran"
+    _verbose = True
+    # _c_compiler = "cc"  # <- on macOS with Clang, no nested functions allowed.
+    _c_compiler = fmodpy.config.f_compiler  # <- works with gfortran, assuming true for others too.
+    _flags = "-shared -fPIC -O3"  # <- shared library, position independent, O3 optimization.
+    _flags += " -fopenmp"  # <- slower for a lot of cases, only good for *very* large data.
+    # _flags += " -D_UNIQUE_SINGLE_THREADED"  # <- disables OpenMP parallelism and imports.
+    _flags += " -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS"  # <- enable if compiler supports local functions for variable width comparison.
+    # _flags += " -D_UNIQUE_DEBUG_ENABLED"  # <- enable for testing / debugging.
     _lib_dir = os.path.dirname(os.path.abspath(__file__))
     _lib_path = os.path.join(_lib_dir, "unique", "unique.so")
     _src_path = os.path.join(_lib_dir, "unique", "unique.c")
@@ -139,14 +146,10 @@ def build_unique():
     except:
         # Compile the shared library.
         import sys
-        py_version = f"{sys.version_info[0]}.{sys.version_info[1]}"
-        py_include = "$(python3-config --includes)"
-        py_link = f"$(python3-config --ldflags) -lpython{py_version}"
-        cmd = f'{_c_compiler} -shared -fPIC -fopenmp -O3 -o "{_lib_path}" {py_include} {py_link} "{_src_path}"'
-        print(" ", cmd, flush=True)
-        os.system(f'echo "  {cmd}"')
+        cmd = f'{_c_compiler} {_flags} -o "{_lib_path}" "{_src_path}"'
+        if _verbose: print(" ", cmd, flush=True)
         os.system(cmd)
-        print(flush=True)
+        if _verbose: print(flush=True)
         # Load the shared library
         _unique = ctypes.cdll.LoadLibrary(_lib_path)
     # Return the compiled module.

@@ -138,6 +138,7 @@ MODULE AXY
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.01_RT ! Rate of exponential sliding average over AY (forcing mean to zero).
      REAL(KIND=RT) :: STEP_EMB_CHANGE = 0.01_RT ! Rate of exponential sliding average over embedding mean (forcing mean to zero).
      REAL(KIND=RT) :: INITIAL_CURV_ESTIMATE = 0.0_RT ! Initial estimate used for the curvature term ("magnifies" the first few steps when close to zero).
+     REAL(KIND=RT) :: MSE_UPPER_LIMIT = 100.0_RT ! If an MSE greater than this value occurs, a reversion to the "best model" will happen.
      ! REAL(KIND=RT) :: ERROR_CHECK_RATIO = 0.0_RT ! Ratio of points used only to evaluate model error (set to 0 to use same data from optimization).
      INTEGER(KIND=INT64) :: MIN_STEPS_TO_STABILITY = 1 ! Minimum number of steps before allowing model saves and curvature approximation.
      INTEGER(KIND=INT64) :: MAX_BATCH = 10000 ! Max number of points in one batch matrix multiplication.
@@ -3185,7 +3186,7 @@ CONTAINS
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !           Update the step factors, early stop if appropaite.
          ! 
-         CALL ADJUST_RATES(BEST_MODEL)
+         CALL ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN(:))
          IF (INFO .NE. 0) RETURN
          IF (NS .EQ. HUGE(NS)) EXIT fit_loop
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3282,8 +3283,9 @@ CONTAINS
 
     
     ! Adjust the rates of the model optimization parameters.
-    SUBROUTINE ADJUST_RATES(BEST_MODEL)
+    SUBROUTINE ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN)
       REAL(KIND=RT), DIMENSION(:) :: BEST_MODEL
+      REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_MEAN
       REAL :: CPU_TIME_START, CPU_TIME_END
       INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
       CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
@@ -3304,6 +3306,12 @@ CONTAINS
          !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
          !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE
          !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
+      ! If the MSE has gotten too large, then do a reset of the model fit process from the previous best.
+      ELSE IF (MSE .GT. CONFIG%MSE_UPPER_LIMIT) THEN
+         CONFIG%STEP_FACTOR = CONFIG%MIN_STEP_FACTOR
+         CONFIG%NUM_TO_UPDATE = CONFIG%NUM_VARS
+         MODEL(:) = BEST_MODEL(:)
+         MODEL_GRAD_MEAN(:) = 0.0_RT
       ELSE
          CONFIG%STEP_FACTOR = CONFIG%STEP_FACTOR * CONFIG%SLOWER_RATE
          CONFIG%STEP_FACTOR = MAX(CONFIG%STEP_FACTOR, CONFIG%MIN_STEP_FACTOR)
@@ -3328,8 +3336,8 @@ CONTAINS
          IF (CONFIG%KEEP_BEST) THEN
             BEST_MODEL(:) = MODEL(:)
          END IF
-         ! Early stop if we don't expect to see a better solution
-         !  by the time the fit operation is complete.
+      ! Early stop if we don't expect to see a better solution
+      !  by the time the fit operation is complete.
       ELSE IF (CONFIG%EARLY_STOP .AND. (NS .GT. STEPS - STEP)) THEN
          NS = HUGE(NS)
       END IF
