@@ -18,12 +18,15 @@ _fort_compiler = "gfortran"
 _shared_object_name = "delsparse." + platform.machine() + ".so"
 _this_directory = os.path.dirname(os.path.abspath(__file__))
 _path_to_lib = os.path.join(_this_directory, _shared_object_name)
-_compile_options = ['-std=legacy', '-fPIC', '-shared', '-O3', '-lblas', '-llapack', '-fopenmp']
-_ordered_dependencies = ['slatec.f', 'delsparse.f90', 'delsparse_c_wrapper.f90']
-# 
+_compile_options = ['-fPIC', '-shared', '-O3', '-std=legacy', '-fopenmp']
+_ordered_dependencies = ['blas.f', 'lapack.f', 'slatec.f', 'delsparse.f90', 'delsparse_c_wrapper.f90']
+_symbol_files = []# 
 # --------------------------------------------------------------------
 #               AUTO-COMPILING
 #
+# Try to import the prerequisite symbols for the compiled code.
+for _ in _symbol_files:
+    _ = ctypes.CDLL(os.path.join(_this_directory, _), mode=ctypes.RTLD_GLOBAL)
 # Try to import the existing object. If that fails, recompile and then try.
 try:
     clib = ctypes.CDLL(_path_to_lib)
@@ -250,8 +253,8 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'pts' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         pts = numpy.asarray(pts, dtype=ctypes.c_double, order='F')
-    pts_dim_1 = ctypes.c_int(pts.shape[0])
-    pts_dim_2 = ctypes.c_int(pts.shape[1])
+    pts_dim_1 = ctypes.c_long(pts.shape[0])
+    pts_dim_2 = ctypes.c_long(pts.shape[1])
     
     # Setting up "m"
     if (type(m) is not ctypes.c_int): m = ctypes.c_int(m)
@@ -263,8 +266,8 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'q' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         q = numpy.asarray(q, dtype=ctypes.c_double, order='F')
-    q_dim_1 = ctypes.c_int(q.shape[0])
-    q_dim_2 = ctypes.c_int(q.shape[1])
+    q_dim_1 = ctypes.c_long(q.shape[0])
+    q_dim_2 = ctypes.c_long(q.shape[1])
     
     # Setting up "simps"
     if ((not issubclass(type(simps), numpy.ndarray)) or
@@ -273,8 +276,8 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'simps' was not an f_contiguous NumPy array of type 'ctypes.c_int' (or equivalent). Automatically converting (probably creating a full copy).")
         simps = numpy.asarray(simps, dtype=ctypes.c_int, order='F')
-    simps_dim_1 = ctypes.c_int(simps.shape[0])
-    simps_dim_2 = ctypes.c_int(simps.shape[1])
+    simps_dim_1 = ctypes.c_long(simps.shape[0])
+    simps_dim_2 = ctypes.c_long(simps.shape[1])
     
     # Setting up "weights"
     if ((not issubclass(type(weights), numpy.ndarray)) or
@@ -283,8 +286,8 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'weights' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         weights = numpy.asarray(weights, dtype=ctypes.c_double, order='F')
-    weights_dim_1 = ctypes.c_int(weights.shape[0])
-    weights_dim_2 = ctypes.c_int(weights.shape[1])
+    weights_dim_1 = ctypes.c_long(weights.shape[0])
+    weights_dim_2 = ctypes.c_long(weights.shape[1])
     
     # Setting up "ierr"
     if ((not issubclass(type(ierr), numpy.ndarray)) or
@@ -293,7 +296,7 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'ierr' was not an f_contiguous NumPy array of type 'ctypes.c_int' (or equivalent). Automatically converting (probably creating a full copy).")
         ierr = numpy.asarray(ierr, dtype=ctypes.c_int, order='F')
-    ierr_dim_1 = ctypes.c_int(ierr.shape[0])
+    ierr_dim_1 = ctypes.c_long(ierr.shape[0])
     
     # Setting up "interp_in"
     interp_in_present = ctypes.c_bool(True)
@@ -309,11 +312,11 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'interp_in' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         interp_in = numpy.asarray(interp_in, dtype=ctypes.c_double, order='F')
     if (interp_in_present):
-        interp_in_dim_1 = ctypes.c_int(interp_in.shape[0])
-        interp_in_dim_2 = ctypes.c_int(interp_in.shape[1])
+        interp_in_dim_1 = ctypes.c_long(interp_in.shape[0])
+        interp_in_dim_2 = ctypes.c_long(interp_in.shape[1])
     else:
-        interp_in_dim_1 = ctypes.c_int()
-        interp_in_dim_2 = ctypes.c_int()
+        interp_in_dim_1 = ctypes.c_long()
+        interp_in_dim_2 = ctypes.c_long()
     
     # Setting up "interp_out"
     interp_out_present = ctypes.c_bool(True)
@@ -329,17 +332,19 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'interp_out' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         interp_out = numpy.asarray(interp_out, dtype=ctypes.c_double, order='F')
     if (interp_out_present):
-        interp_out_dim_1 = ctypes.c_int(interp_out.shape[0])
-        interp_out_dim_2 = ctypes.c_int(interp_out.shape[1])
+        interp_out_dim_1 = ctypes.c_long(interp_out.shape[0])
+        interp_out_dim_2 = ctypes.c_long(interp_out.shape[1])
     else:
-        interp_out_dim_1 = ctypes.c_int()
-        interp_out_dim_2 = ctypes.c_int()
+        interp_out_dim_1 = ctypes.c_long()
+        interp_out_dim_2 = ctypes.c_long()
     
     # Setting up "eps"
     eps_present = ctypes.c_bool(True)
     if (eps is None):
         eps_present = ctypes.c_bool(False)
         eps = ctypes.c_double()
+    else:
+        eps = ctypes.c_double(eps)
     if (type(eps) is not ctypes.c_double): eps = ctypes.c_double(eps)
     
     # Setting up "extrap"
@@ -347,6 +352,8 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
     if (extrap is None):
         extrap_present = ctypes.c_bool(False)
         extrap = ctypes.c_double()
+    else:
+        extrap = ctypes.c_double(extrap)
     if (type(extrap) is not ctypes.c_double): extrap = ctypes.c_double(extrap)
     
     # Setting up "rnorm"
@@ -363,23 +370,27 @@ def delaunaysparses(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'rnorm' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         rnorm = numpy.asarray(rnorm, dtype=ctypes.c_double, order='F')
     if (rnorm_present):
-        rnorm_dim_1 = ctypes.c_int(rnorm.shape[0])
+        rnorm_dim_1 = ctypes.c_long(rnorm.shape[0])
     else:
-        rnorm_dim_1 = ctypes.c_int()
+        rnorm_dim_1 = ctypes.c_long()
     
     # Setting up "ibudget"
     ibudget_present = ctypes.c_bool(True)
     if (ibudget is None):
         ibudget_present = ctypes.c_bool(False)
         ibudget = ctypes.c_int()
+    else:
+        ibudget = ctypes.c_int(ibudget)
     if (type(ibudget) is not ctypes.c_int): ibudget = ctypes.c_int(ibudget)
     
     # Setting up "chain"
     chain_present = ctypes.c_bool(True)
     if (chain is None):
         chain_present = ctypes.c_bool(False)
-        chain = ctypes.c_bool()
-    if (type(chain) is not ctypes.c_bool): chain = ctypes.c_bool(chain)
+        chain = ctypes.c_int()
+    else:
+        chain = ctypes.c_int(chain)
+    if (type(chain) is not ctypes.c_int): chain = ctypes.c_int(chain)
 
     # Call C-accessible Fortran wrapper.
     clib.c_delaunaysparses(ctypes.byref(d), ctypes.byref(n), ctypes.byref(pts_dim_1), ctypes.byref(pts_dim_2), ctypes.c_void_p(pts.ctypes.data), ctypes.byref(m), ctypes.byref(q_dim_1), ctypes.byref(q_dim_2), ctypes.c_void_p(q.ctypes.data), ctypes.byref(simps_dim_1), ctypes.byref(simps_dim_2), ctypes.c_void_p(simps.ctypes.data), ctypes.byref(weights_dim_1), ctypes.byref(weights_dim_2), ctypes.c_void_p(weights.ctypes.data), ctypes.byref(ierr_dim_1), ctypes.c_void_p(ierr.ctypes.data), ctypes.byref(interp_in_present), ctypes.byref(interp_in_dim_1), ctypes.byref(interp_in_dim_2), ctypes.c_void_p(interp_in.ctypes.data), ctypes.byref(interp_out_present), ctypes.byref(interp_out_dim_1), ctypes.byref(interp_out_dim_2), ctypes.c_void_p(interp_out.ctypes.data), ctypes.byref(eps_present), ctypes.byref(eps), ctypes.byref(extrap_present), ctypes.byref(extrap), ctypes.byref(rnorm_present), ctypes.byref(rnorm_dim_1), ctypes.c_void_p(rnorm.ctypes.data), ctypes.byref(ibudget_present), ctypes.byref(ibudget), ctypes.byref(chain_present), ctypes.byref(chain))
@@ -607,8 +618,8 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'pts' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         pts = numpy.asarray(pts, dtype=ctypes.c_double, order='F')
-    pts_dim_1 = ctypes.c_int(pts.shape[0])
-    pts_dim_2 = ctypes.c_int(pts.shape[1])
+    pts_dim_1 = ctypes.c_long(pts.shape[0])
+    pts_dim_2 = ctypes.c_long(pts.shape[1])
     
     # Setting up "m"
     if (type(m) is not ctypes.c_int): m = ctypes.c_int(m)
@@ -620,8 +631,8 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'q' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         q = numpy.asarray(q, dtype=ctypes.c_double, order='F')
-    q_dim_1 = ctypes.c_int(q.shape[0])
-    q_dim_2 = ctypes.c_int(q.shape[1])
+    q_dim_1 = ctypes.c_long(q.shape[0])
+    q_dim_2 = ctypes.c_long(q.shape[1])
     
     # Setting up "simps"
     if ((not issubclass(type(simps), numpy.ndarray)) or
@@ -630,8 +641,8 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'simps' was not an f_contiguous NumPy array of type 'ctypes.c_int' (or equivalent). Automatically converting (probably creating a full copy).")
         simps = numpy.asarray(simps, dtype=ctypes.c_int, order='F')
-    simps_dim_1 = ctypes.c_int(simps.shape[0])
-    simps_dim_2 = ctypes.c_int(simps.shape[1])
+    simps_dim_1 = ctypes.c_long(simps.shape[0])
+    simps_dim_2 = ctypes.c_long(simps.shape[1])
     
     # Setting up "weights"
     if ((not issubclass(type(weights), numpy.ndarray)) or
@@ -640,8 +651,8 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'weights' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         weights = numpy.asarray(weights, dtype=ctypes.c_double, order='F')
-    weights_dim_1 = ctypes.c_int(weights.shape[0])
-    weights_dim_2 = ctypes.c_int(weights.shape[1])
+    weights_dim_1 = ctypes.c_long(weights.shape[0])
+    weights_dim_2 = ctypes.c_long(weights.shape[1])
     
     # Setting up "ierr"
     if ((not issubclass(type(ierr), numpy.ndarray)) or
@@ -650,7 +661,7 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         import warnings
         warnings.warn("The provided argument 'ierr' was not an f_contiguous NumPy array of type 'ctypes.c_int' (or equivalent). Automatically converting (probably creating a full copy).")
         ierr = numpy.asarray(ierr, dtype=ctypes.c_int, order='F')
-    ierr_dim_1 = ctypes.c_int(ierr.shape[0])
+    ierr_dim_1 = ctypes.c_long(ierr.shape[0])
     
     # Setting up "interp_in"
     interp_in_present = ctypes.c_bool(True)
@@ -666,11 +677,11 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'interp_in' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         interp_in = numpy.asarray(interp_in, dtype=ctypes.c_double, order='F')
     if (interp_in_present):
-        interp_in_dim_1 = ctypes.c_int(interp_in.shape[0])
-        interp_in_dim_2 = ctypes.c_int(interp_in.shape[1])
+        interp_in_dim_1 = ctypes.c_long(interp_in.shape[0])
+        interp_in_dim_2 = ctypes.c_long(interp_in.shape[1])
     else:
-        interp_in_dim_1 = ctypes.c_int()
-        interp_in_dim_2 = ctypes.c_int()
+        interp_in_dim_1 = ctypes.c_long()
+        interp_in_dim_2 = ctypes.c_long()
     
     # Setting up "interp_out"
     interp_out_present = ctypes.c_bool(True)
@@ -686,17 +697,19 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'interp_out' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         interp_out = numpy.asarray(interp_out, dtype=ctypes.c_double, order='F')
     if (interp_out_present):
-        interp_out_dim_1 = ctypes.c_int(interp_out.shape[0])
-        interp_out_dim_2 = ctypes.c_int(interp_out.shape[1])
+        interp_out_dim_1 = ctypes.c_long(interp_out.shape[0])
+        interp_out_dim_2 = ctypes.c_long(interp_out.shape[1])
     else:
-        interp_out_dim_1 = ctypes.c_int()
-        interp_out_dim_2 = ctypes.c_int()
+        interp_out_dim_1 = ctypes.c_long()
+        interp_out_dim_2 = ctypes.c_long()
     
     # Setting up "eps"
     eps_present = ctypes.c_bool(True)
     if (eps is None):
         eps_present = ctypes.c_bool(False)
         eps = ctypes.c_double()
+    else:
+        eps = ctypes.c_double(eps)
     if (type(eps) is not ctypes.c_double): eps = ctypes.c_double(eps)
     
     # Setting up "extrap"
@@ -704,6 +717,8 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
     if (extrap is None):
         extrap_present = ctypes.c_bool(False)
         extrap = ctypes.c_double()
+    else:
+        extrap = ctypes.c_double(extrap)
     if (type(extrap) is not ctypes.c_double): extrap = ctypes.c_double(extrap)
     
     # Setting up "rnorm"
@@ -720,29 +735,35 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
         warnings.warn("The provided argument 'rnorm' was not an f_contiguous NumPy array of type 'ctypes.c_double' (or equivalent). Automatically converting (probably creating a full copy).")
         rnorm = numpy.asarray(rnorm, dtype=ctypes.c_double, order='F')
     if (rnorm_present):
-        rnorm_dim_1 = ctypes.c_int(rnorm.shape[0])
+        rnorm_dim_1 = ctypes.c_long(rnorm.shape[0])
     else:
-        rnorm_dim_1 = ctypes.c_int()
+        rnorm_dim_1 = ctypes.c_long()
     
     # Setting up "ibudget"
     ibudget_present = ctypes.c_bool(True)
     if (ibudget is None):
         ibudget_present = ctypes.c_bool(False)
         ibudget = ctypes.c_int()
+    else:
+        ibudget = ctypes.c_int(ibudget)
     if (type(ibudget) is not ctypes.c_int): ibudget = ctypes.c_int(ibudget)
     
     # Setting up "chain"
     chain_present = ctypes.c_bool(True)
     if (chain is None):
         chain_present = ctypes.c_bool(False)
-        chain = ctypes.c_bool()
-    if (type(chain) is not ctypes.c_bool): chain = ctypes.c_bool(chain)
+        chain = ctypes.c_int()
+    else:
+        chain = ctypes.c_int(chain)
+    if (type(chain) is not ctypes.c_int): chain = ctypes.c_int(chain)
     
     # Setting up "pmode"
     pmode_present = ctypes.c_bool(True)
     if (pmode is None):
         pmode_present = ctypes.c_bool(False)
         pmode = ctypes.c_int()
+    else:
+        pmode = ctypes.c_int(pmode)
     if (type(pmode) is not ctypes.c_int): pmode = ctypes.c_int(pmode)
 
     # Call C-accessible Fortran wrapper.

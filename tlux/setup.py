@@ -50,9 +50,16 @@ def build_axy():
     #   Try and build using (local) defaults for fmodpy compilation.
     try:
         _axy = fmodpy.fimport(**_axy_kwargs)
-        _ = _axy.AXY()
+        # Try calling the underlying library.
+        _axy.axy.new_model_config(
+            adn=2, ado=3, ads=4, ans=1, ane=6, ade=7,
+            mdn=8, mdo=9, mds=10, mns=1, mne=12, mde=13,
+            num_threads=1
+        )
     #   When local default fail, try specifying exactly what shared library functions are needed.
-    except:
+    except Exception as exc:
+        import logging
+        logging.warn(f"Encountered execption with default build of AXY, trying again with an explicit library search.\n  {exc}")
         _axy = fmodpy.fimport( **_axy_kwargs,
             link_blas="", link_lapack="", rebuild=True,
             libraries = [_dir] + fmodpy.config.libraries,
@@ -62,6 +69,7 @@ def build_axy():
                 ("omp_get_max_threads", "omp")
             ],
         )
+
     # Return the AXY and RANDOM modules.
     return _axy, _random
 
@@ -97,7 +105,7 @@ def build_balltree():
 def build_delaunay():
     # from util.approximate.delaunay import delsparse
     import os, fmodpy
-    _dependencies = ["lapack.f", "slatec.f", "delsparse.f90"]
+    _dependencies = ["blas.f", "lapack.f", "slatec.f", "delsparse.f90"]
     _dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approximate", "delaunay")
     _path = os.path.join(_dir, "delsparse.f90")
     _delsparse = fmodpy.fimport(
