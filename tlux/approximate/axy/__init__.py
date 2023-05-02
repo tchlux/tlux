@@ -4,7 +4,10 @@ from tlux.approximate.axy.preprocessing import to_array
 from tlux.unique import ByteArray
 
 # TODO:
-#  - find cause of seg fault for CIFAR training (i_encode fail)
+#  - separate out the data preprocessing for the library, so that preprocessing
+#    can be done separately in python (before calling fit procedure)
+#  - update 'fit' in the library so that it can be called iteratively from python
+#    which will make it a lot easier to do monitoring of the training process
 #  - draft solution to very slow data preparation for high dimensional "y",
 #    either generate "well spaced" values in lower dimension, or project.
 #  - make "gradient" an accessible function that calls the model gradient code

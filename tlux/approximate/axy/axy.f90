@@ -1,14 +1,14 @@
 ! TODO:
 ! 
+! - Add PARTIAL_AGGREGATION setting to FIT_MODEL functionality. When TRUE, this
+!   causes there to be a 1-to-1 mapping between model inputs and aggregator inputs,
+!   in whatever order aggregate outputs are stored, they are serially and partially
+!   aggregated as unique inputs to the model.
+! 
 ! - Check if OMP TARGET actually sends code to a different device.
 ! - Experiment with 'OMP TARGET TEAMS DISTRIBUTE PARALLEL' to see if it uses GPU correctly.
 ! 
 ! - Rotate out the points that have the lowest expected change in error when batching.
-! 
-! - Add (PAIRWISE_AGGREGATION, MAX_PAIRS) functionality to the aggregator model input,
-!   where a nonrepeating random number generator is used in conjunction with a mapping
-!   from the integer line to pairs of points. When MAX_PAIRS is less than the total
-!   number of pairs, then do greedy rotation of points identically to above.
 ! 
 ! - Update CONDITION_MODEL to:
 !    multiply the 2-norm of output weights by values before orthogonalization
@@ -216,6 +216,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SSB, ESB ! SIZES (sizes for batch)
      INTEGER(KIND=INT64) :: SAO, EAO ! A_ORDER(ADS,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMO, EMO ! M_ORDER(MDS,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SUI, EUI ! UPDATE_INDICES(1:NUM_VARS)
      ! Integers for counting timers.
      INTEGER(KIND=INT64) :: WINT, CINT ! initialize
      INTEGER(KIND=INT64) :: WFIT, CFIT ! fit (for all minimization steps below)
@@ -666,6 +667,10 @@ CONTAINS
        CONFIG%ESB = CONFIG%SSB-ONE + ZERO
     END IF
     CONFIG%LWORK_SIZE = CONFIG%ESB
+    ! UPDATE_INDICES
+    CONFIG%SUI = ONE + CONFIG%LWORK_SIZE
+    CONFIG%EUI = CONFIG%SUI + CONFIG%NUM_VARS
+    CONFIG%LWORK_SIZE = CONFIG%EUI
   END SUBROUTINE NEW_FIT_CONFIG
 
   ! Initialize the weights for a model, optionally provide a random seed.
@@ -2795,7 +2800,6 @@ CONTAINS
     INTEGER(KIND=INT32) :: NUM_THREADS
     ! Arrays that were not captured at fit config time.
     ! WARNING: Local allocations (because of INT64 type).
-    INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: UPDATE_INDICES ! LOCAL ALLOCATION
     INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:,:) :: AGG_ITERATORS ! LOCAL ALLOCATION
     ! WARNING: Locall allocation (because of unknown YW first dimension at fit config).
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: YW ! LOCAL ALLOCATION
@@ -2839,7 +2843,6 @@ CONTAINS
     IF (INFO .NE. 0) RETURN
     ! Allocate local variables.
     ALLOCATE( &
-         UPDATE_INDICES(1:CONFIG%NUM_VARS), &
          AGG_ITERATORS(1:5,1:SIZE(SIZES_IN,KIND=INT64)), &
          YW(1:SIZE(YW_IN,1,KIND=INT64), 1:CONFIG%NM) &
     )
@@ -2905,10 +2908,12 @@ CONTAINS
          RWORK(CONFIG%SMET : CONFIG%EMET), & ! M_EMB_TEMP
          ! Rank evaluation (when conditioning model).
          IWORK(CONFIG%SAO : CONFIG%EAO), & ! A_ORDER
-         IWORK(CONFIG%SMO : CONFIG%EMO) & ! M_ORDER
+         IWORK(CONFIG%SMO : CONFIG%EMO), & ! M_ORDER
+         ! Update indicies.
+         LWORK(CONFIG%SUI : CONFIG%EUI) & ! UPDATE_INDICES
          )
     ! Deallocate local variables.
-    DEALLOCATE(UPDATE_INDICES, YW)
+    DEALLOCATE(AGG_ITERATORS, YW)
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
@@ -2926,7 +2931,7 @@ CONTAINS
          AX_SHIFT, AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_SHIFT, &
          X_SHIFT, X_RESCALE, XI_SHIFT, XI_RESCALE, Y_SHIFT, Y_RESCALE, &
          A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, &
-         A_EMB_TEMP, M_EMB_TEMP, A_ORDER, M_ORDER)
+         A_EMB_TEMP, M_EMB_TEMP, A_ORDER, M_ORDER, UPDATE_INDICES)
       ! Definition of unpacked work storage.
       INTEGER(KIND=INT64), DIMENSION(SIZE(AXI_IN,1), CONFIG%NA) :: AXI
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%NA) :: AX
@@ -2966,6 +2971,7 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MNE, CONFIG%NUM_THREADS) :: M_EMB_TEMP
       INTEGER(KIND=INT32), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_ORDER
       INTEGER(KIND=INT32), DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_ORDER
+      INTEGER(KIND=INT64), DIMENSION(CONFIG%NUM_VARS) :: UPDATE_INDICES
       INTEGER(KIND=INT64) :: NA, NM, I, S, BS, BE, BT, BSA, BEA, SS, SE, NT, TN, TT, BATCH
       REAL :: CPU_TIME_START, CPU_TIME_END
       INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
