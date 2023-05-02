@@ -2771,49 +2771,29 @@ CONTAINS
   END SUBROUTINE CONDITION_MODEL
 
 
-  ! Fit input / output pairs by minimizing mean squared error.
-  SUBROUTINE FIT_MODEL(CONFIG, MODEL, RWORK, IWORK, LWORK, &
+  ! Check all of the same inputs for FIT_MODEL to make sure shapes ane sizes match.
+  SUBROUTINE FIT_CHECK(CONFIG, MODEL, RWORK, IWORK, LWORK, &
        AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
-       STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
+       YW, AGG_ITERATORS, STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
     ! TODO: Take an output file name (STDERR and STDOUT are handled).
-    TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: RWORK
-    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:) :: IWORK
-    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: LWORK
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX_IN
+    TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: RWORK
+    INTEGER(KIND=INT32), INTENT(IN), DIMENSION(:) :: IWORK
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: LWORK
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AX_IN
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI_IN
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES_IN
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X_IN
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: X_IN
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI_IN
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_IN
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW_IN
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y_IN
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW_IN
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW  ! (SIZE(YW_IN,1),NM)
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AGG_ITERATORS ! (5,SIZE(SIZES_IN))
     INTEGER(KIND=INT32), INTENT(IN) :: STEPS
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(6,STEPS), OPTIONAL :: RECORD
-    REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
+    REAL(KIND=RT), INTENT(IN), DIMENSION(6,STEPS), OPTIONAL :: RECORD
+    REAL(KIND=RT), INTENT(IN) :: SUM_SQUARED_ERROR
     INTEGER(KIND=INT32), INTENT(OUT) :: INFO
-    ! Local variables.
-    !    "backspace" character array for printing to the same line repeatedly
-    CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),31)
-    !    temporary holders for overwritten CONFIG attributes
-    LOGICAL(KIND=C_BOOL) :: NORMALIZE
-    INTEGER(KIND=INT32) :: NUM_THREADS
-    ! Arrays that were not captured at fit config time.
-    ! WARNING: Local allocations (because of INT64 type).
-    INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:,:) :: AGG_ITERATORS ! LOCAL ALLOCATION
-    ! WARNING: Locall allocation (because of unknown YW first dimension at fit config).
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: YW ! LOCAL ALLOCATION
-    !    miscellaneous (hard to concisely categorize)
-    LOGICAL(KIND=C_BOOL) :: DID_PRINT
-    INTEGER(KIND=INT64) :: STEP, BATCH, NS, SS, SE, MIN_TO_UPDATE, D, VS, VE, T, NT
-    INTEGER(KIND=INT32) :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
-    INTEGER(KIND=INT64) :: CURRENT_TIME, LAST_PRINT_TIME, WAIT_TIME
-    REAL(KIND=RT) :: MSE, PREV_MSE, BEST_MSE
-    REAL(KIND=RT) :: STEP_MEAN_REMAIN, STEP_CURV_REMAIN
-    REAL :: CPU_TIME_START, CPU_TIME_END
-    INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
-    CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
-    CALL CPU_TIME(CPU_TIME_START)
     ! Check for a valid data shape given the model.
     INFO = 0
     ! Check the shape of all inputs (to make sure they match this model).
@@ -2840,17 +2820,67 @@ CONTAINS
     ELSE IF (MINVAL(YW_IN(:,:)) .LT. 0.0_RT) THEN
        INFO = 23 ! Bad YW values (negative numbers are not allowed).
     END IF
-    IF (INFO .NE. 0) RETURN
-    ! Allocate local variables.
-    ALLOCATE( &
-         AGG_ITERATORS(1:5,1:SIZE(SIZES_IN,KIND=INT64)), &
-         YW(1:SIZE(YW_IN,1,KIND=INT64), 1:CONFIG%NM) &
-    )
-    ! Set the local number of threads (in case there are fewer data points than threads).
-    NT = MIN(CONFIG%NUM_THREADS, SIZE(Y_IN,2,INT64))
-    ! Initialize RWORK to be zeros because it holds lots of gradients.
-    RWORK(:) = 0.0_RT
-    RWORK(CONFIG%SMGC:CONFIG%EMGC) = CONFIG%INITIAL_CURV_ESTIMATE
+    ! Check YW shape.
+    IF (SIZE(YW,1,KIND=INT64) .NE. SIZE(YW_IN,1,KIND=INT64)) THEN
+       INFO = 24 ! Bad YW first dimension, does not match YW_IN.
+    ELSE IF (SIZE(YW,2,KIND=INT64) .NE. CONFIG%NM) THEN
+       INFO = 25 ! Bad YW second dimension, does not match NM.
+    END IF
+    ! Check AGG_ITERATORS shape.
+    IF (SIZE(AGG_ITERATORS,1) .NE. 5) THEN
+       INFO = 26 ! Bad AGG_ITERATORS first dimension, should be 5.
+    ELSE IF (SIZE(AGG_ITERATORS,2,KIND=INT64) .NE. (SIZE(SIZES_IN,KIND=INT64))) THEN
+       INFO = 27 ! Bad AGG_ITERATORS second dimension, should match SIZES_IN.
+    END IF
+  END SUBROUTINE FIT_CHECK
+    
+
+  ! Fit input / output pairs by minimizing mean squared error.
+  SUBROUTINE FIT_MODEL(CONFIG, MODEL, RWORK, IWORK, LWORK, &
+       AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
+       YW, AGG_ITERATORS, STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
+    ! TODO: Take an output file name (STDERR and STDOUT are handled).
+    TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: RWORK
+    INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:) :: IWORK
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: LWORK
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: AXI_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES_IN
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X_IN
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI_IN
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_IN
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW_IN
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW  ! (SIZE(YW_IN,1),NM)
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AGG_ITERATORS ! (5,SIZE(SIZES_IN))
+    INTEGER(KIND=INT32), INTENT(IN) :: STEPS
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(6,STEPS), OPTIONAL :: RECORD
+    REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
+    INTEGER(KIND=INT32), INTENT(OUT) :: INFO
+    ! Local variables.
+    !    "backspace" character array for printing to the same line repeatedly
+    CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),31)
+    !    temporary holders for overwritten CONFIG attributes
+    LOGICAL(KIND=C_BOOL) :: NORMALIZE
+    INTEGER(KIND=INT32) :: NUM_THREADS
+    !    miscellaneous (hard to concisely categorize)
+    LOGICAL(KIND=C_BOOL) :: DID_PRINT
+    INTEGER(KIND=INT64) :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_PRINT_TIME, WAIT_TIME
+    INTEGER(KIND=INT32) :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
+    REAL(KIND=RT) :: MSE, PREV_MSE, BEST_MSE, STEP_MEAN_REMAIN, STEP_CURV_REMAIN
+    INTEGER(KIND=INT64) :: D, I, S, T
+    INTEGER(KIND=INT64) :: BE, BS, BT, NA, NM, NS, NT, SE, SS, TN, TT, VE, VS
+    INTEGER(KIND=INT64) :: BEA, BSA
+    ! Batching.
+    INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
+         BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
+    ! Timing.
+    REAL :: CPU_TIME_START, CPU_TIME_END
+    INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
+    ! 
+    CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
+    CALL CPU_TIME(CPU_TIME_START)
     ! 
     ! TODO: For deciding which points to keep when doing batching:
     !        track the trailing average error CHANGE for all points (E^.5)
@@ -2912,8 +2942,6 @@ CONTAINS
          ! Update indicies.
          LWORK(CONFIG%SUI : CONFIG%EUI) & ! UPDATE_INDICES
          )
-    ! Deallocate local variables.
-    DEALLOCATE(AGG_ITERATORS, YW)
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
@@ -2972,12 +3000,9 @@ CONTAINS
       INTEGER(KIND=INT32), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_ORDER
       INTEGER(KIND=INT32), DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_ORDER
       INTEGER(KIND=INT64), DIMENSION(CONFIG%NUM_VARS) :: UPDATE_INDICES
-      INTEGER(KIND=INT64) :: NA, NM, I, S, BS, BE, BT, BSA, BEA, SS, SE, NT, TN, TT, BATCH
+      ! Timing.
       REAL :: CPU_TIME_START, CPU_TIME_END
       INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
-      INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
-           BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
-      ! 
       ! ----------------------------------------------------------------
       !                 Initialization and preparation
       ! 
@@ -2986,6 +3011,8 @@ CONTAINS
       CALL SYSTEM_CLOCK(LAST_PRINT_TIME, CLOCK_RATE, CLOCK_MAX)
       WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
       DID_PRINT = .FALSE.
+      ! Initialize the info / error code to 0.
+      INFO = 0
       ! Cap the "number [of variables] to update" at the model size.
       CONFIG%NUM_TO_UPDATE = MAX(ONE, MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
       ! Set the "total rank", the number of internal state components.
@@ -3002,6 +3029,8 @@ CONTAINS
       ! Initial mean squared error is "max representable value".
       PREV_MSE = HUGE(PREV_MSE)
       BEST_MSE = HUGE(BEST_MSE)
+      ! Set the initial curvature values for the model gradient.
+      MODEL_GRAD_CURV(:) = CONFIG%INITIAL_CURV_ESTIMATE
       ! Disable the application of SHIFT (since data is / will be normalized).
       NORMALIZE = CONFIG%NORMALIZE
       CONFIG%NORMALIZE = .FALSE.
@@ -3299,7 +3328,7 @@ CONTAINS
       ! Convert the sum of squared errors into the mean squared error.
       MSE = SUM_SQUARED_ERROR / REAL(CONFIG%NM * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
       IF (IS_NAN(MSE) .OR. (.NOT. IS_FINITE(MSE))) THEN
-         INFO = 24 ! Encountered NaN or Inf mean squared error during training, this should not happen. Are any values extremely large?
+         INFO = 28 ! Encountered NaN or Inf mean squared error during training, this should not happen. Are any values extremely large?
          RETURN
       END IF
       ! Adjust exponential sliding windows based on change in error.

@@ -181,7 +181,7 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        nm_total, na_total, ax, axi, sizes, x, xi, y, yw, shapes, maps = (
+        nm_total, na_total, ax, axi, sizes, x, xi, y, yw_in, shapes, maps = (
             to_array(ax, axi, sizes, x, xi, y, yi, maps=dict(
                 axi_map=self.axi_map, xi_map=self.xi_map,
                 yi_map=self.yi_map, yi_embeddings=self.yi_embeddings,
@@ -246,12 +246,23 @@ class AXY:
             seed=self.seed, config=self.config
         )
         rwork = np.ones(self.config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
+        rwork[:] = 0.0 # set to zeros because lots of gradients are stored there.
         iwork = np.ones(self.config.iwork_size, dtype="int32")
         lwork = np.ones(self.config.lwork_size, dtype="int64")
-        # Minimize the mean squared error.
+        agg_iterators = np.ones((nm_total, 5), dtype="int64")
+        yw = np.ones((nm, yw_in.shape[1]), dtype="float32")
         self.record = np.zeros((steps,6), dtype="float32", order="C")
+        # Check all shapes to validate.
+        info = self.AXY.fit_check(self.config, self.model, rwork, iwork, lwork,
+                                  ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
+                                  yw.T, agg_iterators.T,
+                                  steps=steps, record=self.record.T, sum_squared_error=0.0)
+        # Check for a nonzero exit code.
+        self._check_code(info, "fit_check")
+        # Minimize the mean squared error.
         result = self.AXY.fit_model(self.config, self.model, rwork, iwork, lwork,
-                                    ax.T, axi.T, sizes, x.T, xi.T, y.T, yw.T,
+                                    ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
+                                    yw.T, agg_iterators.T,
                                     steps=steps, record=self.record.T)
         # Check for a nonzero exit code.
         self._check_code(result[-1], "fit_model", steps=steps, rwork=rwork, iwork=iwork, lwork=lwork)
@@ -608,7 +619,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1]#, f2, f3]
+    functions = [f1, f2, f3]
 
     seed = 0
     np.random.seed(seed)
@@ -618,7 +629,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
