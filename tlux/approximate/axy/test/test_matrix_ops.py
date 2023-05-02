@@ -116,7 +116,7 @@ def _test_radialize(show=True):
         # Use the provided shift and transform to repeate the radialization process.
         xrr = (x + shift) @ transform
         p.add(f"{i+1} re {descriptor}", *xrr.T, marker_size=3)
-    p.show(show=show)
+    if (show): p.show()
     print("passed.", flush=True)
 
 _test_radialize(show=False)
@@ -181,4 +181,4 @@ def _test_least_squares():
     print()
 
 
-_test_least_squares()
+# _test_least_squares()

@@ -669,7 +669,7 @@ CONTAINS
     CONFIG%LWORK_SIZE = CONFIG%ESB
     ! UPDATE_INDICES
     CONFIG%SUI = ONE + CONFIG%LWORK_SIZE
-    CONFIG%EUI = CONFIG%SUI + CONFIG%NUM_VARS
+    CONFIG%EUI = CONFIG%SUI + CONFIG%NUM_VARS-ONE
     CONFIG%LWORK_SIZE = CONFIG%EUI
   END SUBROUTINE NEW_FIT_CONFIG
 
@@ -2838,7 +2838,8 @@ CONTAINS
   ! Fit input / output pairs by minimizing mean squared error.
   SUBROUTINE FIT_MODEL(CONFIG, MODEL, RWORK, IWORK, LWORK, &
        AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
-       YW, AGG_ITERATORS, STEPS, RECORD, SUM_SQUARED_ERROR, INFO)
+       YW, AGG_ITERATORS, STEPS, RECORD, SUM_SQUARED_ERROR, &
+       CONTINUING, INFO)
     ! TODO: Take an output file name (STDERR and STDOUT are handled).
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
@@ -2855,25 +2856,27 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW  ! (SIZE(YW_IN,1),NM)
     INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:,:) :: AGG_ITERATORS ! (5,SIZE(SIZES_IN))
     INTEGER(KIND=INT32), INTENT(IN) :: STEPS
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(6,STEPS), OPTIONAL :: RECORD
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(6,STEPS), OPTIONAL :: RECORD
+    LOGICAL(KIND=C_BOOL), INTENT(IN), OPTIONAL :: CONTINUING
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
     INTEGER(KIND=INT32), INTENT(OUT) :: INFO
     ! Local variables.
     !    "backspace" character array for printing to the same line repeatedly
     CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),31)
     !    temporary holders for overwritten CONFIG attributes
-    LOGICAL(KIND=C_BOOL) :: NORMALIZE
-    INTEGER(KIND=INT32) :: NUM_THREADS
+    LOGICAL(KIND=C_BOOL), SAVE :: NORMALIZE
+    INTEGER(KIND=INT32), SAVE :: NUM_THREADS
     !    miscellaneous (hard to concisely categorize)
-    LOGICAL(KIND=C_BOOL) :: DID_PRINT
-    INTEGER(KIND=INT64) :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_PRINT_TIME, WAIT_TIME
-    INTEGER(KIND=INT32) :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
-    REAL(KIND=RT) :: MSE, PREV_MSE, BEST_MSE, STEP_MEAN_REMAIN, STEP_CURV_REMAIN
-    INTEGER(KIND=INT64) :: D, I, S, T
-    INTEGER(KIND=INT64) :: BE, BS, BT, NA, NM, NS, NT, SE, SS, TN, TT, VE, VS
-    INTEGER(KIND=INT64) :: BEA, BSA
+    LOGICAL(KIND=C_BOOL), SAVE :: DID_PRINT
+    INTEGER(KIND=INT64), SAVE :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_PRINT_TIME, WAIT_TIME
+    INTEGER(KIND=INT32), SAVE :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
+    REAL(KIND=RT), SAVE :: MSE, PREV_MSE, BEST_MSE, STEP_MEAN_REMAIN, STEP_CURV_REMAIN
+    INTEGER(KIND=INT64), SAVE :: D, I, S, T
+    INTEGER(KIND=INT64), SAVE :: BE, BS, BT, NA, NM, NS, NT, SE, SS, TN, TT, VE, VS
+    INTEGER(KIND=INT64), SAVE :: BEA, BSA
+    LOGICAL(KIND=C_BOOL) :: CONTINUING_FIT
     ! Batching.
-    INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
+    INTEGER(KIND=INT64), SAVE, DIMENSION(:), ALLOCATABLE :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, BATCHM_STARTS, BATCHM_ENDS
     ! Timing.
     REAL :: CPU_TIME_START, CPU_TIME_END
@@ -2881,6 +2884,13 @@ CONTAINS
     ! 
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
     CALL CPU_TIME(CPU_TIME_START)
+    ! Set whether or not we are resuming a previous call.
+    CONTINUING_FIT = .FALSE.
+    IF (PRESENT(CONTINUING)) THEN
+       IF (CONTINUING) THEN
+          CONTINUING_FIT = .TRUE.
+       END IF
+    END IF
     ! 
     ! TODO: For deciding which points to keep when doing batching:
     !        track the trailing average error CHANGE for all points (E^.5)
@@ -3009,85 +3019,99 @@ CONTAINS
       ! Store the start time of this routine (to make sure updates can
       !  be shown to the user at a reasonable frequency).
       CALL SYSTEM_CLOCK(LAST_PRINT_TIME, CLOCK_RATE, CLOCK_MAX)
-      WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
-      DID_PRINT = .FALSE.
-      ! Initialize the info / error code to 0.
-      INFO = 0
-      ! Cap the "number [of variables] to update" at the model size.
-      CONFIG%NUM_TO_UPDATE = MAX(ONE, MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
-      ! Set the "total rank", the number of internal state components.
-      TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
-      ! Compute the minimum number of model variables to update.
-      MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
-      ! Set the initial "number of steps taken since best" counter.
-      NS = 0
-      ! Set the "num threads" to be the maximum achievable data parallelism.
-      NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
-      ! Initial rates of change of mean and variance values.
-      STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-      STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
-      ! Initial mean squared error is "max representable value".
-      PREV_MSE = HUGE(PREV_MSE)
-      BEST_MSE = HUGE(BEST_MSE)
-      ! Set the initial curvature values for the model gradient.
-      MODEL_GRAD_CURV(:) = CONFIG%INITIAL_CURV_ESTIMATE
-      ! Disable the application of SHIFT (since data is / will be normalized).
-      NORMALIZE = CONFIG%NORMALIZE
-      CONFIG%NORMALIZE = .FALSE.
-      ! Initialize the aggregate iterators.
-      !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) &
-      !$OMP& IF((CONFIG%NUM_THREADS > 0) .AND. (SIZE(SIZES_IN) > 0))
-      DO I = 1, SIZE(SIZES_IN)
-         IF (SIZES_IN(I) .EQ. 0) THEN
-            AGG_ITERATORS(:,I) = ZERO
-         ELSE
-            AGG_ITERATORS(1,I) = INT(SIZES_IN(I), INT64)
-            IF (CONFIG%PAIRWISE_AGGREGATION) THEN
-               AGG_ITERATORS(1,I) = AGG_ITERATORS(1,I)**2_INT64
+      IF (.NOT. CONTINUING_FIT) THEN
+         ! Establis the amount of time to wait between print.
+         WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
+         DID_PRINT = .FALSE.
+         ! Initialize the info / error code to 0.
+         INFO = 0
+         ! Cap the "number [of variables] to update" at the model size.
+         CONFIG%NUM_TO_UPDATE = MAX(ONE, MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
+         ! Set the "total rank", the number of internal state components.
+         TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
+         ! Compute the minimum number of model variables to update.
+         MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
+         ! Set the initial "number of steps taken since best" counter.
+         NS = 0
+         ! Set the "num threads" to be the maximum achievable data parallelism.
+         NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
+         ! Initial rates of change of mean and variance values.
+         STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
+         STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
+         ! Initial mean squared error is "max representable value".
+         PREV_MSE = HUGE(PREV_MSE)
+         BEST_MSE = HUGE(BEST_MSE)
+         ! Set the initial curvature values for the model gradient.
+         MODEL_GRAD_CURV(:) = CONFIG%INITIAL_CURV_ESTIMATE
+         ! Disable the application of SHIFT (since data is / will be normalized).
+         NORMALIZE = CONFIG%NORMALIZE
+         CONFIG%NORMALIZE = .FALSE.
+         ! Initialize the aggregate iterators.
+         !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) &
+         !$OMP& IF((CONFIG%NUM_THREADS > 0) .AND. (SIZE(SIZES_IN) > 0))
+         DO I = 1, SIZE(SIZES_IN)
+            IF (SIZES_IN(I) .EQ. 0) THEN
+               AGG_ITERATORS(:,I) = ZERO
+            ELSE
+               AGG_ITERATORS(1,I) = INT(SIZES_IN(I), INT64)
+               IF (CONFIG%PAIRWISE_AGGREGATION) THEN
+                  AGG_ITERATORS(1,I) = AGG_ITERATORS(1,I)**2_INT64
+               END IF
+               CALL INITIALIZE_ITERATOR( &
+                    I_LIMIT=AGG_ITERATORS(1,I), &
+                    I_NEXT=AGG_ITERATORS(2,I), &
+                    I_MULT=AGG_ITERATORS(3,I), &
+                    I_STEP=AGG_ITERATORS(4,I), &
+                    I_MOD=AGG_ITERATORS(5,I) &
+                    )
             END IF
-            CALL INITIALIZE_ITERATOR( &
-                 I_LIMIT=AGG_ITERATORS(1,I), &
-                 I_NEXT=AGG_ITERATORS(2,I), &
-                 I_MULT=AGG_ITERATORS(3,I), &
-                 I_STEP=AGG_ITERATORS(4,I), &
-                 I_MOD=AGG_ITERATORS(5,I) &
-            )
+         END DO
+         ! Make all iterators deterministic when all pairs will fit into the model.
+         NA = SUM(AGG_ITERATORS(1,:))
+         IF (NA .LE. CONFIG%NA) THEN
+            AGG_ITERATORS(2,:) = ZERO
+            AGG_ITERATORS(3,:) = 1_INT64
+            AGG_ITERATORS(4,:) = 1_INT64
+            AGG_ITERATORS(5,:) = AGG_ITERATORS(1,:)
          END IF
-      END DO
-      ! Make all iterators deterministic when all pairs will fit into the model.
-      NA = SUM(AGG_ITERATORS(1,:))
-      IF (NA .LE. CONFIG%NA) THEN
-         AGG_ITERATORS(2,:) = ZERO
-         AGG_ITERATORS(3,:) = 1_INT64
-         AGG_ITERATORS(4,:) = 1_INT64
-         AGG_ITERATORS(5,:) = AGG_ITERATORS(1,:)
+         ! 
+         ! TODO: Set up validation data (separate from training data).
+         !       Add swap scratch space to the memory somewhere.
+         !       Put the validation data at the end of the array of data.
+         !       Make sure the "real" data is at the front.
+         !       Whichever set of data is smaller should be generated by well-spacedness.
+         ! 
+         ! TODO: Apply normalizations separately to the validation data.
+         ! 
+         ! TODO: Parameter updating policies should be determined by training MSE change.
+         !       Model saving and early stopping should be determined by validation MSE.
+         ! 
+         ! 
+         ! Normalize the *_IN data before fitting the model.
+         CALL NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
+              AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
+              AX, AXI, SIZES, X, XI, Y, YW, &
+              AX_SHIFT, AX_RESCALE, &
+              AXI_SHIFT, AXI_RESCALE, &
+              AY_SHIFT, &
+              X_SHIFT, X_RESCALE, &
+              XI_SHIFT, XI_RESCALE, &
+              Y_SHIFT, Y_RESCALE, &
+              A_EMB_VECS, M_EMB_VECS, &
+              A_OUT_VECS, A_STATES, AY, INFO)
+         IF (INFO .NE. 0) RETURN
+         ! Set the initial value of STEP.
+         STEP = 1
+         ! Write the status update to the command line.
+         CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
+         IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
+            IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
+            WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP, MSE, BEST_MSE
+            DID_PRINT = .TRUE.
+            LAST_PRINT_TIME = CURRENT_TIME
+            RETURN
+         END IF
       END IF
-      ! 
-      ! TODO: Set up validation data (separate from training data).
-      !       Add swap scratch space to the memory somewhere.
-      !       Put the validation data at the end of the array of data.
-      !       Make sure the "real" data is at the front.
-      !       Whichever set of data is smaller should be generated by well-spacedness.
-      ! 
-      ! TODO: Apply normalizations separately to the validation data.
-      ! 
-      ! TODO: Parameter updating policies should be determined by training MSE change.
-      !       Model saving and early stopping should be determined by validation MSE.
-      ! 
-      ! 
-      ! Normalize the *_IN data before fitting the model.
-      CALL NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
-           AX_IN, AXI_IN, SIZES_IN, X_IN, XI_IN, Y_IN, YW_IN, &
-           AX, AXI, SIZES, X, XI, Y, YW, &
-           AX_SHIFT, AX_RESCALE, &
-           AXI_SHIFT, AXI_RESCALE, &
-           AY_SHIFT, &
-           X_SHIFT, X_RESCALE, &
-           XI_SHIFT, XI_RESCALE, &
-           Y_SHIFT, Y_RESCALE, &
-           A_EMB_VECS, M_EMB_VECS, &
-           A_OUT_VECS, A_STATES, AY, INFO)
-      IF (INFO .NE. 0) RETURN
       ! 
       ! TODO: Compute batches once, reuse for all of training.
       ! 
@@ -3095,7 +3119,7 @@ CONTAINS
       !                    Minimizing mean squared error
       ! 
       ! Iterate, taking steps with the average gradient over all data.
-      fit_loop : DO STEP = 1, STEPS
+      fit_loop : DO WHILE (STEP .LE. STEPS)
          ! TODO: Consider wrapping the embed, evaluate, model gradient code in
          !       a higher level thread block to include parallelization over
          !       larger scopes. Will have to be done after the batch is constructed.
@@ -3253,67 +3277,81 @@ CONTAINS
          ! Record statistics about the model and write an update about 
          ! step and convergence to the command line.
          CALL RECORD_STATS(MODEL_GRAD)
+         ! Update the step.
+         STEP = STEP + 1
+         ! Write the status update to the command line.
+         CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
+         IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
+            IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
+            WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP-1, MSE, BEST_MSE
+            DID_PRINT = .TRUE.
+            LAST_PRINT_TIME = CURRENT_TIME
+            EXIT fit_loop
+         END IF
       END DO fit_loop
-      CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
-      CALL CPU_TIME(CPU_TIME_START)
-      ! 
-      ! ----------------------------------------------------------------
-      !                 Finalization, prepare for return.
-      ! 
-      ! Restore the best model seen so far (if enough steps were taken).
-      IF (CONFIG%KEEP_BEST .AND. (STEPS .GT. 0)) THEN
-         MSE      = BEST_MSE
-         MODEL(:) = BEST_MODEL(:)
-      END IF
-      ! 
-      ! Apply the data normalizing scaling factors to the weight
-      !  matrices to embed normalization into the model.
-      IF (CONFIG%ENCODE_SCALING) THEN
-         IF (CONFIG%ADN .GT. 0) THEN
-            IF (CONFIG%ANS .GT. 0) THEN
-               A_IN_VECS(:CONFIG%ADN,:) = MATMUL(AX_RESCALE(:,:), A_IN_VECS(:CONFIG%ADN,:))
-            ELSE
-               A_OUT_VECS(:CONFIG%ADN,:) = MATMUL(AX_RESCALE(:,:), A_OUT_VECS(:CONFIG%ADN,:))
+      ! Only preform the encoding if the fit is complete.
+      IF (STEP .GT. STEPS) THEN
+         CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
+         CALL CPU_TIME(CPU_TIME_START)
+         ! 
+         ! ----------------------------------------------------------------
+         !                 Finalization, prepare for return.
+         ! 
+         ! Restore the best model seen so far (if enough steps were taken).
+         IF (CONFIG%KEEP_BEST .AND. (STEPS .GT. 0)) THEN
+            MSE      = BEST_MSE
+            MODEL(:) = BEST_MODEL(:)
+         END IF
+         ! 
+         ! Apply the data normalizing scaling factors to the weight
+         !  matrices to embed normalization into the model.
+         IF (CONFIG%ENCODE_SCALING) THEN
+            IF (CONFIG%ADN .GT. 0) THEN
+               IF (CONFIG%ANS .GT. 0) THEN
+                  A_IN_VECS(:CONFIG%ADN,:) = MATMUL(AX_RESCALE(:,:), A_IN_VECS(:CONFIG%ADN,:))
+               ELSE
+                  A_OUT_VECS(:CONFIG%ADN,:) = MATMUL(AX_RESCALE(:,:), A_OUT_VECS(:CONFIG%ADN,:))
+               END IF
+               AX_RESCALE(:,:) = 0.0_RT
+               DO D = 1, SIZE(AX_RESCALE,1)
+                  AX_RESCALE(D,D) = 1.0_RT
+               END DO
             END IF
-            AX_RESCALE(:,:) = 0.0_RT
-            DO D = 1, SIZE(AX_RESCALE,1)
-               AX_RESCALE(D,D) = 1.0_RT
-            END DO
-         END IF
-         IF (CONFIG%MDN .GT. 0) THEN
-            IF (CONFIG%MNS .GT. 0) THEN
-               M_IN_VECS(:CONFIG%MDN,:) = MATMUL(X_RESCALE(:,:), M_IN_VECS(:CONFIG%MDN,:))
-            ELSE
-               M_OUT_VECS(:CONFIG%MDN,:) = MATMUL(X_RESCALE(:,:), M_OUT_VECS(:CONFIG%MDN,:))
+            IF (CONFIG%MDN .GT. 0) THEN
+               IF (CONFIG%MNS .GT. 0) THEN
+                  M_IN_VECS(:CONFIG%MDN,:) = MATMUL(X_RESCALE(:,:), M_IN_VECS(:CONFIG%MDN,:))
+               ELSE
+                  M_OUT_VECS(:CONFIG%MDN,:) = MATMUL(X_RESCALE(:,:), M_OUT_VECS(:CONFIG%MDN,:))
+               END IF
+               X_RESCALE(:,:) = 0.0_RT
+               DO D = 1, SIZE(X_RESCALE,1)
+                  X_RESCALE(D,D) = 1.0_RT
+               END DO
             END IF
-            X_RESCALE(:,:) = 0.0_RT
-            DO D = 1, SIZE(X_RESCALE,1)
-               X_RESCALE(D,D) = 1.0_RT
+            ! Apply the output rescale to whichever part of the model produces output.
+            IF (CONFIG%MDO .GT. 0) THEN
+               M_OUT_VECS(:,:) = MATMUL(M_OUT_VECS(:,:), Y_RESCALE(:,:))
+            ELSE
+               A_OUT_VECS(:,:) = MATMUL(A_OUT_VECS(:,:), Y_RESCALE(:,:))
+            END IF
+            Y_RESCALE(:,:) = 0.0_RT
+            DO D = 1, SIZE(Y_RESCALE,1)
+               Y_RESCALE(D,D) = 1.0_RT
             END DO
+            ! Store the fact that scaling has already been encoded into the model.
+            CONFIG%NEEDS_SCALING = .FALSE.
          END IF
-         ! Apply the output rescale to whichever part of the model produces output.
-         IF (CONFIG%MDO .GT. 0) THEN
-            M_OUT_VECS(:,:) = MATMUL(M_OUT_VECS(:,:), Y_RESCALE(:,:))
-         ELSE
-            A_OUT_VECS(:,:) = MATMUL(A_OUT_VECS(:,:), Y_RESCALE(:,:))
-         END IF
-         Y_RESCALE(:,:) = 0.0_RT
-         DO D = 1, SIZE(Y_RESCALE,1)
-            Y_RESCALE(D,D) = 1.0_RT
-         END DO
-         ! Store the fact that scaling has already been encoded into the model.
-         CONFIG%NEEDS_SCALING = .FALSE.
+         ! 
+         ! Erase the printed message if one was produced.
+         IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
+         ! 
+         ! Reset configuration settings that were modified.
+         CONFIG%NORMALIZE = NORMALIZE
+         CALL CPU_TIME(CPU_TIME_END)
+         CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+         CONFIG%WENC = CONFIG%WENC + (WALL_TIME_END - WALL_TIME_START)
+         CONFIG%CENC = CONFIG%CENC + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
       END IF
-      ! 
-      ! Erase the printed message if one was produced.
-      IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
-      ! 
-      ! Reset configuration settings that were modified.
-      CONFIG%NORMALIZE = NORMALIZE
-      CALL CPU_TIME(CPU_TIME_END)
-      CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
-      CONFIG%WENC = CONFIG%WENC + (WALL_TIME_END - WALL_TIME_START)
-      CONFIG%CENC = CONFIG%CENC + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
     END SUBROUTINE UNPACKED_FIT_MODEL
 
     
@@ -3480,14 +3518,6 @@ CONTAINS
             ! Store the gradient utilization rate (total gradient rank over full rank)
             RECORD(6,STEP) = REAL(TOTAL_GRAD_RANK,RT) / REAL(TOTAL_RANK,RT)
          END IF
-      END IF
-      ! Write the status update to the command line.
-      CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
-      IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
-         IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
-         WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP, MSE, BEST_MSE
-         LAST_PRINT_TIME = CURRENT_TIME
-         DID_PRINT = .TRUE.
       END IF
     END SUBROUTINE RECORD_STATS
 

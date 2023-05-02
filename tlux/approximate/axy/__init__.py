@@ -4,12 +4,11 @@ from tlux.approximate.axy.preprocessing import to_array
 from tlux.unique import ByteArray
 
 # TODO:
-#  - separate out the data preprocessing for the library, so that preprocessing
-#    can be done separately in python (before calling fit procedure)
-#  - update 'fit' in the library so that it can be called iteratively from python
-#    which will make it a lot easier to do monitoring of the training process
+#  - create a 'plot_snapshot' method that creates a Graph of the model weights,
+#    gradient magnitudes, curvatures, projected embeddings (colored by change),
+#    and any other information that might be useful in diagnosing model components.
 #  - draft solution to very slow data preparation for high dimensional "y",
-#    either generate "well spaced" values in lower dimension, or project.
+#    either generate "well spaced" embeddings in lower dimension, or project.
 #  - make "gradient" an accessible function that calls the model gradient code
 #    and propogates an output gradient back to the inputs (+1 for all outputs).
 #  - python fallback that supports the basic evaluation of
@@ -174,7 +173,8 @@ class AXY:
 
     # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
-            y=None, yi=None, yw=None, new_model=False, nm=None, na=None, **kwargs):
+            y=None, yi=None, yw=None, new_model=False, nm=None, na=None,
+            callback=None, **kwargs):
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "AXY.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for aggregate inputs.
@@ -259,13 +259,34 @@ class AXY:
                                   steps=steps, record=self.record.T, sum_squared_error=0.0)
         # Check for a nonzero exit code.
         self._check_code(info, "fit_check")
+        # Store the number of steps already taken.
+        continuing = False
+        target_steps = self.config.steps_taken + steps
         # Minimize the mean squared error.
-        result = self.AXY.fit_model(self.config, self.model, rwork, iwork, lwork,
-                                    ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
-                                    yw.T, agg_iterators.T,
-                                    steps=steps, record=self.record.T)
-        # Check for a nonzero exit code.
-        self._check_code(result[-1], "fit_model", steps=steps, rwork=rwork, iwork=iwork, lwork=lwork)
+        while (self.config.steps_taken < target_steps):
+            result = self.AXY.fit_model(
+                self.config, self.model, rwork, iwork, lwork,
+                ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
+                yw.T, agg_iterators.T,
+                steps=steps, record=self.record.T,
+                continuing=continuing,
+            )
+            # Check for a nonzero exit code.
+            self._check_code(result[-1], "fit_model", steps=steps, rwork=rwork, iwork=iwork, lwork=lwork)
+            # Update "continuing" to be true.
+            continuing = True
+            # If a callback was provided, call it (providing "Details" for the fit).
+            if (callback is not None):
+                from tlux.approximate.axy.summary import Details
+                callback(
+                    Details(
+                        config=self.config, model=self.model,
+                        steps=self.config.steps_taken,
+                        rwork=rwork, iwork=iwork, lwork=lwork,
+                        agg_iterators=agg_iterators, record=self.record,
+                        yw=yw, yi=yi
+                    )
+                )
         # Store the multiplier to be used in embeddings (to level the norm contribution).
         if (self.config.mdo > 0):
             last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
@@ -760,6 +781,8 @@ if __name__ == "__main__":
         m = AXY(
             **settings,
         )
+        # def show_status(details):
+        #     print("status: ", details.steps)
         m.fit(
             ax=(ax.copy() if use_a else None),
             axi=(axi if use_a else None),
@@ -769,7 +792,9 @@ if __name__ == "__main__":
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
             nm = nm,
+            # callback=show_status,
         )
+        exit()
         # Save and load the model.
         print("  saving..", flush=True)
         m.save(path)

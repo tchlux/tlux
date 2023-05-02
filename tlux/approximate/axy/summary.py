@@ -152,7 +152,7 @@ class AxyModel:
 class Details(dict):
     def __init__(self, config, steps=10, ydi=0, ywd=0,
                  model=None, rwork=None, iwork=None, lwork=None,
-                 agg_iterators=None, record=None):
+                 agg_iterators=None, record=None, yw=None, yi=None):
         import numpy as np
         self.config = config
         self.steps = steps
@@ -168,17 +168,19 @@ class Details(dict):
             iwork = np.ones(config.iwork_size, **itype)
         if (lwork is None):
             lwork = np.ones(config.lwork_size, **ltype)
-        agg_iterators = np.ones((5, config.nmt), **ltype)
-        record = np.zeros((6,steps), **ftype)
-        yi = np.zeros((ydi, config.nm), **ltype)
-        yw = np.zeros((ywd, config.nm), **ftype)
+        if (agg_iterators is None):
+            agg_iterators = np.ones((5, config.nmt), **ltype)
+        if (record is None):
+            record = np.zeros((6,steps), **ftype)
+        if (yw is None):
+            yw = np.zeros((ywd, config.nm), **ftype)
+        if (yi is None):
+            yi = np.zeros((ydi, config.nm), **ltype)
         # Store source memory allocations internally.
         self.model = model
         self.rwork = rwork
         self.iwork = iwork
         self.lwork = lwork
-        self.record = record
-        self.agg_iterators = agg_iterators
         # Declare all the special attributes.
         self.update(dict(
             # Model.
@@ -228,13 +230,16 @@ class Details(dict):
             m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nm, config.mds, order="F"),
             # Integer work space.
             axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi < config.eaxi) else np.zeros((0,0), dtype=int),
-            xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
             sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, dtype=int),
+            xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
             a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
             m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
+            update_indices = lwork[config.sui-1:config.eui].reshape(config.num_vars, order="F"),
             # External space.
             yi = yi,
             yw = yw,
+            record = record,
+            agg_iterators = agg_iterators,
         ))
 
     def __getattr__(self, *args, **kwargs):
