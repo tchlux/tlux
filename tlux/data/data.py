@@ -407,6 +407,11 @@ class Data:
             except StopIteration: pass
 
 
+    # Return a short string representation of this object.
+    def __repr__(self):
+        return self.__str__(short=True)
+
+
     # Printout a brief table-format summary of this data.
     def __str__(self, short=False):
         # Special case for being empty.

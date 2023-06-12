@@ -18,14 +18,6 @@ except:
     clib = build_unique()
 
 
-# Create a custom subclass of `c_void_p` that keeps a reference to the
-#  source array and ensures that it is not deleted from memory.
-class ArrayVoidP(ctypes.c_void_p):
-    def __init__(self, array, *args, **kwargs):
-        self._source_array = array
-        super().__init__(*args, **kwargs)
-
-
 # Function for converting arrays into a C compatible type.
 # Inputs:
 #   array - Either an np.ndarray, or any python iterable with a __len__. For an
@@ -33,7 +25,7 @@ class ArrayVoidP(ctypes.c_void_p):
 #           'tobytes'. For arrays of objects or generic iterables, all data will
 #           be treated as pythone 'str' objects.
 # Outputs:
-#   array - The source 'array' object or None, depending on if a reference is needed.
+#   array - A np.ndarray that references the same memory as the following ctypes objects.
 #   voidp - A ctypes.c_void_p object that points to byte
 #           representations of the contents of 'array'
 #   length - The ctypes.c_long number of elements in the array 'voidp'.
@@ -42,7 +34,7 @@ class ArrayVoidP(ctypes.c_void_p):
 #   info - A ctypes.c_char_p that contains the name of the data type stored in 'voidp'.
 def to_bytes(array):
     # If this is a numpy array, then flatten it first (to iterate over elements).
-    if (isinstance(array, np.ndarray)):
+    if (isinstance(array, np.ndarray) and (len(array.shape) > 1)):
         array = array.flatten()
     # If this is a numpy array and it is not contiguous, reallocate.
     if (isinstance(array, np.ndarray) and (not array.data.c_contiguous)):
@@ -51,7 +43,7 @@ def to_bytes(array):
     if (isinstance(array, np.ndarray) 
         and (array.dtype.name != 'object')):
         # Convert it directly into the correctly sized C array.
-        voidp = ArrayVoidP(array, array.ctypes.data)
+        voidp = ctypes.c_void_p(array.ctypes.data)
         length = ctypes.c_long(len(array))
         width = ctypes.c_int(array.dtype.itemsize)
         info = ctypes.c_char_p(array.dtype.name.encode())
@@ -63,12 +55,14 @@ def to_bytes(array):
         length = ctypes.c_long(len(array))
         width = ctypes.c_int(-1)
         info = ctypes.c_char_p(b'object')
+        array = np.fromiter((s for s in charp), dtype=object)
     # Return the final values (be sure to keep a reference to the 'array' so it isn't freed).
-    return voidp, length, width, info
+    return array, voidp, length, width, info
 
 
 # Function for converting objects created with 'to_bytes' back into the
 # source object. Inputs:
+#   array - A vestigial input (can be None) in case 'to_bytes' needed a safety reference.
 #   voidp - A ctypes.c_void_p object that points to an array of data.
 #   length - The ctypes.c_long number of elements in the array 'voidp'.
 #   width - The ctypes.c_int bytes per data object referenced in 'voidp' if the
@@ -78,7 +72,7 @@ def to_bytes(array):
 # Outputs:
 #   array - A np.ndarray object containing the appropriately formed data (either the
 #           correct fixed-width numbers, or python 'str' objects for strings).
-def from_bytes(voidp, length, width, info):
+def from_bytes(array, voidp, length, width, info):
     # Appropriately load the data from bytes.
     if (width.value == -1):
         # If the width is -1, the data is of the 'str' type.
@@ -89,7 +83,7 @@ def from_bytes(voidp, length, width, info):
     else:
         # If the width is not -1, the data is of a fixed-width type.
         # Create a numpy array of the appropriate data type from the raw bytes.
-        voidp = (ctypes.c_void_p * length.value * width.value).from_address(voidp.value)
+        voidp = (ctypes.c_void_p * length.value).from_address(voidp.value)
         array = np.frombuffer(voidp, dtype=info.value.decode(), count=length.value)
     return array
 
@@ -163,8 +157,7 @@ class ByteArray:
         # Convert the array into the expected type.
         array = np.asarray(array, dtype=info)
         # Convert the array (of the expected type) into C-compatible bytes.
-        voidp, length, width, info = to_bytes(array)
-        array = from_bytes(voidp, length, width, info)
+        array, voidp, length, width, info = to_bytes(array)
         # For types that are not strings, we need to convert 'voidp' into an array of pointers.
         if (width.value != -1):
             voidp = (ctypes.c_void_p * length.value)(*(
@@ -177,8 +170,7 @@ class ByteArray:
 # Return the sorted unique elements in an array.
 def unique(array):
     # Create a C compatible version of this array.
-    voidp, length, width, info = to_bytes(array)
-    temp = from_bytes(voidp, length, width, info)
+    array, voidp, length, width, info = to_bytes(array)
     # return sorted(set(map(str,array)))
     # 
     # Call the parallel sort function.
@@ -195,7 +187,7 @@ def unique(array):
     )
     # Transfer the data over to an object that behaves like a list or numpy array,
     # while also including code to free the memory allocated internally when it is deleted.
-    unique_array = from_bytes(sorted_unique, num_unique, width, info)
+    unique_array = from_bytes(None, sorted_unique, num_unique, width, info)
     return ByteArray(unique_array, sorted_unique_pointer, num_unique, width, info, needs_freeing=True)
 
 
@@ -205,10 +197,8 @@ def unique(array):
 def to_int(array, mapping):
     array = np.asarray(array, dtype=mapping.array.dtype).flatten()
     num_array = np.zeros(array.shape, dtype="long")
-    # return num_array
-    # 
     # Get the C-compatible representation of the data in 'array'.
-    voidp, length, width, info = to_bytes(array)
+    _, voidp, length, width, info = to_bytes(array)
     clib.to_int(
         # Configuration.
         mapping.width,
@@ -382,7 +372,7 @@ if __name__ == "__main__":
 
     # Call the functions repeatedly and look for a memory leak.
     # @profile
-    def testing(steps=100000):
+    def testing(steps=10000):
         print("_"*70)
         print(f"Calling {steps} times..")
         for i in range(steps):

@@ -31,11 +31,12 @@ def build_axy():
     # Import the RANDOM module, it is self contained and simple.
     _random = fmodpy.fimport(
         input_fortran_file = os.path.join(_dir, "axy_random.f90"),
+        dependencies = ["pcg32.f90"],
         output_dir = _dir
     )
     # Import the AXY module, it has many dependencies and uses BLAS and LAPACK libraries.
     #   Get the directory for the AXY compiled source code.
-    _dependencies = ["axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"]
+    _dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"]
     _path = os.path.join(_dir, "axy.f90")
     _axy_kwargs = dict(
         input_fortran_file = _path,
