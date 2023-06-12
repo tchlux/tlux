@@ -15,7 +15,8 @@ SCENARIO = dict(
     ado = None,
     mde = None,
     aggregator_only = False,
-    aggregate_pairwise = False,
+    partial_aggregation = False,
+    pairwise_aggregation = False,
     batch_aggregate_constrained = False,
     batch_fixed_constrained = True,
     input_aggregate_categorical = True,
@@ -177,11 +178,6 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     else:
         mns = scenario.get('mns', 0)
         mds = scenario.get('mds', 0)
-    # Aggregator only.
-    if scenario["aggregator_only"]:
-        mns = scenario.get('mns', 0)
-        mds = scenario.get('mds', 0)
-        mdo = scenario.get('mdo', 0)
     # Numeric output.
     if scenario["output_numeric"]:
         if scenario["small_data"]:
@@ -201,6 +197,13 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     else:
         yne = scenario.get('yne', 0)
         ydi = scenario.get('ydi', 0)
+    # Aggregator only.
+    if scenario["aggregator_only"]:
+        mns = scenario.get('mns', 0)
+        mds = scenario.get('mds', 0)
+        mdo = scenario.get('mdo', 0)
+    else:
+        mdo = ydn + yne
     # Weighted output dimensioned.
     if scenario["weighted_output"]:
         if scenario["weights_dimensioned"]:
@@ -229,10 +232,11 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
         mne=mne,
         mds=mds,
         mns=mns,
-        mdo=ydn + yne,
+        mdo=mdo,
         num_threads=num_threads
     )
     # Generate a fit configuration.
+    config.partial_aggregation = scenario.get('partial_aggregation', False)
     config = AXY.new_fit_config(
         nm=nm,
         na=na,
@@ -264,7 +268,7 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     sizes_in = asarray(np.random.randint(0, max(1,round(2*(config.nat / nm_in))), size=(nm_in if config.nat > 0 else 0,)), ltype)
     x_in = asarray(np.random.normal(size=(mdn, nm_in)), ftype)
     xi_in = asarray(np.random.randint(*nm_range, size=(mdi, nm_in)), ltype)
-    y_in = asarray(np.random.normal(size=(ydn, nm_in)), ftype)
+    y_in = asarray(np.random.normal(size=(config.do, nm_in)), ftype)
     if (ydi > 0): yi_in = asarray(np.random.randint(1, yne, size=(ydi, nm_in)), ltype)
     else:         yi_in = None
     yw_in = asarray(np.random.normal(size=(ywd, nm_in)), ftype)
@@ -346,7 +350,8 @@ def scenario_generator(scenario=SCENARIO, randomized=True, seed=None):
         if (s["aggregator_only"] and (
                 s["input_fixed_numeric"] or
                 s["input_fixed_categorical"] or
-                s["model_fixed_layered"]
+                s["model_fixed_layered"] or
+                s["batch_fixed_constrained"]
         )):
             pass
         # Skip the invalid configuration where outputs are NOT weighted and
@@ -361,22 +366,24 @@ def scenario_generator(scenario=SCENARIO, randomized=True, seed=None):
                   s["model_fixed_layered"] or
                   s["model_aggregate_layered"]):
             pass
-        # Skip ss involving the aggregator when it is not present.
+        # Skip scenarios involving the aggregator when it is not present.
         elif ((not s["input_aggregate_numeric"]) and
               (not s["input_aggregate_categorical"]) and
-              (s["batch_aggregate_constrained"] or s["model_aggregate_layered"] or s["aggregate_pairwise"])):
+              (s["batch_aggregate_constrained"] or s["model_aggregate_layered"] or s["pairwise_aggregation"] or s["partial_aggregation"])):
             pass
-        # Skip ss involving the model when it is not present.
-        elif ((not s["input_fixed_numeric"]) and
-              (not s["input_fixed_categorical"]) and
-              (s["batch_aggregate_constrained"] or s["model_aggregate_layered"])):
+        # Skip when there is no input data at all.
+        elif ((not s["input_aggregate_numeric"]) and
+              (not s["input_aggregate_categorical"]) and
+              (not s["input_fixed_numeric"]) and
+              (not s["input_fixed_categorical"])):
             pass
+        # Otherwise, this is a valid scenario.
         else:
             yield s
 
 
 # Initialize an aggregate iterator given a config and list of sizes.
-def initialize_agg_iterator(config, agg_iterators, sizes_in):
+def initialize_agg_iterator(config, agg_iterators, sizes_in, seed=None):
     for i in range(agg_iterators.shape[1]):
         if (sizes_in[i] == 0):
             agg_iterators[:,i] = 0
@@ -385,8 +392,5 @@ def initialize_agg_iterator(config, agg_iterators, sizes_in):
             if config.pairwise_aggregation:
                 agg_iterators[0,i] = agg_iterators[0,i]**2
             agg_iterators[1:,i] = random.initialize_iterator(
-                i_limit=agg_iterators[0,i],
+                i_limit=agg_iterators[0,i], seed=seed
             )
-
-
-

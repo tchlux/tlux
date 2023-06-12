@@ -2,18 +2,21 @@ import numpy as np
 import fmodpy
 
 # Matrix operations module.
-rand = fmodpy.fimport("../axy_random.f90").random
-print()
+random = fmodpy.fimport("../axy_random.f90", dependencies=["pcg32.f90"], name="test_axy_random").random
 
+
+# --------------------------------------------------------------------
+#                            RANDOM_INTEGER
 
 # Make sure that the random integer generation has desired behavior.
 def _test_random_integer():
-    print("Random integer..", flush=True)
+    print("RANDOM_INTEGER..", flush=True)
     counts = {}
+    # trials = 100
     trials = 1000000
     bins = 3
     for i in range(trials):
-        val = rand.random_integer(max_value=bins)
+        val = random.random_integer(max_value=bins)
         counts[val] = counts.get(val,0) + 1
     total_count = sum(counts.values())
     for (v,c) in sorted(counts.items()):
@@ -22,7 +25,39 @@ def _test_random_integer():
         assert (error < 0.001), f"Bad ratio of random integers had value {v} when generating with max_value = {bins}.\n  Ratio was {ratio}\n  Expected {1/bins}"
     print("  passed.", flush=True)
 
-_test_random_integer()
+
+# --------------------------------------------------------------------
+#                            RANDOM_REAL
+
+# Make sure that random real number generation has the desired behavior.
+def _test_random_real():
+    print("RANDOM_REAL..", flush=True)    
+    # trials = 10
+    trials = 100000
+    # 
+    # Generate random numbers.
+    random.seed_random()
+    vals = []
+    for i in range(trials):
+        vals.append( random.random_real(v=True)[1] )
+    # Sort all the random numbers generated.
+    vals = sorted(vals)
+    # Get the list of linearly spaced real numbers of the same sample size over the unit interval.
+    expected = [(i+1)/trials - (1/(2*trials))  for i in range(trials)]
+    # Compute the absolute differences between the the sorted values and the evenly spaced ones.
+    diffs = [abs(v-e) for (v,e) in zip(vals, expected)]
+    # Assert that the maximum difference between the values and a uniform grid is small.
+    assert (max(diffs) < 0.01), f"Unexpectedly lumpy distribution of random real numbers for scalar output."
+    # 
+    # Now repeat, generating all random numbers at once.
+    random.seed_random(30183010)
+    r = np.zeros((max(1,trials // (20*30)), 20, 30), dtype="float32", order="F")
+    random.random_real(r=r, s=r.size)
+    vals = sorted(r.flatten())
+    expected = [(i+1)/r.size - (1/(2*r.size))  for i in range(r.size)]
+    diffs = [abs(v-e) for (v,e) in zip(vals, expected)]
+    assert (max(diffs) < 0.01), f"Unexpectedly lumpy distribution of random real numbers for tensor output."
+    print("  passed.", flush=True)
 
 
 # --------------------------------------------------------------------
@@ -34,9 +69,9 @@ def _test_index_to_pair():
     all_pairs = set()
     # Verify that the pair mapping works forwards and backwards.
     for i in range(1, mv**2+1):
-        pair1, pair2 = rand.index_to_pair(max_value=mv, i=i)
+        pair1, pair2 = random.index_to_pair(max_value=mv, i=i)
         all_pairs.add((pair1, pair2))
-        j = rand.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
+        j = random.pair_to_index(max_value=mv, pair1=pair1, pair2=pair2)
         assert (i == j), f"Index to pair mapping failed for i={i} max_value={limit} pair={pair} ii={j}."
     # Verify that all pairs were actually generated.
     for i in range(1,mv+1):
@@ -44,8 +79,64 @@ def _test_index_to_pair():
             assert ((i,j) in all_pairs), f"Pair {(i,j)} missing from enumerated set." 
     print(" passed")
 
-_test_index_to_pair()
 
+# --------------------------------------------------------------------
+#                        INITIALIZE_ITERATOR
+
+def _test_initialize_iterator():
+    print("INITIALIZE_ITERATOR..", flush=True)
+    nm = 10000
+    max_size = 23
+    seed = 0
+    pairwise = False
+    random.seed_random(seed)
+    # Initialize space to hold iterators.
+    agg_iterators = np.zeros((6,nm), dtype="int64", order="F")    
+    # Create sizes.
+    sizes = np.asarray(
+        [random.random_integer(max_value=max_size) for i in range(nm)],
+        dtype="int64", order="F"
+    )
+    # Initialize all iterators.
+    for i in range(nm):
+        if (sizes[i] == 0):
+            agg_iterators[:,i] = 0
+        else:
+            agg_iterators[0,i] = sizes[i]
+            if pairwise:
+                agg_iterators[0,i] = agg_iterators[0,i]**2
+            agg_iterators[1:,i] = random.initialize_iterator(
+                i_limit=agg_iterators[0,i], seed=seed
+            )
+    # Check that each aggregator works.
+    for i in range(nm):
+        if (sizes[i] == 0): continue
+        # Generate a full loop of values.
+        seen = []
+        *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i])
+        for _ in range(agg_iterators[0,i]):
+            seen.append(next_i)
+            *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i], reshuffle=True)
+        seen_sorted = tuple( sorted(seen) )
+        expected = tuple( range(1,sizes[i]**(2 if pairwise else 1) + 1) )
+        assert (seen_sorted == expected), \
+            f"Aggregate iterator did not produce expected list of elements.\n  {seen_sorted}\n  {expected}\n  {agg_iterators[:,i]}"
+        # Generate another full loop (acknowledging that a reshuffle should have happened).
+        past_seen = seen
+        seen = []
+        *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i])
+        for _ in range(agg_iterators[0,i]):
+            seen.append(next_i)
+            *agg_iterators[1:,i], next_i = random.get_next_index(*agg_iterators[:,i], reshuffle=True)
+        seen_sorted = tuple( sorted(seen) )
+        assert (seen_sorted == expected), \
+            f"Aggregate iterator did not produce expected list of elements.\n  {seen_sorted}\n  {expected}\n  {agg_iterators[:,i]}"
+        # Make sure the two loops aren't equal.
+        if (sizes[i] > 1):
+            assert (tuple(past_seen) != tuple(seen)), f"The two sequences generated were the same.\n  first:  {past_seen}\n  second: {seen}"
+
+    # Done testing.
+    print("  passed.", flush=True)
 
 
 # --------------------------------------------------------------------
@@ -53,7 +144,7 @@ _test_index_to_pair()
 
 # TODO: Add test with large number of vectors, ensure no Inf or Nan generated.
 def _test_random_unit_vectors():
-    print("Random unit vectors..", flush=True)
+    print("RANDOM_UNIT_VECTORS..", flush=True)
     # Generate test data.
     n = 5000 # number of points
     for d in (2,): # 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 60, 120):
@@ -62,7 +153,7 @@ def _test_random_unit_vectors():
 
         # Random unit vectors.
         a = np.zeros((n,d), dtype="float32")
-        rand.random_unit_vectors(a.T)
+        random.random_unit_vectors(a.T)
 
         # Overwrite a with perfectly spaced version for 2 dimensions.
         if (d == 2):
@@ -136,5 +227,36 @@ def _test_random_unit_vectors():
         # Show both plots.
         multiplot([p1, p2], show_legend=False)
 
-_test_random_unit_vectors()
 
+
+if __name__ == "__main__":
+    print()
+    # expected = [121, 72, 47, 110, 69, 116, 59, 90, 17, 32, 71, 70, 93, 76,
+    #             83, 50, 41, 120, 95, 30, 117, 36, 107, 10, 65, 80, 119, 118, 13, 3,
+    #             98, 89, 40, 15, 78, 37, 84, 27, 58, 113, 39, 38, 61, 44, 51, 18, 9,
+    #             88, 63, 85, 4, 75, 106, 33, 48, 87, 86, 109, 92, 99, 66, 57, 8, 111,
+    #             46, 5, 52, 26, 81, 96, 7, 6, 29, 12, 19, 114, 105, 56, 31, 94, 53,
+    #             100, 43, 74, 1, 16, 55, 54, 77, 60, 67, 34, 25, 104, 79, 14, 101, 20,
+    #             91, 49, 64, 103, 102, 108, 115, 82, 73, 24, 62, 21, 68, 11, 42, 97,
+    #             112, 23, 22, 45, 28, 35, 2]
+    # # Manually check the expected trajectory of an iterator.
+    # iterator = [121, 120, 105, 15, 128, 0]
+    # # Generate a full loop of values.
+    # seen = set()
+    # *iterator[1:], next_i = random.get_next_index(*iterator[:], reshuffle=True)
+    # for _ in range(iterator[0]+1):
+    #     print(next_i, end=", ", flush=True)
+    #     seen.add(next_i)
+    #     *iterator[1:], next_i = random.get_next_index(*iterator[:], reshuffle=True)
+    # seen = tuple( sorted(seen) )
+    # expected = tuple( range(1,iterator[0] + 1) )
+    # assert (seen == expected), \
+    #     f"Aggregate iterator did not produce expected list of elements.\n  {seen}\n  {expected}\n  {agg_iterators[:,i]}"
+    # print()
+    # exit()
+
+    _test_random_integer()
+    _test_random_real()
+    _test_index_to_pair()
+    _test_initialize_iterator()
+    # _test_random_unit_vectors()

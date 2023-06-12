@@ -152,7 +152,7 @@ class AxyModel:
 class Details(dict):
     def __init__(self, config, steps=10, ydi=0, ywd=0,
                  model=None, rwork=None, iwork=None, lwork=None,
-                 agg_iterators=None, record=None, yw=None, yi=None):
+                 agg_iterators_in=None, record=None, yw=None, yi=None):
         import numpy as np
         self.config = config
         self.steps = steps
@@ -168,14 +168,14 @@ class Details(dict):
             iwork = np.ones(config.iwork_size, **itype)
         if (lwork is None):
             lwork = np.ones(config.lwork_size, **ltype)
-        if (agg_iterators is None):
-            agg_iterators = np.ones((5, config.nmt), **ltype)
+        if (agg_iterators_in is None):
+            agg_iterators_in = np.ones((6, config.nmt if config.ado > 0 else 0), **ltype)
         if (record is None):
             record = np.zeros((6,steps), **ftype)
         if (yw is None):
-            yw = np.zeros((ywd, config.nm), **ftype)
+            yw = np.zeros((ywd, config.nms), **ftype)
         if (yi is None):
-            yi = np.zeros((ydi, config.nm), **ltype)
+            yi = np.zeros((ydi, config.nms), **ltype)
         # Store source memory allocations internally.
         self.model = model
         self.rwork = rwork
@@ -199,7 +199,7 @@ class Details(dict):
             ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
             ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
             ay_shift = model[config.aoss-1:config.aose].reshape(config.ado, order="F"),
-            x_shift = model[config.miss-1:config.mise].reshape(config.mdn, order="F") if (config.mdn > 0) else None,
+            x_shift = model[config.miss-1:config.mise].reshape(config.mdn, order="F"),
             x_rescale = model[config.mims-1:config.mime].reshape(config.mdn, config.mdn, order="F"),
             y_shift = model[config.moss-1:config.mose].reshape(config.do, order="F"),
             y_rescale = model[config.moms-1:config.mome].reshape(config.do, config.do, order="F"),
@@ -214,12 +214,12 @@ class Details(dict):
             a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
             ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
             ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
-            x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nm, order="F"),
+            x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nms, order="F"),
             m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
-            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nm, config.mds, config.mns+1, order="F"),
-            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nm, config.mds, config.mns+1, order="F"),
-            y = rwork[config.smyb-1:config.emyb].reshape(config.do, config.nm, order="F"),
-            y_gradient = rwork[config.syg-1:config.eyg].reshape(config.do, config.nm, order="F"),
+            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nms, config.mds, config.mns+1, order="F"),
+            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nms, config.mds, config.mns+1, order="F"),
+            y = rwork[config.smyb-1:config.emyb].reshape(config.do, config.nms, order="F"),
+            y_gradient = rwork[config.syg-1:config.eyg].reshape(config.do, config.nms, order="F"),
             axi_shift = rwork[config.saxis-1:config.eaxis].reshape(config.ade, order="F"),
             axi_rescale = rwork[config.saxir-1:config.eaxir].reshape(config.ade, config.ade, order="F"),
             xi_shift = rwork[config.smxis-1:config.emxis].reshape(config.mde, order="F"),
@@ -227,11 +227,11 @@ class Details(dict):
             a_lengths = rwork[config.sal-1:config.eal].reshape(config.ads, config.num_threads, order="F"),
             m_lengths = rwork[config.sml-1:config.eml].reshape(config.mds, config.num_threads, order="F"),
             a_state_temp = rwork[config.sast-1:config.east].reshape(config.na, config.ads, order="F"),
-            m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nm, config.mds, order="F"),
+            m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nms, config.mds, order="F"),
             # Integer work space.
-            axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi < config.eaxi) else np.zeros((0,0), dtype=int),
-            sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, dtype=int),
-            xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nm, order="F"),
+            axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi <= config.eaxi) else np.zeros((0,config.na), **ltype),
+            sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, **ltype),
+            xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nms, order="F") if (config.smxi <= config.emxi) else np.zeros((0,config.nms), **ltype),
             a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
             m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
             update_indices = lwork[config.sui-1:config.eui].reshape(config.num_vars, order="F"),
@@ -239,10 +239,71 @@ class Details(dict):
             yi = yi,
             yw = yw,
             record = record,
-            agg_iterators = agg_iterators,
+            agg_iterators_in = agg_iterators_in,
         ))
 
     def __getattr__(self, *args, **kwargs):
         return self.__getitem__(*args, **kwargs)
     def __setattr__(self, *args, **kwargs):
         return self.__setitem__(*args, **kwargs)
+    def __str__(self):
+        assert False
+        return \
+             "Details:\n"+\
+            f"  model:   {self.model.dtype.name:8s} {self.model.shape}\n"+\
+            f"  rwork:   {self.rwork.dtype.name:8s} {self.rwork.shape}\n"+\
+            f"  iwork:   {self.iwork.dtype.name:8s} {self.iwork.shape}\n"+\
+            f"  lwork:   {self.lwork.dtype.name:8s} {self.lwork.shape}\n"+\
+            f"  a_embeddings:     {self.a_embeddings.shape}\n"+\
+            f"  a_input_vecs:     {self.a_input_vecs.shape}\n"+\
+            f"  a_input_shift:    {self.a_input_shift.shape}\n"+\
+            f"  a_state_vecs:     {self.a_state_vecs.shape}\n"+\
+            f"  a_state_shift:    {self.a_state_shift.shape}\n"+\
+            f"  a_output_vecs:    {self.a_output_vecs.shape}\n"+\
+            f"  m_embeddings:     {self.m_embeddings.shape}\n"+\
+            f"  m_input_vecs:     {self.m_input_vecs.shape}\n"+\
+            f"  m_input_shift:    {self.m_input_shift.shape}\n"+\
+            f"  m_state_vecs:     {self.m_state_vecs.shape}\n"+\
+            f"  m_state_shift:    {self.m_state_shift.shape}\n"+\
+            f"  m_output_vecs:    {self.m_output_vecs.shape}\n"+\
+            f"  ax_shift:         {self.ax_shift.shape}\n"+\
+            f"  ax_rescale:       {self.ax_rescale.shape}\n"+\
+            f"  ay_shift:         {self.ay_shift.shape}\n"+\
+            f"  x_shift:          {getattr(self.x_shift, 'shape', None)}\n"+\
+            f"  x_rescale:        {self.x_rescale.shape}\n"+\
+            f"  y_shift:          {self.y_shift.shape}\n"+\
+            f"  y_rescale:        {self.y_rescale.shape}\n"+\
+            f"  model_grad:       {self.model_grad.shape}\n"+\
+            f"  model_grad_mean:  {self.model_grad_mean.shape}\n"+\
+            f"  model_grad_curv:  {self.model_grad_curv.shape}\n"+\
+            f"  best_model:       {self.best_model.shape}\n"+\
+            f"  ax:               {self.ax.shape}\n"+\
+            f"  a_emb_temp:       {self.a_emb_temp.shape}\n"+\
+            f"  a_states:         {self.a_states.shape}\n"+\
+            f"  a_grads:          {self.a_grads.shape}\n"+\
+            f"  ay:               {self.ay.shape}\n"+\
+            f"  ay_gradient:      {self.ay_gradient.shape}\n"+\
+            f"  x:                {self.x.shape}\n"+\
+            f"  m_emb_temp:       {self.m_emb_temp.shape}\n"+\
+            f"  m_states:         {self.m_states.shape}\n"+\
+            f"  m_grads:          {self.m_grads.shape}\n"+\
+            f"  y:                {self.y.shape}\n"+\
+            f"  y_gradient:       {self.y_gradient.shape}\n"+\
+            f"  axi_shift:        {self.axi_shift.shape}\n"+\
+            f"  axi_rescale:      {self.axi_rescale.shape}\n"+\
+            f"  xi_shift:         {self.xi_shift.shape}\n"+\
+            f"  xi_rescale:       {self.xi_rescale.shape}\n"+\
+            f"  a_lengths:        {self.a_lengths.shape}\n"+\
+            f"  m_lengths:        {self.m_lengths.shape}\n"+\
+            f"  a_state_temp:     {self.a_state_temp.shape}\n"+\
+            f"  m_state_temp:     {self.m_state_temp.shape}\n"+\
+            f"  axi:              {self.axi.shape}\n"+\
+            f"  sizes:            {self.sizes.shape}\n"+\
+            f"  xi:               {self.xi.shape}\n"+\
+            f"  a_order:          {self.a_order.shape}\n"+\
+            f"  m_order:          {self.m_order.shape}\n"+\
+            f"  update_indices:   {self.update_indices.shape}\n"+\
+            f"  yi:               {self.yi.shape}\n"+\
+            f"  yw:               {self.yw.shape}\n"+\
+            f"  record:           {self.record.shape}\n"+\
+            f"  agg_iterators_in: {self.agg_iterators_in.shape}\n"

@@ -249,8 +249,8 @@ class AXY:
         rwork[:] = 0.0 # set to zeros because lots of gradients are stored there.
         iwork = np.ones(self.config.iwork_size, dtype="int32")
         lwork = np.ones(self.config.lwork_size, dtype="int64")
-        agg_iterators = np.ones((nm_total, 5), dtype="int64")
-        yw = np.ones((nm, yw_in.shape[1]), dtype="float32")
+        agg_iterators = np.ones((nm_total if sizes.shape[0] > 0 else 0, 6), dtype="int64")
+        yw = np.ones((self.config.nms, yw_in.shape[1]), dtype="float32")
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         # Check all shapes to validate.
         info = self.AXY.fit_check(self.config, self.model, rwork, iwork, lwork,
@@ -258,7 +258,7 @@ class AXY:
                                   yw.T, agg_iterators.T,
                                   steps=steps, record=self.record.T, sum_squared_error=0.0)
         # Check for a nonzero exit code.
-        self._check_code(info, "fit_check")
+        self._check_code(info, "fit_precheck")
         # Store the number of steps already taken.
         continuing = False
         target_steps = self.config.steps_taken + steps
@@ -283,7 +283,7 @@ class AXY:
                         config=self.config, model=self.model,
                         steps=self.config.steps_taken,
                         rwork=rwork, iwork=iwork, lwork=lwork,
-                        agg_iterators=agg_iterators, record=self.record,
+                        agg_iterators_in=agg_iterators, record=self.record,
                         yw=yw, yi=yi
                     )
                 )
@@ -347,6 +347,7 @@ class AXY:
                 i_step = self.config.i_step,
                 i_mult = self.config.i_mult,
                 i_mod = self.config.i_mod,
+                i_iter = self.config.i_iter,
             )
             self.config.nm = nmt
             self.config.nmt = nmt
@@ -354,9 +355,10 @@ class AXY:
             self.config.i_step = 1
             self.config.i_mult = 1
             self.config.i_mod = nmt
+            self.config.i_iter = 0
             # Initialize all aggregate input iterators.
             fits_all = na >= sum(sizes**2)
-            agg_iterators = np.ones((5, nmt), dtype="int64", order="F")
+            agg_iterators = np.ones((6, nmt), dtype="int64", order="F")
             for i in range(agg_iterators.shape[1]):
                 if (sizes[i] == 0):
                     agg_iterators[:,i] = 0
@@ -366,7 +368,7 @@ class AXY:
                         agg_iterators[0,i] = agg_iterators[0,i]**2
                     # If all fit, use a deterministic iterators [0, 1, 2, ...]
                     if fits_all:
-                        agg_iterators[1:,i] = (0, 1, 1, agg_iterators[0,i]) # next, step, mult, mod
+                        agg_iterators[1:,i] = (0, 1, 1, agg_iterators[0,i], 0) # next, step, mult, mod
                     # Otherwise, use a random linear iterator.
                     else:
                         # TODO: This line of code will break since INITIALIZE_ITERATOR
@@ -386,9 +388,9 @@ class AXY:
             xi = np.zeros((xi_in.shape[0], nmt), dtype="int64", order="F")
             y_in = yw_in = np.zeros((0,nmt), dtype="float32", order="F")
             # Use FETCH_DATA to do the pairwise aggreagtion.
-            config, agg_iterators, ax, axi, sizes, x, xi, y_in, yw_in, na = self.AXY.fetch_data(
+            config, agg_iterators, ax, axi, sizes, x, xi, y_in, yw_in, na, nm = self.AXY.fetch_data(
                 config = self.config,
-                agg_iterators = agg_iterators,
+                agg_iterators_in = agg_iterators,
                 ax_in = ax_in,
                 ax = ax,
                 axi_in = axi_in,
@@ -412,8 +414,8 @@ class AXY:
             ax = ax[:,:na].T
             axi = axi[:,:na].T
             ay = np.zeros((na, config.ado+1), dtype="float32", order="F")
-            x = x.T
-            xi = xi.T
+            x = x[:,:nm].T
+            xi = xi[:,:nm].T
         else:
             # ------------------------------------------------------------
             # 
@@ -439,9 +441,15 @@ class AXY:
         # ------------------------------------------------------------
         # Embed the categorical inputs as numeical inputs.
         self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
+        # Disable partial aggregation if it was enabled.
+        pa = self.config.partial_aggregation
+        self.config.partial_aggregation = False
         # Evaluate the model.
         result = self.AXY.evaluate(self.config, self.model, ax.T, ay, sizes,
                                    x.T, y.T, a_states, m_states, info)
+        # Reset partial aggregation.
+        self.config.partial_aggregation = pa
+        # Check for errors.
         self._check_code(result[-1], "evaluate")
         # Save the states if that's requested.
         if (save_states):
@@ -600,7 +608,9 @@ if __name__ == "__main__":
     import fmodpy
     RANDOM_MOD = fmodpy.fimport(
         input_fortran_file = "axy_random.f90",
+        dependencies = ["pcg32.f90"],
         name = "axy_random",
+        autocompile = False,
         wrap = True,
         # rebuild = True,
         verbose = False,
@@ -608,14 +618,15 @@ if __name__ == "__main__":
     ).random
     AXY_MOD = fmodpy.fimport(
         input_fortran_file = "axy.f90",
-        dependencies = ["axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+        dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
         name = "axy",
         blas = True,
         lapack = True,
         omp = True,
         wrap = True,
+        autocompile = False,
         # rebuild = True,
-        verbose = True,
+        verbose = False,
         f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
     ).axy
 
@@ -650,7 +661,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = False
+    use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -691,7 +702,8 @@ if __name__ == "__main__":
         # ay_normalized = True,
         # x_normalized = True,
         # y_normalized = True,
-        # pairwise_aggregation = True,
+        pairwise_aggregation = False,
+        partial_aggregation = False,
         # keep_best = False,
         # **ONLY_SGD
     )
@@ -794,7 +806,6 @@ if __name__ == "__main__":
             nm = nm,
             # callback=show_status,
         )
-        exit()
         # Save and load the model.
         print("  saving..", flush=True)
         m.save(path)
