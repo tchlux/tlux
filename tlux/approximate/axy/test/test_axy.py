@@ -5,7 +5,6 @@
 #  - Make sure the above function works in higher dimension (use PCA?).
 
 # import fmodpy
-# 
 # # Get the directory for the AXY compiled source code.
 # AXY = fmodpy.fimport(
 #     input_fortran_file = "../axy.f90",
@@ -20,8 +19,6 @@
 #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
 # ).axy
 # help(AXY)
-
-# rm -f test_axy_module/test_axy_module.arm64.so && 
 
 
 # Overwrite the typical "AXY" library with the testing one.
@@ -397,17 +394,17 @@ def _test_embed():
     axi_in = raw_data["axi_in"]
     sizes_in = raw_data["sizes_in"]
     axi_in[0,:] = 0
-    details.agg_iterators[0,:] = sizes_in[:]**2 # limit
-    details.agg_iterators[1,:] = 0 # next
-    details.agg_iterators[2,:] = 1 # mult
-    details.agg_iterators[3,:] = 1 # step
-    details.agg_iterators[4,:] = sizes_in[:]**2 # mod
-    details.agg_iterators[5,:] = 0 # iter
+    details.agg_iterators_in[0,:] = sizes_in[:]**2 # limit
+    details.agg_iterators_in[1,:] = 0 # next
+    details.agg_iterators_in[2,:] = 1 # mult
+    details.agg_iterators_in[3,:] = 1 # step
+    details.agg_iterators_in[4,:] = sizes_in[:]**2 # mod
+    details.agg_iterators_in[5,:] = 0 # iter
     print("axi_in: \n", axi_in.T)
     (
         config, agg_iterators, ax, axi, f_sizes, x, xi, y, yw, f_na
     ) = AXY.fetch_data(
-        config=config, agg_iterators_in=details.agg_iterators, **raw_data, **data,
+        config=config, agg_iterators_in=details.agg_iterators_in, **raw_data, **data,
     )
     print("axi: \n", axi.T)
     # Once we have fetched data that includes pairs, we should verify that they are embedded correctly.
@@ -416,22 +413,11 @@ def _test_embed():
 
 
 
-
 # --------------------------------------------------------------------
 #                           EVALUATE
 
-# Define a function that correct casts the data to the desired type.
-def cast(arr, dtype):
-    arr = np.asarray(arr)
-    if (type(dtype) is type):
-        arr = np.asarray(
-            [dtype(v) for v in arr.flatten()],
-            dtype=dtype,
-            order="F"
-        ).reshape(arr.shape)            
-    else:
-        arr = np.asarray(arr, dtype=dtype, order="F")
-    return arr
+from tlux.approximate.axy.axy_py import cast
+from tlux.approximate.axy.axy_py import evaluate as py_evaluate
 
 # Fortran evaluation.
 #   ax, axi, ay, sizes, x, xi, y, a_states, m_states
@@ -454,169 +440,6 @@ def f_evaluate(config, model, **data):
     check_code(local_info, "AXY.evaluate")
     # Return the dictionary of data values.
     return local_data
-
-# Define the full EVALUATE function in python (testing via reimplementation).
-def py_evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32",
-                states=False, **unused_kwargs):
-    # Get some constants.
-    nm = x.shape[1]
-    na = ax.shape[1]
-    m = AxyModel(config, cast(model, dtype))
-    state_values = {}
-    # Embed the AXI values.
-    ax_embedded = cast(np.zeros((config.adi, na)), dtype)
-    for n in range(axi.shape[1]):
-        ax_embedded[:config.adn,n] = ax[:config.adn,n]
-        for d in range(axi.shape[0]):
-            e = axi[d,n]
-            if (e > 0) and (e <= config.ane):
-                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
-            elif (e > config.ane):
-                e1, e2 = random.index_to_pair(max_value=config.ane+1, i=e-config.ane)
-                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1-1] - m.a_embeddings[:,e2-1-1]
-        if (axi.shape[0] > 1):
-            ax_embedded[-config.ade:,n] /= axi.shape[0]
-    ax = ax_embedded
-    state_values["ax"] = ax
-    # Embed the XI values.
-    x_embedded = cast(np.zeros((config.mdi, nm)), dtype)
-    for n in range(xi.shape[1]):
-        x_embedded[:config.mdn,n] = x[:config.mdn,n]
-        for d in range(xi.shape[0]):
-            e = xi[d,n]
-            if (e > 0) and (e <= config.mne):
-                x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
-            elif (e > config.mne):
-                e1, e2 = random.index_to_pair(max_value=config.mne, i=e)
-                x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
-        if (xi.shape[0] > 1):
-            x_embedded[-config.mde:,n] /= xi.shape[0]
-    x = x_embedded
-    state_values["x"] = x
-    # Initialize a holder for the output.
-    y = cast(np.zeros((config.do, nm)), dtype)
-    # Evaluate the aggregator.
-    if (config.ado > 0):
-        if (config.normalize and (config.adn > 0)):
-            # Add the shift term (across all point column vectors).
-            ax[:config.adn,:] = (ax[:config.adn,:].T + m.ax_shift).T
-            # Replace all NaN or Inf values
-            ax[:config.adn,:] = np.where(
-                np.logical_or(
-                    np.isnan(ax[:config.adn,:].astype("float32")),
-                    np.isinf(ax[:config.adn,:].astype("float32")),
-                ),
-                0.0,
-                ax[:config.adn,:]
-            )
-            # Apply the input multiplier.
-            if (config.needs_scaling):
-                ax[:config.adn,:] = m.ax_rescale.T @ ax[:config.adn,:]
-        # Evaluate the MLP.
-        values = ax
-        state_values["a_states"] = []
-        if (config.ans > 0):
-            # Apply input transformation.
-            values = np.clip(
-                ((values.T @ m.a_input_vecs) + m.a_input_shift).T,
-                config.discontinuity, float('inf')
-            )
-            state_values["a_states"].append(values)
-            # Apply internal transformations.
-            for i in range(config.ans-1):
-                values = np.clip(
-                    ((values.T @ m.a_state_vecs[:,:,i]) + m.a_state_shift[:,i]).T,
-                    config.discontinuity, float('inf')
-                )
-                state_values["a_states"].append(values)
-        state_values["a_states"] = np.asarray(state_values["a_states"]).T
-        # Apply output transformation.
-        ay = (values.T @ m.a_output_vecs[:,:])
-        state_values["ay"] = ay
-        ay_error = ay[:,config.ado:config.ado+1]  # extract +1 for error prediction
-        ay = ay[:,:config.ado] # strip off +1 for error prediction
-        # If there is a following model..
-        if (config.mdo > 0):
-            # Apply output shift.
-            ay[:,:] = (ay + m.ay_shift)
-            # Compute the first aggregator output embedding position.
-            e = config.mdn + config.mde
-            # Set the aggregator output to be a slice of X.
-            agg_out = x[e:,:]
-        else:
-            # Set the aggregator output to be Y.
-            agg_out = y[:,:]
-        # Aggregate the batches. With partial aggregation, we have one output for
-        #  partial mean starting from the "last" aggregate output.
-        if (config.partial_aggregation):
-            f_start = 0
-            a_start = 0
-            for i,s in enumerate(sizes):
-                a_end = a_start + s
-                f_end = f_start + max(1,s)
-                for out_i, agg_i in zip(range(f_end-1, f_start-1, -1), range(a_end-1, a_start-1, -1)):
-                    num_elements = a_end - agg_i
-                    agg_out[:,out_i] = ay[agg_i:a_end,:config.ado].sum(axis=0) / num_elements
-                # When there is no size, a zero value is assigned.
-                if (s == 0):
-                    agg_out[:,f_end-1] = 0.0
-                # Transition the start for the next element.
-                a_start = a_end
-                f_start = f_end
-        # Without partial aggregation, we only compute the mean all outputs in each group.
-        else:
-            a = 0
-            for i,s in enumerate(sizes):
-                if (s > 0):
-                    agg_out[:,i] = ay[a:a+s,:config.ado].sum(axis=0) / s
-                else:
-                    agg_out[:,i] = 0
-                a += s
-    # Evaluate the fixed model.
-    if (config.mdo > 0):
-        if (config.normalize and (config.mdn > 0)):
-            # Add the shift term (across all point column vectors).
-            x[:config.mdn,:] = (x[:config.mdn,:].T + m.x_shift).T
-            # Replace all NaN or Inf values
-            x[:config.mdn,:] = np.where(
-                np.logical_or(
-                    np.isnan(x[:config.mdn,:].astype("float32")),
-                    np.isinf(x[:config.mdn,:].astype("float32")),
-                ),
-                0.0,
-                x[:config.mdn,:]
-            )
-            # Apply the input multiplier.
-            if (config.needs_scaling):
-                x[:config.mdn,:] = m.x_rescale.T @ x[:config.mdn,:]
-        # Evaluate the MLP.
-        values = x
-        state_values["m_states"] = []
-        if (config.mns > 0):
-            # Apply input transformation.
-            values = np.clip(
-                ((values.T @ m.m_input_vecs) + m.m_input_shift).T,
-                config.discontinuity, float('inf')
-            )
-            state_values["m_states"].append(values)
-            # Apply internal transformations.
-            for i in range(config.mns-1):
-                values = np.clip(
-                    ((values.T @ m.m_state_vecs[:,:,i]) + m.m_state_shift[:,i]).T,
-                    config.discontinuity, float('inf')
-                )
-                state_values["m_states"].append(values)
-        state_values["m_states"] = np.asarray(state_values["m_states"]).T
-        # Apply output transformation.
-        y = (values.T @ m.m_output_vecs[:,:]).T
-    # Apply final normalization.
-    if (config.normalize):
-        if (config.needs_scaling):
-            y[:,:] = m.y_rescale.T @ y
-        y[:,:] = (y.T + m.y_shift).T
-    state_values["y"] = y
-    # Return the final values.
-    return state_values
 
 
 def _test_evaluate():
@@ -649,7 +472,7 @@ def _test_evaluate():
             summary += f" {v.dtype if hasattr(v, 'dtype') else type(v).__name__} {k} {v.shape if hasattr(v, 'shape') else ''}\n"
         summary += "\n"
         # Fetch and data (for model evaluation).
-        initialize_agg_iterator(config, details.agg_iterators, raw_data["sizes_in"], seed=seed)
+        initialize_agg_iterator(config, details.agg_iterators_in, raw_data["sizes_in"], seed=seed)
         # Place a temporary value that is valid into the "SIZES" array.
         if (data["sizes"].size > 0):
             data["sizes"] *= 0
@@ -662,12 +485,12 @@ def _test_evaluate():
         check_code(info, "check_shape")
         # Fetch some raw data into the local placeholders.
         (
-            config, details.agg_iterators,
+            config, details.agg_iterators_in,
             data["ax"], data["axi"], data["sizes"],
             data["x"], data["xi"], data["y"], data["yw"],
             data["na"], data["nm"],
         ) = AXY.fetch_data(
-            config=config, agg_iterators_in=details.agg_iterators,
+            config=config, agg_iterators_in=details.agg_iterators_in,
             ax_in=raw_data["ax_in"], ax=data["ax"],
             axi_in=raw_data["axi_in"], axi=data["axi"],
             sizes_in=raw_data["sizes_in"], sizes=data["sizes"],
@@ -798,14 +621,14 @@ def _test_model_gradient():
 
 
         # Fetch and embed data (for model evaluation).
-        initialize_agg_iterator(config, details.agg_iterators, raw_data["sizes_in"], seed=seed)
+        initialize_agg_iterator(config, details.agg_iterators_in, raw_data["sizes_in"], seed=seed)
         (
-            config, details.agg_iterators,
+            config, details.agg_iterators_in,
             data["ax"], data["axi"], data["sizes"],
             data["x"], data["xi"], data["y"], data["yw"],
             data["na"], data["nm"],
         ) = AXY.fetch_data(
-            config=config, agg_iterators_in=details.agg_iterators,
+            config=config, agg_iterators_in=details.agg_iterators_in,
             ax_in=raw_data["ax_in"], ax=data["ax"],
             axi_in=raw_data["axi_in"], axi=data["axi"],
             sizes_in=raw_data["sizes_in"], sizes=data["sizes"],

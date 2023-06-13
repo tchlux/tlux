@@ -154,8 +154,6 @@ class Details(dict):
                  model=None, rwork=None, iwork=None, lwork=None,
                  agg_iterators_in=None, record=None, yw=None, yi=None):
         import numpy as np
-        self.config = config
-        self.steps = steps
         # Generic allocations and objects.
         ftype = dict(order="F", dtype="float32")
         itype = dict(order="F", dtype="int32")
@@ -177,6 +175,7 @@ class Details(dict):
         if (yi is None):
             yi = np.zeros((ydi, config.nms), **ltype)
         # Store source memory allocations internally.
+        self.config = config
         self.model = model
         self.rwork = rwork
         self.iwork = iwork
@@ -247,7 +246,6 @@ class Details(dict):
     def __setattr__(self, *args, **kwargs):
         return self.__setitem__(*args, **kwargs)
     def __str__(self):
-        assert False
         return \
              "Details:\n"+\
             f"  model:   {self.model.dtype.name:8s} {self.model.shape}\n"+\
@@ -307,3 +305,22 @@ class Details(dict):
             f"  yw:               {self.yw.shape}\n"+\
             f"  record:           {self.record.shape}\n"+\
             f"  agg_iterators_in: {self.agg_iterators_in.shape}\n"
+
+
+# Provide a function that can be used as the default callback. It takes
+#  a Details object describing the current state of the model fit and
+#  produces the current status of the fit.
+def mse_and_time(details, end="\r", flush=True, **print_kwargs):
+    steps_taken = details.config.steps_taken
+    if (steps_taken == 0):
+        print( " initializing for fit..", end=end, flush=flush)
+    else:
+        # Get the best MSE that's been observed as well as the current.
+        mse_record = details.record[:steps_taken,0]
+        current_mse = mse_record[-1]
+        best_mse_index = np.argmin(mse_record)
+        best_mse = mse_record[best_mse_index]
+        steps_since = -(steps_taken - best_mse_index - 1)
+        steps_remaining = details.record.shape[0] - steps_taken
+        print(f" {steps_taken:5d}  ({current_mse:.2e})  [{best_mse:.2e}] {steps_remaining}{steps_since}", end=end, flush=flush)
+

@@ -1,7 +1,9 @@
 import os, re, math, sys, logging
 import numpy as np
 from tlux.approximate.axy.preprocessing import to_array
+from tlux.approximate.axy.summary import Details, mse_and_time
 from tlux.unique import ByteArray
+
 
 # TODO:
 #  - create a 'plot_snapshot' method that creates a Graph of the model weights,
@@ -120,61 +122,14 @@ class AXY:
                 reason = reason[reason.index("!")+1:].strip()
             else:
                 reason = ""
-            # Show the record if the crash was during a fit.
-            if ((method == "fit_model") and (SHOW_FAILURE_PLOT)):
-                print()
-                from tlux.plot import Plot
-                p = Plot("Model training record")
-                # Rescale the columns of the record for visualization.
-                record = self.record
-                i = record.shape[0]
-                step_indices = list(range(1,i+1))
-                p.add("MSE", step_indices, record[:i,0], color=1, mode="lines")
-                p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines")
-                p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines")
-                p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines")
-                p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines")
-                p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines")
-                p.show(show=False, y_range=[-.2, 1.2])
-                from tlux.math import project
-                from tlux.approximate.axy.summary import Details
-                p = Plot("Data and weight projections")
-                deets = Details(config=self.config, model=self.model, **info)
-                for (attr,val) in sorted(deets.items()):
-                    if ((attr in {"record", "model_grad", "agg_iterators", "a_order", "m_order", "a_lengths", "m_lengths"}) or
-                        (not hasattr(val, "size")) or
-                        (val.size <= 0) or
-                        (not hasattr(val, "shape")) or
-                        (len(val.shape) not in {2,3})
-                    ): continue
-                    # Handle possible matrices of data.
-                    if (len(val.shape) == 2):
-                        print(f" plotting '{attr}'.. {val.shape}")
-                        if (attr == "ay"):
-                            val = val.T
-                        minval = np.nanmin(val)
-                        maxval = np.nanmax(val)
-                        p.add(attr+f" ({minval:.2e}, {maxval:.2e})",
-                              *project(val[:1000,:1000].T, 2).T)
-                    # Handle possible stacked matrices (state weights, state values).
-                    elif (len(val.shape) == 3):
-                        print(f" plotting '{attr}'..")
-                        for i in range(val.shape[-1]):
-                            print(f"   {i+1}.. {val[:,:,i].shape}")
-                            minval = np.nanmin(val)
-                            maxval = np.nanmax(val)
-                            p.add(attr+f" {i+1} ({minval:.2e}, {maxval:.2e})",
-                                  *project(val[:1000,:1000,i].T, 2).T)
-                print()
-                p.show(append=True, show=True)
-            # Raise an assertion error.
-            assert (exit_code == 0), f"AXY.{method} returned nonzero exit code {exit_code}. {reason}"
+            # Raise the error.
+            raise(RuntimeError(f"AXY.{method} returned nonzero exit code {exit_code}. {reason}"))
 
 
     # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
     def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, nm=None, na=None,
-            callback=None, **kwargs):
+            callback=mse_and_time, **kwargs):
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "AXY.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for aggregate inputs.
@@ -277,7 +232,6 @@ class AXY:
             continuing = True
             # If a callback was provided, call it (providing "Details" for the fit).
             if (callback is not None):
-                from tlux.approximate.axy.summary import Details
                 callback(
                     Details(
                         config=self.config, model=self.model,
@@ -945,3 +899,56 @@ if __name__ == "__main__":
     else:
         p.show(append=True, show=True)
     print("", "done.", flush=True)
+
+
+# 2023-06-12 20:45:01
+# 
+            ######################################################################################################################
+            # # Show the record if the crash was during a fit.                                                                   #
+            # if ((method == "fit_model") and (SHOW_FAILURE_PLOT)):                                                              #
+            #     print()                                                                                                        #
+            #     from tlux.plot import Plot                                                                                     #
+            #     p = Plot("Model training record")                                                                              #
+            #     # Rescale the columns of the record for visualization.                                                         #
+            #     record = self.record                                                                                           #
+            #     i = record.shape[0]                                                                                            #
+            #     step_indices = list(range(1,i+1))                                                                              #
+            #     p.add("MSE", step_indices, record[:i,0], color=1, mode="lines")                                                #
+            #     p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines")                                       #
+            #     p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines")                                         #
+            #     p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines")                                       #
+            #     p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines")                                   #
+            #     p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines")                                   #
+            #     p.show(show=False, y_range=[-.2, 1.2])                                                                         #
+            #     from tlux.math import project                                                                                  #
+            #     from tlux.approximate.axy.summary import Details                                                               #
+            #     p = Plot("Data and weight projections")                                                                        #
+            #     deets = Details(config=self.config, model=self.model, **info)                                                  #
+            #     for (attr,val) in sorted(deets.items()):                                                                       #
+            #         if ((attr in {"record", "model_grad", "agg_iterators", "a_order", "m_order", "a_lengths", "m_lengths"}) or #
+            #             (not hasattr(val, "size")) or                                                                          #
+            #             (val.size <= 0) or                                                                                     #
+            #             (not hasattr(val, "shape")) or                                                                         #
+            #             (len(val.shape) not in {2,3})                                                                          #
+            #         ): continue                                                                                                #
+            #         # Handle possible matrices of data.                                                                        #
+            #         if (len(val.shape) == 2):                                                                                  #
+            #             print(f" plotting '{attr}'.. {val.shape}")                                                             #
+            #             if (attr == "ay"):                                                                                     #
+            #                 val = val.T                                                                                        #
+            #             minval = np.nanmin(val)                                                                                #
+            #             maxval = np.nanmax(val)                                                                                #
+            #             p.add(attr+f" ({minval:.2e}, {maxval:.2e})",                                                           #
+            #                   *project(val[:1000,:1000].T, 2).T)                                                               #
+            #         # Handle possible stacked matrices (state weights, state values).                                          #
+            #         elif (len(val.shape) == 3):                                                                                #
+            #             print(f" plotting '{attr}'..")                                                                         #
+            #             for i in range(val.shape[-1]):                                                                         #
+            #                 print(f"   {i+1}.. {val[:,:,i].shape}")                                                            #
+            #                 minval = np.nanmin(val)                                                                            #
+            #                 maxval = np.nanmax(val)                                                                            #
+            #                 p.add(attr+f" {i+1} ({minval:.2e}, {maxval:.2e})",                                                 #
+            #                       *project(val[:1000,:1000,i].T, 2).T)                                                         #
+            #     print()                                                                                                        #
+            #     p.show(append=True, show=True)                                                                                 #
+            ######################################################################################################################

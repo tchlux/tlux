@@ -144,7 +144,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: MIN_STEPS_TO_STABILITY = 1 ! Minimum number of steps before allowing model saves and curvature approximation.
      INTEGER(KIND=INT64) :: MAX_BATCH = 10000 ! Max number of points in one batch matrix multiplication.
      INTEGER(KIND=INT64) :: NUM_THREADS = 1 ! Number of parallel threads to use in fit & evaluation.
-     INTEGER(KIND=INT64) :: PRINT_DELAY_SEC = 2 ! Delay between output logging during fit.
+     INTEGER(KIND=INT64) :: INTERRUPT_DELAY_SEC = 2 ! Delay between interrupts during fit.
      INTEGER(KIND=INT64) :: STEPS_TAKEN = 0 ! Total number of updates made to model variables.
      INTEGER(KIND=INT64) :: CONDITION_FREQUENCY = 1 ! Frequency with which to perform model conditioning operations.
      INTEGER(KIND=INT64) :: LOG_GRAD_NORM_FREQUENCY = 10 ! Frequency with which to log expensive records (model variable 2-norm step size).
@@ -3016,8 +3016,7 @@ CONTAINS
     LOGICAL(KIND=C_BOOL), SAVE :: NORMALIZE
     INTEGER(KIND=INT32), SAVE :: NUM_THREADS
     !    miscellaneous (hard to concisely categorize)
-    LOGICAL(KIND=C_BOOL), SAVE :: DID_PRINT
-    INTEGER(KIND=INT64), SAVE :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_PRINT_TIME, WAIT_TIME
+    INTEGER(KIND=INT64), SAVE :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_INTERRUPT_TIME, WAIT_TIME
     INTEGER(KIND=INT32), SAVE :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     REAL(KIND=RT), SAVE :: MSE, PREV_MSE, BEST_MSE, STEP_MEAN_REMAIN, STEP_CURV_REMAIN
     INTEGER(KIND=INT64), SAVE :: D, I, S, T
@@ -3167,11 +3166,10 @@ CONTAINS
       ! 
       ! Store the start time of this routine (to make sure updates can
       !  be shown to the user at a reasonable frequency).
-      CALL SYSTEM_CLOCK(LAST_PRINT_TIME, CLOCK_RATE, CLOCK_MAX)
+      CALL SYSTEM_CLOCK(LAST_INTERRUPT_TIME, CLOCK_RATE, CLOCK_MAX)
       IF (.NOT. CONTINUING_FIT) THEN
          ! Establis the amount of time to wait between print.
-         WAIT_TIME = CLOCK_RATE * CONFIG%PRINT_DELAY_SEC
-         DID_PRINT = .FALSE.
+         WAIT_TIME = CLOCK_RATE * CONFIG%INTERRUPT_DELAY_SEC
          ! Initialize the info / error code to 0.
          INFO = 0
          ! Cap the "number [of variables] to update" at the model size.
@@ -3256,11 +3254,8 @@ CONTAINS
          STEP = 1
          ! Write the status update to the command line.
          CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
-         IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
-            IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
-            WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP, MSE, BEST_MSE
-            DID_PRINT = .TRUE.
-            LAST_PRINT_TIME = CURRENT_TIME
+         IF (CURRENT_TIME - LAST_INTERRUPT_TIME .GT. WAIT_TIME) THEN
+            LAST_INTERRUPT_TIME = CURRENT_TIME
             RETURN
          END IF
       END IF
@@ -3450,11 +3445,8 @@ CONTAINS
          STEP = STEP + 1
          ! Write the status update to the command line.
          CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
-         IF (CURRENT_TIME - LAST_PRINT_TIME .GT. WAIT_TIME) THEN
-            IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
-            WRITE (*,'(I6,"  (",E8.3,") [",E8.3,"]")', ADVANCE='NO') STEP-1, MSE, BEST_MSE
-            DID_PRINT = .TRUE.
-            LAST_PRINT_TIME = CURRENT_TIME
+         IF (CURRENT_TIME - LAST_INTERRUPT_TIME .GT. WAIT_TIME) THEN
+            LAST_INTERRUPT_TIME = CURRENT_TIME
             EXIT fit_loop
          END IF
       END DO fit_loop
@@ -3510,9 +3502,6 @@ CONTAINS
             ! Store the fact that scaling has already been encoded into the model.
             CONFIG%NEEDS_SCALING = .FALSE.
          END IF
-         ! 
-         ! Erase the printed message if one was produced.
-         IF (DID_PRINT) WRITE (*,'(A)',ADVANCE='NO') RESET_LINE
          ! 
          ! Reset configuration settings that were modified.
          CONFIG%NORMALIZE = NORMALIZE
