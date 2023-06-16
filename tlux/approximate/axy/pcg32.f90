@@ -14,6 +14,7 @@
 ! 
 MODULE PCG32_MODULE
   USE ISO_FORTRAN_ENV, ONLY: INT32, REAL32
+  USE ISO_C_BINDING, ONLY: C_SIZEOF
   IMPLICIT NONE
 
   ! Define an integer that holds at least 2**64 = 1.845e19
@@ -142,7 +143,7 @@ CONTAINS
     ! bits of the significand.  Can't predict one way or another
     ! whether there are leading zeros: there's a fifty-fifty
     ! chance, if random32 is uniformly distributed.
-    SHIFT = LEADZ(SIGNIFICAND) - (8*SIZEOF(SIGNIFICAND) - 32) ! Leading zeros in last 32 bits.
+    SHIFT = LEADZ(SIGNIFICAND) - (8*C_SIZEOF(SIGNIFICAND) - 32) ! Leading zeros in last 32 bits.
     IF (SHIFT .NE. 0) THEN
        EXPONENT = EXPONENT - SHIFT
        SIGNIFICAND = IAND(RIGHT_32, SHIFTL(SIGNIFICAND, SHIFT))
@@ -181,7 +182,7 @@ END MODULE PCG32_MODULE
 !   IF (PRESENT(BITS)) THEN                                       !
 !      U = BITS                                                   !
 !   ELSE                                                          !
-!      U = SIZEOF(NUM) * 8                                        !
+!      U = C_SIZEOF(NUM) * 8                                      !
 !   END IF                                                        !
 !   ! Print the binary number on one line.                        !
 !   WRITE (*,'("  b")',ADVANCE='NO')                              !
@@ -206,7 +207,7 @@ END MODULE PCG32_MODULE
 !   IF (PRESENT(BITS)) THEN                                       !
 !      U = BITS                                                   !
 !   ELSE                                                          !
-!      U = SIZEOF(NUM) * 8                                        !
+!      U = C_SIZEOF(NUM) * 8                                      !
 !   END IF                                                        !
 !   ! Print the binary number on one line.                        !
 !   WRITE (*,'("  b")',ADVANCE='NO')                              !

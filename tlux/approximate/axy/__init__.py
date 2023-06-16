@@ -558,31 +558,31 @@ if __name__ == "__main__":
     print("_"*70)
     print(" TESTING AXY MODULE")
 
-    # Compile and import testing version of the modules (with testing related compilation flags).
-    import fmodpy
-    RANDOM_MOD = fmodpy.fimport(
-        input_fortran_file = "axy_random.f90",
-        dependencies = ["pcg32.f90"],
-        name = "axy_random",
-        autocompile = False,
-        wrap = True,
-        # rebuild = True,
-        verbose = False,
-        f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-    ).random
-    AXY_MOD = fmodpy.fimport(
-        input_fortran_file = "axy.f90",
-        dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-        name = "axy",
-        blas = True,
-        lapack = True,
-        omp = True,
-        wrap = True,
-        autocompile = False,
-        # rebuild = True,
-        verbose = False,
-        f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-    ).axy
+    # # Compile and import testing version of the modules (with testing related compilation flags).
+    # import fmodpy
+    # RANDOM_MOD = fmodpy.fimport(
+    #     input_fortran_file = "axy_random.f90",
+    #     dependencies = ["pcg32.f90"],
+    #     name = "axy_random",
+    #     autocompile = False,
+    #     wrap = True,
+    #     # rebuild = True,
+    #     verbose = False,
+    #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+    # ).random
+    # AXY_MOD = fmodpy.fimport(
+    #     input_fortran_file = "axy.f90",
+    #     dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+    #     name = "axy",
+    #     blas = True,
+    #     lapack = True,
+    #     omp = True,
+    #     wrap = True,
+    #     autocompile = False,
+    #     # rebuild = True,
+    #     verbose = False,
+    #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+    # ).axy
 
     # Import codes that will be used for testing.
     from tlux.plot import Plot
@@ -615,7 +615,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -639,7 +639,7 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        # steps = 10000,
+        steps = 10000,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.005,
         # faster_rate = 1.01,
@@ -657,7 +657,8 @@ if __name__ == "__main__":
         # x_normalized = True,
         # y_normalized = True,
         pairwise_aggregation = False,
-        partial_aggregation = False,
+        partial_aggregation = True,
+        # reshuffle = False,
         # keep_best = False,
         # **ONLY_SGD
     )

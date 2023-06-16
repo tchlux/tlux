@@ -1,4 +1,5 @@
-
+import time
+import numpy as np
 
 # Build a class that contains pointers to the model internals, allowing
 #  python attribute access to all of the different components of the models.
@@ -310,17 +311,24 @@ class Details(dict):
 # Provide a function that can be used as the default callback. It takes
 #  a Details object describing the current state of the model fit and
 #  produces the current status of the fit.
-def mse_and_time(details, end="\r", flush=True, **print_kwargs):
+def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
     steps_taken = details.config.steps_taken
     if (steps_taken == 0):
+        history.clear()
+        history.append(time.time())
         print( " initializing for fit..", end=end, flush=flush)
     else:
+        # Get the average time taken to make a single call to this function.
+        avg_sec_per_step = (time.time() - history[0]) / steps_taken
         # Get the best MSE that's been observed as well as the current.
         mse_record = details.record[:steps_taken,0]
         current_mse = mse_record[-1]
         best_mse_index = np.argmin(mse_record)
         best_mse = mse_record[best_mse_index]
-        steps_since = -(steps_taken - best_mse_index - 1)
+        steps_since = steps_taken - best_mse_index - 1
         steps_remaining = details.record.shape[0] - steps_taken
-        print(f" {steps_taken:5d}  ({current_mse:.2e})  [{best_mse:.2e}] {steps_remaining}{steps_since}", end=end, flush=flush)
-
+        # Compute the time remaining by linearly extrapolating current time.
+        time_remaining_sec = steps_remaining * avg_sec_per_step
+        if (details.config.early_stop):
+            time_remaining_sec -= steps_since * avg_sec_per_step
+        print(f" {steps_taken:5d}  ({current_mse:.2e})  [{best_mse:.2e}]  -> {steps_remaining}-{steps_since}  ~{time_remaining_sec/60:.1f} min", end=end, flush=flush)

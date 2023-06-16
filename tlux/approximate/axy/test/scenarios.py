@@ -80,6 +80,8 @@ def spawn_model(adn, mdn, mdo, ade=0, ane=0, ads=3, ans=2, ado=None, mde=0, mne=
     AXY.init_model(config, model, seed=seed,
                    initial_shift_range=initial_shift_range,
                    initial_output_scale=initial_output_scale)
+    # By default, make sure reshuffling is disabled (for determinism with aggregate inputs).
+    config.reshuffle = False
     # Return the config and the model.
     return config, model
 

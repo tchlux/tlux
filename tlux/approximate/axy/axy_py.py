@@ -98,33 +98,192 @@ def index_to_pair(max_value, i):
 #     10: AX input dimension is bad.
 #     11: Input integer AXI size does not match AX.
 #     12: Input integer AX index out of range.
+# 
 def check_shape(config, model, ax, axi, sizes, x, xi, y):
     # Compute whether the shape matches the CONFIG
-    if model.size != config.TOTAL_SIZE:
+    if (model.size != config.TOTAL_SIZE):
         return 1  # Model size does not match model configuration.
-    if x.shape[1] != y.shape[1]:
+    if (x.shape[1] != y.shape[1]):
         return 2  # Input arrays do not match in size.
-    if x.shape[0] != config.MDN:
+    if (x.shape[0] != config.MDN):
         return 3  # X input dimension is bad.
-    if config.MDO > 0 and y.shape[0] != config.MDO:
+    if ((config.MDO > 0) and (y.shape[0] != config.MDO)):
         return 4  # Model output dimension is bad, does not match Y.
-    if config.MDO == 0 and y.shape[0] != config.ADO:
+    if ((config.MDO == 0) and (y.shape[0] != config.ADO)):
         return 5  # Aggregator output dimension is bad, does not match Y.
-    if config.MNE > 0 and xi.shape[1] != x.shape[1]:
+    if ((config.MNE > 0) and (xi.shape[1] != x.shape[1])):
         return 6  # Input integer XI size does not match X.
-    if xi.min() < 0 or xi.max() > config.MNE:
+    if ((xi.min() < 0) or (xi.max() > config.MNE)):
         return 7  # Input integer X index out of range.
-    if config.ADI > 0 and not config.PARTIAL_AGGREGATION and sizes.size != y.shape[1]:
+    if ((config.ADI > 0) and (not config.PARTIAL_AGGREGATION) and (sizes.size != y.shape[1])):
         return 8  # SIZES has wrong size.
-    if ax.shape[1] != sizes.sum():
+    if (ax.shape[1] != sizes.sum()):
         return 9  # AX and SUM(SIZES) do not match.
-    if ax.shape[0] != config.ADN:
+    if (ax.shape[0] != config.ADN):
         return 10  # AX input dimension is bad.
-    if axi.shape[1] != ax.shape[1]:
+    if (axi.shape[1] != ax.shape[1]):
         return 11  # Input integer AXI size does not match AX.
-    if axi.min() < 0 or axi.max() > config.ANE:
+    if ((axi.min() < 0) or (axi.max() > config.ANE)):
         return 12  # Input integer AX index out of range.
     return 0  # All checks passed.
+
+
+
+# Normalize numeric input values.
+# 
+# Parameters
+# ----------
+# config : object
+#     An object representing the model configuration, expected to have the following attributes:
+#         NEEDS_SHIFTING : bool
+#         NEEDS_SCALING : bool
+#         ADN : int
+#         MDN : int
+#         AISS, AISE, MISS, MISE : int
+#         AIMS, AIME, MIMS, MIME : int
+#         ADO, MDO : int
+#         NORMALIZE : bool
+#         NEEDS_CLEANING : bool
+# 
+# model : ndarray
+#     1D array of shape (n,) representing the model.
+# 
+# ax : ndarray
+#     2D array of shape (m, p) representing aggregate inputs.
+# 
+# sizes : ndarray
+#     1D array of shape (s,) representing sizes.
+# 
+# x : ndarray
+#     2D array of shape (q, r) representing fixed inputs.
+# 
+# Returns
+# -------
+# ax : ndarray
+#     2D array of normalized aggregate inputs.
+# 
+# x : ndarray
+#     2D array of normalized fixed inputs.
+# 
+def normalize_inputs(config, model, ax, sizes, x):
+    # If normalization needs to happen..
+    if config.NORMALIZE:
+        # Normalize the aggregate inputs.
+        if (config.ADO > 0) and (config.ADN > 0):
+            # Apply shift terms to aggregator inputs.
+            if config.NEEDS_SHIFTING:
+                ax_shift = model[config.AISS:config.AISE]
+                ax[:config.ADN,:] += ax_shift[:, np.newaxis]
+
+            # Remove any NaN or Inf values from the data.
+            if config.NEEDS_CLEANING:
+                ax[:config.ADN,:][np.isnan(ax[:config.ADN,:]) | ~np.isfinite(ax[:config.ADN,:])] = 0.0
+
+            # Apply multiplier.
+            if config.NEEDS_SCALING:
+                ax_rescale = model[config.AIMS:config.AIME].reshape(config.ADN, config.ADN)
+                ax[:config.ADN,:] = np.dot(ax_rescale.T, ax[:config.ADN,:])
+
+        # Normalize the fixed inputs.
+        if (config.MDO > 0) and (config.MDN > 0):
+            # Apply shift terms to numeric model inputs.
+            if config.NEEDS_SHIFTING:
+                x_shift = model[config.MISS:config.MISE]
+                x[:config.MDN,:] += x_shift[:, np.newaxis]
+
+            # Remove any NaN or Inf values from the data.
+            if config.NEEDS_CLEANING:
+                x[:config.MDN,:][np.isnan(x[:config.MDN,:]) | ~np.isfinite(x[:config.MDN,:])] = 0.0
+
+            # Apply multiplier.
+            if config.NEEDS_SCALING:
+                x_rescale = model[config.MIMS:config.MIME].reshape(config.MDN, config.MDN)
+                x[:config.MDN,:] = np.dot(x_rescale.T, x[:config.MDN,:])
+
+    return ax, x, 0
+
+
+
+
+# Given the raw input data, fetch a new set of data that fits in memory.
+# 
+# Parameters
+# ----------
+# config : object
+#     Config object, contains model configuration.
+# agg_iterators_in : np.ndarray
+#     2D numpy array of int64.
+# ax_in : np.ndarray
+#     2D numpy array of float.
+# ax : np.ndarray
+#     2D numpy array of float.
+# axi_in : np.ndarray
+#     2D numpy array of int64.
+# axi : np.ndarray
+#     2D numpy array of int64.
+# sizes_in : np.ndarray
+#     1D numpy array of int64.
+# sizes : np.ndarray
+#     1D numpy array of int64.
+# x_in : np.ndarray
+#     2D numpy array of float.
+# x : np.ndarray
+#     2D numpy array of float.
+# xi_in : np.ndarray
+#     2D numpy array of int64.
+# xi : np.ndarray
+#     2D numpy array of int64.
+# y_in : np.ndarray
+#     2D numpy array of float.
+# y : np.ndarray
+#     2D numpy array of float.
+# yw_in : np.ndarray
+#     2D numpy array of float.
+# yw : np.ndarray
+#     2D numpy array of float.
+# 
+# Returns
+# -------
+# na : int
+#     Total number of aggregate inputs that were added.
+# nm : int
+#     Total number of inputs.
+# 
+def fetch_data(config, agg_iterators_in, ax_in, ax, axi_in, axi, sizes_in, sizes, x_in, x, xi_in, xi, y_in, y, yw_in, yw):
+    # Local variables
+    one = np.int64(1)
+    zero = np.int64(0)
+    rt = np.float64
+
+    # Allocate storage space if it will be used.
+    if sizes_in.size > 0:
+        rsizes = np.empty(config.nm, dtype=rt)
+        sorted_order = np.empty(config.nm, dtype=np.int64)
+
+    # Pack the regular inputs into the working space, storing sizes.
+    i_next = config.i_next
+    i_mult = config.i_mult
+    i_step = config.i_step
+    i_iter = config.i_iter
+
+    for i in range(1, min(config.nm, y_in.shape[1]) + 1):
+        # Choose iteration strategy
+        if config.nm >= y_in.shape[1] and not config.partial_aggregation:
+            gendex = i
+        else:
+            gendex = get_next_index(config.nmt, config.i_next, config.i_mult,
+                                    config.i_step, config.i_mod, config.i_iter)
+        # Store the size
+        if sizes_in.size > 0:
+            rsizes[i - 1] = rt(sizes_in[gendex - 1])
+            if config.pairwise_aggregation:
+                rsizes[i - 1] = rsizes[i - 1]**2
+
+        x[:config.mdn, i - 1] = x_in[:, gendex - 1]
+        xi[:, i - 1] = xi_in[:, gendex - 1]
+        y[:, i - 1] = y_in[:, gendex - 1]
+        yw[:, i - 1] = yw_in[:, gendex - 1]
+
 
 
 

@@ -154,7 +154,7 @@ MODULE AXY
      LOGICAL(KIND=C_BOOL) :: KEEP_BEST = .TRUE. ! True if best observed model should be greedily kept at end of optimization.
      LOGICAL(KIND=C_BOOL) :: EARLY_STOP = .TRUE. ! True if optimization should end when num-steps since best model is greater than the num-steps remaining.
      LOGICAL(KIND=C_BOOL) :: BASIS_REPLACEMENT = .FALSE. ! True if linearly dependent basis functions should be replaced during optimization rank checks.
-     LOGICAL(KIND=C_BOOL) :: RESHUFFLE = .FALSE. ! True if the linear random generator for optimization should be randomized after cycling over all input data.
+     LOGICAL(KIND=C_BOOL) :: RESHUFFLE = .TRUE. ! True if the linear random generator for optimization should be randomized after cycling over all input data.
      LOGICAL(KIND=C_BOOL) :: GRANULAR_PARALLELISM = .FALSE. ! True if parallelism should be pushed down into core operators (evaluate, model_gradient, etc.) during fit.
      ! Normalization and data handling during FIT_MODEL.
      LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if all intermediate values (in ordered sum of aggregates) should be passed through model.
@@ -1099,12 +1099,14 @@ CONTAINS
     DO I = 1, MIN(CONFIG%NM, SIZE(Y_IN,2,KIND=INT64))
        ! Choose iteration strategy (linear is faster when all points are
        !   needed, otherwise the random generator is used to pick points).
-       IF ((CONFIG%NM .GE. SIZE(Y_IN,2,KIND=INT64)) .AND. (.NOT. CONFIG%PARTIAL_AGGREGATION)) THEN
+       IF (CONFIG%NM .GE. SIZE(Y_IN,2,KIND=INT64)) THEN
           GENDEX = I
        ELSE
+          ! TODO: Cannot enable reshuffling here because it needs to be
+          !       repeatable between X and AX.
           GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, &
                CONFIG%I_STEP, CONFIG%I_MOD, CONFIG%I_ITER, &
-               RESHUFFLE=CONFIG%RESHUFFLE)
+               RESHUFFLE=.FALSE._C_BOOL) ! CONFIG%RESHUFFLE)
        END IF
        ! Store the size.
        IF (SIZE(SIZES_IN) .GT. 0) THEN
@@ -1169,12 +1171,25 @@ CONTAINS
        ! TODO: Parallelize with an atomic wait over GET_NEXT_INDEX
        !       make AS computation local (so there is no dependence)
        DO I = 1, MIN(CONFIG%NM, SIZE(SIZES_IN,KIND=INT64))
-          IF ((CONFIG%NM .GE. SIZE(SIZES_IN,KIND=INT64)) .AND. (.NOT. CONFIG%PARTIAL_AGGREGATION)) THEN
+          IF (CONFIG%NM .GE. SIZE(SIZES_IN,KIND=INT64)) THEN
              GENDEX = I
           ELSE
+             ! TODO: Cannot enable reshuffling here because it needs to be
+             !       repeatable between X and AX.
              GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, &
                   CONFIG%I_STEP, CONFIG%I_MOD, CONFIG%I_ITER, &
-                  RESHUFFLE=CONFIG%RESHUFFLE)
+                  RESHUFFLE=.FALSE._C_BOOl) ! CONFIG%RESHUFFLE)
+          END IF
+          ! Randomly initialize the iterator for this aggregate set (each time we enter).
+          IF (CONFIG%RESHUFFLE) THEN
+             CALL INITIALIZE_ITERATOR( &
+                  I_LIMIT=AGG_ITERATORS_IN(1,GENDEX), &
+                  I_NEXT=AGG_ITERATORS_IN(2,GENDEX), &
+                  I_MULT=AGG_ITERATORS_IN(3,GENDEX), &
+                  I_STEP=AGG_ITERATORS_IN(4,GENDEX), &
+                  I_MOD=AGG_ITERATORS_IN(5,GENDEX), &
+                  I_ITER=AGG_ITERATORS_IN(6,GENDEX) &
+             )
           END IF
           ! Pack in those inputs. Note that SIZES(I) is derived from SIZES_IN(GENDEX).
           ! We are using the same generator to recreate the GENDEX from earlier.
@@ -1187,7 +1202,7 @@ CONTAINS
                   AGG_ITERATORS_IN(4,GENDEX), &
                   AGG_ITERATORS_IN(5,GENDEX), &
                   AGG_ITERATORS_IN(6,GENDEX), &
-                  RESHUFFLE=CONFIG%RESHUFFLE &  ! TODO: Reshuffle is causing missed values.
+                  RESHUFFLE=.FALSE._C_BOOL &
              )
              IF (CONFIG%PAIRWISE_AGGREGATION) THEN
                 ! Get a unique pair 
@@ -1798,7 +1813,7 @@ CONTAINS
           TN = OMP_GET_THREAD_NUM() + 1
           ! Do the backward gradient calculation assuming "Y" contains output gradient.
           CALL UNPACKED_BASIS_GRADIENT( CONFIG, Y(:,GS:GE), M_STATES(GS:GE,:,:), X(:,GS:GE), &
-               CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, CONFIG%MDSO, CONFIG%MDO, INT(XDG), &
+               CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, CONFIG%MDSO, CONFIG%MDO, INT(XDG), 0, &
                MODEL(CONFIG%MSIV:CONFIG%MEIV), &
                MODEL(CONFIG%MSIS:CONFIG%MEIS), &
                MODEL(CONFIG%MSSV:CONFIG%MESV), &
@@ -1879,12 +1894,8 @@ CONTAINS
           IF (GS .GT. GE) CYCLE
           TN = OMP_GET_THREAD_NUM() + ONE
           ! Do the backward gradient calculation assuming "AY" contains output gradient.
-          ! WARNING: Fragile code, passing in CONFIG%ADO as the output size, but
-          !          it actually has one more component. This is assuming contiguous
-          !          memory by output vector column, meaning the assumed shape in the
-          !          receiving function will simply strip off the last output vector.
-          CALL UNPACKED_BASIS_GRADIENT( CONFIG, AY(GS:GE,:CONFIG%ADO), A_STATES(GS:GE,:,:), AX(:,GS:GE), &
-               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ADSO, CONFIG%ADO, CONFIG%ADE, &
+          CALL UNPACKED_BASIS_GRADIENT( CONFIG, AY(GS:GE,:), A_STATES(GS:GE,:,:), AX(:,GS:GE), &
+               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ADSO, CONFIG%ADO, CONFIG%ADE, 1, &
                MODEL(CONFIG%ASIV:CONFIG%AEIV), &
                MODEL(CONFIG%ASIS:CONFIG%AEIS), &
                MODEL(CONFIG%ASSV:CONFIG%AESV), &
@@ -1903,7 +1914,7 @@ CONTAINS
 
     ! Compute the model gradient.
     SUBROUTINE UNPACKED_BASIS_GRADIENT( CONFIG, Y, STATES, X, &
-         MDI, MDS, MNS, MDSO, MDO, MDE, &
+         MDI, MDS, MNS, MDSO, MDO, MDE, EXTRA, &
          INPUT_VECS, INPUT_SHIFT, &
          STATE_VECS, STATE_SHIFT, OUTPUT_VECS, &
          INPUT_VECS_GRADIENT, INPUT_SHIFT_GRADIENT, &
@@ -1913,19 +1924,19 @@ CONTAINS
       REAL(KIND=RT), INTENT(IN),    DIMENSION(:,:) :: Y
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: STATES
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-      INTEGER(KIND=INT32), INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO, MDE
+      INTEGER(KIND=INT32), INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO, MDE, EXTRA
       ! Model variables.
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDI,MDS) :: INPUT_VECS
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDS) :: INPUT_SHIFT
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDS,MDS,MAX(0,MNS-1)) :: STATE_VECS
       REAL(KIND=RT), INTENT(IN), DIMENSION(MDS,MAX(0,MNS-1)) :: STATE_SHIFT
-      REAL(KIND=RT), INTENT(IN), DIMENSION(MDSO,MDO) :: OUTPUT_VECS
+      REAL(KIND=RT), INTENT(IN), DIMENSION(MDSO,MDO+EXTRA) :: OUTPUT_VECS
       ! Model variable gradients.
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDI,MDS) :: INPUT_VECS_GRADIENT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS) :: INPUT_SHIFT_GRADIENT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS,MDS,MAX(0,MNS-1)) :: STATE_VECS_GRADIENT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS,MAX(0,MNS-1)) :: STATE_SHIFT_GRADIENT
-      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDSO,MDO) :: OUTPUT_VECS_GRADIENT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDSO,MDO+EXTRA) :: OUTPUT_VECS_GRADIENT
       LOGICAL(KIND=C_BOOL), INTENT(IN) :: YTRANS
       ! D   - dimension index
       ! L   - layer index
@@ -1939,15 +1950,29 @@ CONTAINS
       ! Handle propogation of the gradient through internal states.
       IF (MNS .GT. 0) THEN
          ! Compute the gradient of variables with respect to the "output gradient"
-         CALL GEMM('T', YT, MDS, MDO, SIZE(X,2), 1.0_RT, &
+         CALL GEMM('T', YT, MDS, MDO+EXTRA, SIZE(X,2), 1.0_RT, &
               STATES(:,:,MNS), SIZE(STATES,1), &
               Y(:,:), SIZE(Y,1), &
               1.0_RT, OUTPUT_VECS_GRADIENT(:,:), SIZE(OUTPUT_VECS_GRADIENT,1))
          ! Propogate the gradient back to the last internal vector space.
-         CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
-              Y(:,:), SIZE(Y,1), &
-              OUTPUT_VECS(:,:), SIZE(OUTPUT_VECS,1), &
-              0.0_RT, STATES(:,:,MNS+1), SIZE(STATES,1))
+         IF (EXTRA .EQ. 0) THEN
+            CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
+                 Y(:,:), SIZE(Y,1), &
+                 OUTPUT_VECS(:,:), SIZE(OUTPUT_VECS,1), &
+                 0.0_RT, STATES(:,:,MNS+1), SIZE(STATES,1))
+         ! Handle (EXTRA>0) and Y is row vectors.
+         ELSE IF (YTRANS) THEN
+            CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
+                 Y(:,:MDO), SIZE(Y,1), &
+                 OUTPUT_VECS(:,:), SIZE(OUTPUT_VECS,1), &
+                 0.0_RT, STATES(:,:,MNS+1), SIZE(STATES,1))
+         ! Handle (EXTRA>0) and Y is column vectors.
+         ELSE
+            CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
+                 Y(:MDO,:), SIZE(Y,1), &
+                 OUTPUT_VECS(:,:), SIZE(OUTPUT_VECS,1), &
+                 0.0_RT, STATES(:,:,MNS+1), SIZE(STATES,1))
+         END IF
          ! Cycle over all internal layers.
          STATE_REPRESENTATIONS : DO L = MNS-1, 1, -1
             LP1 = L+1

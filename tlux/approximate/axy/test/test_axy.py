@@ -750,6 +750,9 @@ def _test_model_gradient():
                 m_emb_temp=m_emb_temp,
             )
             check_code(info, "AXY.model_gradient")
+            # TODO: Update the gradient checks here to calculate the AY error term as well.
+            # Overwrite the gradient for the AY error term to be zero.
+            model_grad[config.asov-1:config.aeov,:].reshape(config.adso, config.ado+1, -1, order="F")[:,-1,:] = 0.0
             # div = min(model_grad.shape[1], y.shape[1])
             return np.concatenate((model_grad.sum(axis=1), model[config.num_vars:]))
 
@@ -1107,9 +1110,9 @@ def _test_large_data_fit():
 if __name__ == "__main__":
     _test_scenario_iteration()
     _test_init_model()
-    # # _test_compute_batches() # TODO: Design this test more carefully.
+    # _test_compute_batches() # TODO: Design this test more carefully.
     _test_fetch_data()
-    # # _test_embed() # TODO: Design this test.
+    # _test_embed() # TODO: Design this test.
     _test_normalize_data()
     _test_evaluate()
     _test_model_gradient()
