@@ -146,8 +146,15 @@ class AXY:
         # TODO: Is this the correct retrieval of pairwise aggregation setting?
         pairwise = kwargs.get("pairwise_aggregation", False)
         pairwise = pairwise or self._init_kwargs.get("pairwise_aggregation", False)
+        # Update settings for this fit based on initial configuration (if it happened).
         if (self.config is not None):
             pairwise = pairwise or self.config.pairwise_aggregation
+            nm = nm or self.config.nm
+            na = na or self.config.na
+        else:
+            pairwise = self._init_kwargs.get("pairwise_aggregation",None)
+            nm = nm or self._init_kwargs.get("nm",None)
+            na = nm or self._init_kwargs.get("na",None)
         # Set the number of aggregate and model input limits.
         if (nm is None): nm = nm_total
         else:            nm = min(nm, nm_total)
@@ -572,7 +579,7 @@ if __name__ == "__main__":
     # ).random
     # AXY_MOD = fmodpy.fimport(
     #     input_fortran_file = "axy.f90",
-    #     dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+    #     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
     #     name = "axy",
     #     blas = True,
     #     lapack = True,
@@ -614,8 +621,8 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = True
-    use_x = False
+    use_a = False
+    use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -639,7 +646,8 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 10000,
+        steps = 1000,
+        # nm = nm,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.005,
         # faster_rate = 1.01,
@@ -657,7 +665,7 @@ if __name__ == "__main__":
         # x_normalized = True,
         # y_normalized = True,
         pairwise_aggregation = False,
-        partial_aggregation = True,
+        partial_aggregation = False,
         # reshuffle = False,
         # keep_best = False,
         # **ONLY_SGD
@@ -745,11 +753,8 @@ if __name__ == "__main__":
     if (new_model or (not os.path.exists(path))):
         # Initialize a new model.
         print("Fitting model..")
-        m = AXY(
-            **settings,
-        )
-        # def show_status(details):
-        #     print("status: ", details.steps)
+        m = AXY(**settings)
+        # Fit the model.
         m.fit(
             ax=(ax.copy() if use_a else None),
             axi=(axi if use_a else None),
@@ -758,8 +763,6 @@ if __name__ == "__main__":
             xi=(xi if use_x else None),
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
-            nm = nm,
-            # callback=show_status,
         )
         # Save and load the model.
         print("  saving..", flush=True)
@@ -777,6 +780,7 @@ if __name__ == "__main__":
     print()
     print(m, m.config)
     print()
+    print(m.AXY.profile("axy.fetch_data"))
 
     # Evaluate the model and compare with the data provided for training.
     # TODO: Add some evaluations of the categorical outputs.

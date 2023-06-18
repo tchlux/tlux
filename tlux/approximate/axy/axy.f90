@@ -1,9 +1,21 @@
 ! TODO:
 ! 
-! - Add PARTIAL_AGGREGATION setting to FIT_MODEL functionality. When TRUE, this
-!   causes there to be a 1-to-1 mapping between model inputs and aggregator inputs,
-!   in whatever order aggregate outputs are stored, they are serially and partially
-!   aggregated as unique inputs to the model.
+! - Update INDEX_TO_PAIR function to do the following for different set sizes:
+!     2 elements -> (1) (1,2) (2,1) (2),
+!     3 elements -> (1) (1,2) (2,1) (1,3) (3,1) (2) (2,3) (3,2) (3),
+!     4 elements -> (1) (1,2) (2,1) (1,3) (3,1) (1,4) (4,1) (2) (2,3) (3,2) (2,4) (4,2) (3) (3,4) (4,3) (4),
+!   each in its particular order. With this, partial aggregation will "make more sense"
+!   because the elements have an inherent order to them.
+! 
+! - Add a logical parameter AGG_ORDERED that is TRUE when the elements of the aggregate
+!   set are ordered, and FALSE when they are not. This value can be used to determine if
+!   random shuffling should be applied to the set elements in FETCH_DATA when retrieved.
+! 
+! - Add a parameter PARTIAL_STEPS that determines how many steps are included in
+!   the partial aggregation process. This can be used to short-circuit doing all
+!   possible subset sizes, instead only doing subsets of well-spaced sizes.
+!   Specifically, those steps should traverse including all comparisons between
+!   increasingly more elements.
 ! 
 ! - Check if OMP TARGET actually sends code to a different device.
 ! - Experiment with 'OMP TARGET TEAMS DISTRIBUTE PARALLEL' to see if it uses GPU correctly.
@@ -26,13 +38,8 @@
 !   to not change the output of the model *at all*, and similarly update the
 !   gradient estimates to reflect those changes as well (might have to reset gradient).
 ! 
-! - Update Python testing code to test all combinations of AX, AXI, AY, X, XI, and Y.
-! - Update Python testing code to attempt different edge-case model sizes
-!    (linear regression, no aggregator, no model).
 ! - Verify that the *condition model* operation correctly updates the gradient
 !   related variables (mean and curvature). (resets back to initialization)
-! - Make sure that the print time actually adheres to the 3-second guidance.
-!   Or optionally write updates to a designated file instead.
 ! 
 ! - Make model conditioning use the same work space as evaluation (where possible).
 ! - Pull normalization code out and have it be called separately from 'FIT'.
@@ -64,6 +71,7 @@ MODULE AXY
        INITIALIZE_ITERATOR, INDEX_TO_PAIR, PAIR_TO_INDEX, GET_NEXT_INDEX
   USE SORT_AND_SELECT, ONLY: ARGSORT, ARGSELECT
   USE MATRIX_OPERATIONS, ONLY: GEMM, ORTHOGONALIZE, RADIALIZE, LEAST_SQUARES
+  USE PROFILER, ONLY: START_PROFILING, STOP_PROFILING
 
   IMPLICIT NONE
 
@@ -257,6 +265,24 @@ CONTAINS
   !   INTEGER :: OMP_GET_THREAD_NUM
   !   OMP_GET_THREAD_NUM = 0
   ! END FUNCTION OMP_GET_THREAD_NUM
+
+
+  ! Wrapper for retrieving a profile entry by name.
+  FUNCTION PROFILE(SUBROUTINE_NAME)
+    USE PROFILER, ONLY: GET_PROFILE
+    USE ISO_FORTRAN_ENV, ONLY: REAL64, INT64
+    ! Redefine the type for a profile entry here so that fmodpy knows how to return it.
+    TYPE, BIND(C) :: PROFILE_ENTRY
+       REAL(KIND=REAL64) :: WALL_TIME
+       REAL(KIND=REAL64) :: CPU_TIME
+       INTEGER(KIND=INT64) :: CALL_COUNT
+       REAL(KIND=REAL64) :: START_WALL_TIME
+       REAL(KIND=REAL64) :: START_CPU_TIME
+    END TYPE PROFILE_ENTRY
+    CHARACTER(LEN=*), INTENT(IN) :: SUBROUTINE_NAME
+    TYPE(PROFILE_ENTRY) :: PROFILE
+    PROFILE = GET_PROFILE(SUBROUTINE_NAME)
+  END FUNCTION PROFILE
 
 
   ! Generate a model configuration given state parameters for the model.
@@ -1082,34 +1108,33 @@ CONTAINS
     INTEGER(KIND=INT64) :: I_NEXT, I_MULT, I_STEP, I_ITER
     REAL(KIND=RT) :: NREMAIN, CURRENT_TOTAL
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: RSIZES
-    INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: SORTED_ORDER, AGG_STARTS_IN
+    INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: SORTED_ORDER, GENDEXES
+    INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: AGG_STARTS_IN, AGG_STARTS
     REAL :: CPU_TIME_START, CPU_TIME_END
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
     CALL CPU_TIME(CPU_TIME_START)
     ! Allocate storage space if it will be used.
     IF (SIZE(SIZES_IN) .GT. 0) THEN
-       ALLOCATE(RSIZES(1:CONFIG%NM), SORTED_ORDER(1:CONFIG%NM))  ! LOCAL ALLOCATION
+       ALLOCATE(RSIZES(1:CONFIG%NM), SORTED_ORDER(1:CONFIG%NM), GENDEXES(CONFIG%NM))  ! LOCAL ALLOCATION
     END IF
     ! Pack the regular inputs into the working space, storing sizes.
-    I_NEXT = CONFIG%I_NEXT
-    I_MULT = CONFIG%I_MULT
-    I_STEP = CONFIG%I_STEP
-    I_ITER = CONFIG%I_ITER
     DO I = 1, MIN(CONFIG%NM, SIZE(Y_IN,2,KIND=INT64))
        ! Choose iteration strategy (linear is faster when all points are
        !   needed, otherwise the random generator is used to pick points).
        IF (CONFIG%NM .GE. SIZE(Y_IN,2,KIND=INT64)) THEN
           GENDEX = I
        ELSE
-          ! TODO: Cannot enable reshuffling here because it needs to be
-          !       repeatable between X and AX.
+          ! WARNING: Cannot enable reshuffling here because it needs to be repeatable between X and AX.
           GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, &
                CONFIG%I_STEP, CONFIG%I_MOD, CONFIG%I_ITER, &
-               RESHUFFLE=.FALSE._C_BOOL) ! CONFIG%RESHUFFLE)
+               RESHUFFLE=CONFIG%RESHUFFLE)
        END IF
        ! Store the size.
        IF (SIZE(SIZES_IN) .GT. 0) THEN
+          ! Store this gendex for later.
+          GENDEXES(I) = GENDEX
+          ! Store the size of this element (depending on pairwise).
           RSIZES(I) = REAL(SIZES_IN(GENDEX), KIND=RT)
           IF (CONFIG%PAIRWISE_AGGREGATION) THEN
              RSIZES(I) = RSIZES(I)**2
@@ -1119,7 +1144,6 @@ CONTAINS
        XI(:,I) = XI_IN(:,GENDEX)
        Y(:,I) = Y_IN(:,GENDEX)
        YW(:,I) = YW_IN(:,GENDEX)
-       ! TODO: Randomly initialize the aggregate iterator here (if reshuffle is enabled).
     END DO
     ! If there are aggregate inputs ...
     IF (SIZE(SIZES_IN) .GT. 0) THEN
@@ -1156,30 +1180,18 @@ CONTAINS
        ! Deallocate memory that is no longer needed.
        DEALLOCATE(RSIZES, SORTED_ORDER)
        ! Compute the start indices for the different aggregate sets (in the input).
-       ALLOCATE(AGG_STARTS_IN(SIZE(SIZES_IN)))
+       ALLOCATE(AGG_STARTS_IN(SIZE(SIZES_IN)), AGG_STARTS(SIZE(SIZES)))
        AGG_STARTS_IN(1) = ONE
-       DO I = 1, SIZE(SIZES_IN)-ONE
+       DO I = ONE, SIZE(SIZES_IN)-ONE
           AGG_STARTS_IN(I+ONE) = AGG_STARTS_IN(I) + SIZES_IN(I)
        END DO
-       ! Pack in the aggregate inputs.
-       AS = ONE
-       ! Reset the iterator back to where it started.
-       CONFIG%I_NEXT = I_NEXT
-       CONFIG%I_MULT = I_MULT
-       CONFIG%I_STEP = I_STEP
-       CONFIG%I_ITER = I_ITER
-       ! TODO: Parallelize with an atomic wait over GET_NEXT_INDEX
-       !       make AS computation local (so there is no dependence)
+       AGG_STARTS(1) = ONE
+       DO I = ONE, SIZE(SIZES)-ONE
+          AGG_STARTS(I+ONE) = AGG_STARTS(I) + SIZES(I)
+       END DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(I, GENDEX, AS, J, K, L, P1, P2)
        DO I = 1, MIN(CONFIG%NM, SIZE(SIZES_IN,KIND=INT64))
-          IF (CONFIG%NM .GE. SIZE(SIZES_IN,KIND=INT64)) THEN
-             GENDEX = I
-          ELSE
-             ! TODO: Cannot enable reshuffling here because it needs to be
-             !       repeatable between X and AX.
-             GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, &
-                  CONFIG%I_STEP, CONFIG%I_MOD, CONFIG%I_ITER, &
-                  RESHUFFLE=.FALSE._C_BOOl) ! CONFIG%RESHUFFLE)
-          END IF
+          GENDEX = GENDEXES(I)
           ! Randomly initialize the iterator for this aggregate set (each time we enter).
           IF (CONFIG%RESHUFFLE) THEN
              CALL INITIALIZE_ITERATOR( &
@@ -1191,6 +1203,7 @@ CONTAINS
                   I_ITER=AGG_ITERATORS_IN(6,GENDEX) &
              )
           END IF
+          AS = AGG_STARTS(I)
           ! Pack in those inputs. Note that SIZES(I) is derived from SIZES_IN(GENDEX).
           ! We are using the same generator to recreate the GENDEX from earlier.
           DO J = 1, SIZES(I)
@@ -1239,7 +1252,7 @@ CONTAINS
           END DO
        END DO
        ! Set the total number of aggregate inputs that were added.
-       NA = AS - ONE
+       NA = AGG_STARTS(SIZE(AGG_STARTS)) + SIZES(SIZE(SIZES)) - ONE
        ! For PARTIAL_AGGREGATION, 'I' needs to step proportional to how many
        !   aggregate inputs a given point has, repeating the value in each spot.
        IF (CONFIG%PARTIAL_AGGREGATION) THEN
@@ -1265,7 +1278,7 @@ CONTAINS
           NM = CONFIG%NM
        END IF
        ! Deallocate memory for identifying start of aggregate sets.
-       DEALLOCATE(AGG_STARTS_IN)
+       DEALLOCATE(AGG_STARTS_IN, AGG_STARTS)
     ELSE
        NA = ZERO
        NM = CONFIG%NM
@@ -1273,8 +1286,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WGEN = CONFIG%WGEN + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CGEN = CONFIG%CGEN + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
   END SUBROUTINE FETCH_DATA
 
 
@@ -1309,8 +1324,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WEMB = CONFIG%WEMB + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CEMB = CONFIG%CEMB + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
 
   CONTAINS
     ! Given integer inputs and embedding vectors, put embeddings in
@@ -1638,8 +1655,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WEVL = CONFIG%WEVL + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CEVL = CONFIG%CEVL + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
 
   CONTAINS
 
@@ -2178,8 +2197,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WGRD = CONFIG%WGRD + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CGRD = CONFIG%CGRD + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
   END SUBROUTINE MODEL_GRADIENT
 
 
@@ -2391,13 +2412,11 @@ CONTAINS
        ! Divide by the average YW to make its mean 1 (separately for negative and positive YW).
        YW_MASK(:,:) = (YW_IN .GE. 0.0_RT)
        ! TODO: Use YW instead of directly operating on YW_IN (to conserve memory).
-       WHERE (YW_MASK(:,:))
-          ! TODO: Handle when the COUNT is 0 correctly.
+       WHERE (YW_MASK(:,:)) ! The denominator is never 0 when this clause is executed, because YW_MASK(...) is necessary.
           YW_IN(:,:) = YW_IN(:,:) / (SUM(YW_IN(:,:), MASK=YW_MASK(:,:)) / REAL(COUNT(YW_MASK(:,:)),RT))
-       ELSEWHERE
-          ! TODO: Handle when the COUNT is 0 correctly.
+       ELSEWHERE ! The denominator is never 0 when this clause is executed, because .NOT. YW_MASK(...) is necessary.
           YW_IN(:,:) = YW_IN(:,:) / (SUM(YW_IN(:,:), MASK=.NOT. YW_MASK(:,:)) / REAL(COUNT(.NOT. YW_MASK(:,:)),RT))
-       END WHERE
+       END WHERE  
        ! Set all invalid values to zero.
        WHERE (IS_NAN(YW_IN(:,:)) .OR. (.NOT. IS_FINITE(YW_IN(:,:))))
           YW_IN(:,:) = 0.0_RT
@@ -2448,8 +2467,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WNRM = CONFIG%WNRM + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CNRM = CONFIG%CNRM + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
     ! Deallocate local variables.
     DEALLOCATE(YW_MASK, Y_SCALE)
   END SUBROUTINE NORMALIZE_DATA
@@ -2570,8 +2591,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WCON = CONFIG%WCON + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CCON = CONFIG%CCON + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
 
   CONTAINS
 
@@ -3128,8 +3151,10 @@ CONTAINS
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
     CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+    !$OMP CRITICAL
     CONFIG%WFIT = CONFIG%WFIT + (WALL_TIME_END - WALL_TIME_START)
     CONFIG%CFIT = CONFIG%CFIT + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+    !$OMP END CRITICAL
 
   CONTAINS
 
@@ -3532,8 +3557,10 @@ CONTAINS
          CONFIG%NORMALIZE = NORMALIZE
          CALL CPU_TIME(CPU_TIME_END)
          CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+         !$OMP CRITICAL
          CONFIG%WENC = CONFIG%WENC + (WALL_TIME_END - WALL_TIME_START)
          CONFIG%CENC = CONFIG%CENC + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+         !$OMP END CRITICAL
       END IF
     END SUBROUTINE UNPACKED_FIT_MODEL
 
@@ -3600,8 +3627,10 @@ CONTAINS
       ! Record the end of the total time.
       CALL CPU_TIME(CPU_TIME_END)
       CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+      !$OMP CRITICAL
       CONFIG%WRAT = CONFIG%WRAT + (WALL_TIME_END - WALL_TIME_START)
       CONFIG%CRAT = CONFIG%CRAT + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+      !$OMP END CRITICAL
     END SUBROUTINE ADJUST_RATES
 
     
@@ -3674,8 +3703,10 @@ CONTAINS
       ! Record the end of the total time.
       CALL CPU_TIME(CPU_TIME_END)
       CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
+      !$OMP CRITICAL
       CONFIG%WOPT = CONFIG%WOPT + (WALL_TIME_END - WALL_TIME_START)
       CONFIG%COPT = CONFIG%COPT + INT(REAL(CPU_TIME_END - CPU_TIME_START, RT) * CLOCK_RATE, INT64)
+      !$OMP END CRITICAL
     END SUBROUTINE STEP_VARIABLES
 
 

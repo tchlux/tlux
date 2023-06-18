@@ -313,6 +313,10 @@ class Details(dict):
 #  produces the current status of the fit.
 def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
     steps_taken = details.config.steps_taken
+    # Make sure that some history exists.
+    if (len(history) == 0):
+        history.append(time.time())
+    # Clear the history if this if the first step.
     if (steps_taken == 0):
         history.clear()
         history.append(time.time())

@@ -14,7 +14,7 @@
 ! 
 MODULE PCG32_MODULE
   USE ISO_FORTRAN_ENV, ONLY: INT32, REAL32
-  USE ISO_C_BINDING, ONLY: C_SIZEOF
+  USE ISO_C_BINDING, ONLY: C_SIZEOF, C_CHAR
   IMPLICIT NONE
 
   ! Define an integer that holds at least 2**64 = 1.845e19
@@ -167,77 +167,61 @@ CONTAINS
     END IF
   END FUNCTION PCG32_RANDOM_REAL
 
+
+  ! Given a character string, hash that string into an integer by
+  !  mixing its contents with a random generation from the PCG32 scheme.
+  FUNCTION PCG32_HASH_STRING(STRING) RESULT(NUMBER)
+    INTEGER(KIND=INT32), PARAMETER :: RIGHT_5 = 2_INT64 ** 5 - 1
+    CHARACTER(LEN=*), INTENT(IN) :: STRING
+    INTEGER(KIND=INT32) :: NUMBER
+    TYPE(PCG32_STATE) :: PCG32
+    INTEGER :: I, N
+    INTEGER(KIND=INT32) :: CHUNK
+    INTEGER(KIND=INT32) :: ROTATE_AMOUNT
+    INTEGER(KIND=INT64) :: TEMP
+    ! Set the state to a reasonable fixed default starting point.
+    PCG32 = PCG32_STATE(&
+         INT(Z'853C49E6748FEA9B', KIND=INT64), &
+         INT(Z'DA3E39CB94B95BDB', KIND=INT64) &
+    )
+    ! Start with the current state.
+    NUMBER = TRANSFER(PCG32%STATE, NUMBER)
+    N = LEN(STRING)
+    DO I = 1, N, 4
+      ! Extract 4-byte chunk into CHUNK (32 bit integer).
+      CHUNK = ICHAR(STRING(I:I)) * 256**3
+      IF (I+1 <= N) CHUNK = CHUNK + ICHAR(STRING(I+1:I+1)) * 256**2
+      IF (I+2 <= N) CHUNK = CHUNK + ICHAR(STRING(I+2:I+2)) * 256
+      IF (I+3 <= N) CHUNK = CHUNK + ICHAR(STRING(I+3:I+3))
+      ! XOR the CHUNK with the current hash number.
+      CHUNK = IEOR(CHUNK, NUMBER)
+      ! Use the generator to create a random rotation, XOR the
+      !  bits of the CHUNK with the random rotation as well.
+      ROTATE_AMOUNT = PCG32_BOUNDED_RANDOM(32, PCG32)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, CHUNK), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,5)), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,10)), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,15)), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,20)), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,25)), ROTATE_AMOUNT)
+      ROTATE_AMOUNT = IEOR(IAND(RIGHT_5, SHIFTR(CHUNK,30)), ROTATE_AMOUNT)
+      ! Rotate the CHUNK by the random amount.
+      CHUNK = IOR( &
+           SHIFTR(CHUNK, ROTATE_AMOUNT), &
+           SHIFTL(CHUNK, 32 - ROTATE_AMOUNT) &
+      )
+      ! Exclusive-or the rotated chunk with the current hash number.
+      NUMBER = IEOR(CHUNK, NUMBER)
+      ! Copy the current hash number into the left and right 32 bits of a 64 bit number.
+      TEMP = IAND(RIGHT_32, TRANSFER(NUMBER, TEMP))
+      TEMP = IOR(SHIFTL(TEMP, 32), IAND(RIGHT_32, TEMP))
+      ! XOR the new hash number by the state to alter the generator deterministically.
+      PCG32%STATE = IEOR(PCG32%STATE, TEMP)
+      ! Compute the new state with a regular linear generator formula.
+      PCG32%STATE = MOD(PCG32%STATE*PCG32_MULT + PCG32%INC, PCG32_MOD)
+    ENDDO
+    ! Return final state as hash value.
+    ! PRINT *, STRING, "  ->", NUMBER
+  END FUNCTION PCG32_HASH_STRING
+
 END MODULE PCG32_MODULE
-
-
-!2023-05-16 08:16:55
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! !
-! ! Print out a long integer.                                     !
-! SUBROUTINE PRINT_LONG(NUM, BITS)                                !
-!   INTEGER(KIND=INT64), INTENT(IN) :: NUM                        !
-!   INTEGER, INTENT(IN), OPTIONAL :: BITS                         !
-!   INTEGER :: I, B, U                                            !
-!   ! Set the default for the number of bits to print.            !
-!   IF (PRESENT(BITS)) THEN                                       !
-!      U = BITS                                                   !
-!   ELSE                                                          !
-!      U = C_SIZEOF(NUM) * 8                                      !
-!   END IF                                                        !
-!   ! Print the binary number on one line.                        !
-!   WRITE (*,'("  b")',ADVANCE='NO')                              !
-!   DO I = U-1, 0, -1                                             !
-!      IF (BTEST(NUM, I)) THEN                                    !
-!         B = 1                                                   !
-!      ELSE                                                       !
-!         B = 0                                                   !
-!      END IF                                                     !
-!      WRITE (*,'(i1)',ADVANCE='NO') B                            !
-!      IF (MOD(I,8) .EQ. 0) WRITE (*,'(" ")',ADVANCE='NO')        !
-!   END DO                                                        !
-!   PRINT *, ''                                                   !
-! END SUBROUTINE PRINT_LONG                                       !
-!                                                                 !
-! ! Print out an integer.                                         !
-! SUBROUTINE PRINT_INT(NUM, BITS)                                 !
-!   INTEGER(KIND=INT32), INTENT(IN) :: NUM                        !
-!   INTEGER, INTENT(IN), OPTIONAL :: BITS                         !
-!   INTEGER :: I, B, U                                            !
-!   ! Set the default for the number of bits to print.            !
-!   IF (PRESENT(BITS)) THEN                                       !
-!      U = BITS                                                   !
-!   ELSE                                                          !
-!      U = C_SIZEOF(NUM) * 8                                      !
-!   END IF                                                        !
-!   ! Print the binary number on one line.                        !
-!   WRITE (*,'("  b")',ADVANCE='NO')                              !
-!   DO I = U-1, 0, -1                                             !
-!      IF (BTEST(NUM, I)) THEN                                    !
-!         B = 1                                                   !
-!      ELSE                                                       !
-!         B = 0                                                   !
-!      END IF                                                     !
-!      WRITE (*,'(i1)',ADVANCE='NO') B                            !
-!      IF (MOD(I,8) .EQ. 0) WRITE (*,'(" ")',ADVANCE='NO')        !
-!   END DO                                                        !
-!   PRINT *, ''                                                   !
-! END SUBROUTINE PRINT_INT                                        !
-!                                                                 !
-! PRINT *, ""                                                     !
-! PRINT *, "OLDSTATE: ", OLDSTATE                                 !
-! CALL PRINT_LONG(OLDSTATE, 65)                                   !
-! PRINT *, "ROT: ", ROT                                           !
-! CALL PRINT_LONG(ROT, 65)                                        !
-! PRINT *, "XORSHIFTED: ", XORSHIFTED                             !
-! CALL PRINT_LONG(RIGHT_32, 65)                                   !
-! CALL PRINT_LONG(XORSHIFTED, 65)                                 !
-! PRINT *, "RIGHT SIDE (of circle)", SHIFTR(XORSHIFTED, ROT)      !
-! CALL PRINT_LONG(SHIFTR(XORSHIFTED, ROT), 65)                    !
-! PRINT *, "LEFT SIDE (of circle)", SHIFTL(XORSHIFTED, 32 - ROT)  !
-! CALL PRINT_LONG(SHIFTL(XORSHIFTED, 32 - ROT), 65)               !
-! PRINT *, "final value: ", OLDSTATE                              !
-! CALL PRINT_LONG(OLDSTATE, 65)                                   !
-! PRINT *, "RANDOM_NUMBER: ", RANDOM_NUMBER                       !
-! CALL PRINT_INT(RANDOM_NUMBER)                                   !
-! PRINT *, ""                                                     !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! !

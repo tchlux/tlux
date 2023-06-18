@@ -8,7 +8,7 @@
 # # Get the directory for the AXY compiled source code.
 # AXY = fmodpy.fimport(
 #     input_fortran_file = "../axy.f90",
-#     dependencies = ["pcg32.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+#     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
 #     name = "test_axy_module",
 #     blas = True,
 #     lapack = True,
@@ -18,8 +18,7 @@
 #     verbose = False,
 #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
 # ).axy
-# help(AXY)
-
+# # help(AXY)
 
 # Overwrite the typical "AXY" library with the testing one.
 from test_axy_module import axy as AXY
