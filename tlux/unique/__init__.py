@@ -55,7 +55,8 @@ def to_bytes(array):
         length = ctypes.c_long(len(array))
         width = ctypes.c_int(-1)
         info = ctypes.c_char_p(b'object')
-        array = np.fromiter((s for s in charp), dtype=object)
+        try:    array = np.fromiter((s for s in charp), dtype=object)
+        except: array = np.asarray([s for s in charp], dtype=object)
     # Return the final values (be sure to keep a reference to the 'array' so it isn't freed).
     return array, voidp, length, width, info
 
@@ -79,7 +80,8 @@ def from_bytes(array, voidp, length, width, info):
         # Extract the bytes and decode them into 'str' objects.
         charp = (ctypes.c_char_p * length.value).from_address(voidp.value)
         # Convert the list of 'str' objects into a numpy array.
-        array = np.fromiter((s for s in charp), dtype=object)
+        try:    array = np.fromiter((s for s in charp), dtype=object)
+        except: array = np.asarray([s for s in charp], dtype=object)
     else:
         # If the width is not -1, the data is of a fixed-width type.
         # Create a numpy array of the appropriate data type from the raw bytes.

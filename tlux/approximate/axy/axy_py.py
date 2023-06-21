@@ -3,7 +3,46 @@ import numpy as np
 from tlux.approximate.axy.summary import AxyModel
 
 
-# Define a function that correct casts the data to the desired type.
+# Cast the elements of an array to the specified data type.
+#
+# The function accepts an array of elements, a desired data type `dtype`, and an optional
+# parameter `order` that specifies the memory layout of the resulting array. It attempts to
+# cast each element of the array to the specified data type, preserving the shape of the input array.
+# If `dtype` is passed as a type, then each element is cast to that type before creating the array.
+# Otherwise, `dtype` should be a valid data type string recognizable by numpy.
+#
+# Parameters
+# ----------
+# arr : array_like
+#     The input array whose elements are to be cast to the desired data type.
+# dtype : type or str
+#     The desired data type to which the elements of the input array are to be cast. 
+#     Can be a type (e.g., int, float) or a string that numpy recognizes (e.g., 'int32', 'float64').
+# order : {'C', 'F'}, optional, default: 'F'
+#     Specify the memory layout of the output array. If 'C', the array will be in C-contiguous
+#     order (row-major). If 'F', the array will be in Fortran-contiguous order (column-major).
+#
+# Returns
+# -------
+# ndarray
+#     A numpy array with the same shape as the input array but with elements cast to the specified data type.
+#
+# Examples
+# --------
+# >>> cast([[1.2, 2.3], [3.4, 4.5]], int)
+# array([[1, 2], [3, 4]])
+# >>> cast([1, 2, 3], 'float64')
+# array([1., 2., 3.])
+# >>> cast([[1, 2], [3, 4]], complex, order='C')
+# array([[1.+0.j, 2.+0.j], [3.+0.j, 4.+0.j]])
+#
+# Raises
+# ------
+# ValueError
+#     If `dtype` is not recognized as a valid data type.
+# TypeError
+#     If `arr` is not array_like.
+#
 def cast(arr, dtype, order="F"):
     arr = np.asarray(arr)
     if (type(dtype) is type):
@@ -21,28 +60,36 @@ def cast(arr, dtype, order="F"):
 # 
 # Parameters
 # ----------
-# max_value : int
-#     The maximum value for the second element of the pair.
+# n : int
+#     The number of source elements / the largest number in any pair.
 # i : int
-#     The single index to be converted to a pair of indices.
+#     The single index to be converted to a pair of indices that
+#     is 1-indexed and in the range [1, num_elements**2].
 # 
 # Returns
 # -------
 # tuple[int, int]
-#   A pair of indices (pair1, pair2) that correspond to the inverse of
-#     (pair1 - 1) * max_value + pair2
+#   A pair of indices (pair1, pair2) that come from a function
+#    the generates an ordering such that all pairs involving
+#    smaller numbers come first.
 # 
 # Example
 # -------
 #  >>> [index_to_pair(3, i) for i in range(1,10)]
-#  [(1,1), (1,2), (1,3), (2,1), (2,2), (2,3), (3,1), (3,2), (3,3)]
+#  [(1,1) (1,2) (2,1) (1,3) (3,1) (2,2) (2,3) (3,2) (3,3)]
 # 
-def index_to_pair(max_value, i):
-    # I = (PAIR1-ONE) * MAX_VALUE + PAIR2 # 123456789
-    pair1 = 1 + (i - 1) // max_value      # 111222333
-    pair2 = 1 + (i - 1) % max_value       # 123123123
-    return pair1, pair2
-
+def index_to_pair(num_elements, i):
+    index_from_back = num_elements**2 - i
+    group_from_back = int(index_from_back**(1/2))
+    group = num_elements - group_from_back
+    remaining_in_group = index_from_back - group_from_back**2
+    group_size = 2*group_from_back + 1
+    index_in_group = group_size - remaining_in_group
+    other = group + index_in_group // 2
+    if (index_in_group % 2 == 0):
+        return (group, other)
+    else:
+        return (other, group)
 
 
 # Check if the shapes and values of the input arrays match the expectations based on the model configuration.
@@ -284,6 +331,7 @@ def fetch_data(config, agg_iterators_in, ax_in, ax, axi_in, axi, sizes_in, sizes
         y[:, i - 1] = y_in[:, gendex - 1]
         yw[:, i - 1] = yw_in[:, gendex - 1]
 
+    # TODO: Get the aggregate inputs too.
 
 
 
@@ -303,7 +351,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
             if (e > 0) and (e <= config.ane):
                 ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
             elif (e > config.ane):
-                e1, e2 = index_to_pair(max_value=config.ane+1, i=e-config.ane)
+                e1, e2 = index_to_pair(num_elements=config.ane+1, i=e-config.ane)
                 ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1-1] - m.a_embeddings[:,e2-1-1]
         if (axi.shape[0] > 1):
             ax_embedded[-config.ade:,n] /= axi.shape[0]
@@ -318,7 +366,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
             if (e > 0) and (e <= config.mne):
                 x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
             elif (e > config.mne):
-                e1, e2 = index_to_pair(max_value=config.mne, i=e)
+                e1, e2 = index_to_pair(num_elements=config.mne, i=e)
                 x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
         if (xi.shape[0] > 1):
             x_embedded[-config.mde:,n] /= xi.shape[0]

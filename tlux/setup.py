@@ -55,7 +55,8 @@ def build_axy():
         _axy.axy.new_model_config(
             adn=2, ado=3, ads=4, ans=1, ane=6, ade=7,
             mdn=8, mdo=9, mds=10, mns=1, mne=12, mde=13,
-            num_threads=1
+            num_threads=1,
+            noe=0, doe=0,  # temporarily disabling output embeddings
         )
     #   When local default fail, try specifying exactly what shared library functions are needed.
     except Exception as exc:
@@ -143,10 +144,13 @@ def build_unique():
     # _c_compiler = "cc"  # <- on macOS with Clang, no nested functions allowed.
     _c_compiler = fmodpy.config.f_compiler  # <- works with gfortran, assuming true for others too.
     _flags = "-shared -fPIC -O3"  # <- shared library, position independent, O3 optimization.
-    _flags += " -fopenmp"  # <- slower for a lot of cases, only good for *very* large data.
-    # _flags += " -D_UNIQUE_SINGLE_THREADED"  # <- disables OpenMP parallelism and imports.
-    _flags += " -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS"  # <- enable if compiler supports local functions for variable width comparison.
     # _flags += " -D_UNIQUE_DEBUG_ENABLED"  # <- enable for testing / debugging.
+    _flags_by_safety = [
+        "-fopenmp -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- slower for small cases, good for *very* large data.
+        "-D_UNIQUE_SINGLE_THREADED -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- disables OpenMP parallelism and imports.
+        "-D_UNIQUE_SINGLE_THREADED", # ^^ enable if compiler supports local functions for variable width comparison.
+        # ^^ safest option, single threaded with no local functions.
+    ]
     _lib_dir = os.path.dirname(os.path.abspath(__file__))
     _lib_path = os.path.join(_lib_dir, "unique", "unique.so")
     _src_path = os.path.join(_lib_dir, "unique", "unique.c")
@@ -155,11 +159,27 @@ def build_unique():
     except:
         # Compile the shared library.
         import sys
-        cmd = f'{_c_compiler} {_flags} -o "{_lib_path}" "{_src_path}"'
-        if _verbose: print(" ", cmd, flush=True)
-        os.system(cmd)
-        if _verbose: print(flush=True)
-        # Load the shared library
-        _unique = ctypes.cdll.LoadLibrary(_lib_path)
+        # Trial one to compile and load.
+        try:
+            cmd = f'{_c_compiler} {_flags} {_flags_by_safety[0]} -o "{_lib_path}" "{_src_path}"'
+            if _verbose: print(" ", cmd, flush=True)
+            os.system(cmd)
+            if _verbose: print(flush=True)
+            _unique = ctypes.cdll.LoadLibrary(_lib_path)
+        except:
+            # Trial two to compile and load.
+            try:
+                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[1]} -o "{_lib_path}" "{_src_path}"'
+                if _verbose: print(" ", cmd, flush=True)
+                os.system(cmd)
+                if _verbose: print(flush=True)
+                _unique = ctypes.cdll.LoadLibrary(_lib_path)
+            # Trial three to compile and load.
+            except:
+                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[2]} -o "{_lib_path}" "{_src_path}"'
+                if _verbose: print(" ", cmd, flush=True)
+                os.system(cmd)
+                if _verbose: print(flush=True)
+                _unique = ctypes.cdll.LoadLibrary(_lib_path)
     # Return the compiled module.
     return _unique

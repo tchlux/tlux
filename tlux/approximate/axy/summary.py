@@ -336,3 +336,7 @@ def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
         if (details.config.early_stop):
             time_remaining_sec -= steps_since * avg_sec_per_step
         print(f" {steps_taken:5d}  ({current_mse:.2e})  [{best_mse:.2e}]  -> {steps_remaining}-{steps_since}  ~{time_remaining_sec/60:.1f} min", end=end, flush=flush)
+
+# TODO: Add interactive plot option as a summary?
+# TODO: Add interactive model input/output pairs?
+# TODO: Add validation data and model checkpointing here?

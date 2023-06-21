@@ -1,21 +1,12 @@
 ! TODO:
 ! 
-! - Update INDEX_TO_PAIR function to do the following for different set sizes:
-!     2 elements -> (1) (1,2) (2,1) (2),
-!     3 elements -> (1) (1,2) (2,1) (1,3) (3,1) (2) (2,3) (3,2) (3),
-!     4 elements -> (1) (1,2) (2,1) (1,3) (3,1) (1,4) (4,1) (2) (2,3) (3,2) (2,4) (4,2) (3) (3,4) (4,3) (4),
-!   each in its particular order. With this, partial aggregation will "make more sense"
-!   because the elements have an inherent order to them.
-! 
-! - Add a logical parameter AGG_ORDERED that is TRUE when the elements of the aggregate
-!   set are ordered, and FALSE when they are not. This value can be used to determine if
-!   random shuffling should be applied to the set elements in FETCH_DATA when retrieved.
+! - Implement YI support, embeddings for outputs.
 ! 
 ! - Add a parameter PARTIAL_STEPS that determines how many steps are included in
 !   the partial aggregation process. This can be used to short-circuit doing all
 !   possible subset sizes, instead only doing subsets of well-spaced sizes.
 !   Specifically, those steps should traverse including all comparisons between
-!   increasingly more elements.
+!   increasingly more elements (so progressing as ~x**2).
 ! 
 ! - Check if OMP TARGET actually sends code to a different device.
 ! - Experiment with 'OMP TARGET TEAMS DISTRIBUTE PARALLEL' to see if it uses GPU correctly.
@@ -100,6 +91,9 @@ MODULE AXY
      INTEGER(KIND=INT32) :: MDO     ! model dimension of output
      INTEGER(KIND=INT32) :: MDI     ! model dimension of input (internal usage only)
      INTEGER(KIND=INT32) :: MDSO    ! model dimension of state output (internal usage only)
+     ! Output configuration (number of embeddings if there are any).
+     INTEGER(KIND=INT32) :: DOE     ! dimension of output embeddings
+     INTEGER(KIND=INT32) :: NOE     ! number of output embeddings
      ! Summary numbers that are computed.
      INTEGER(KIND=INT32) :: DO      ! Dimension output (either MDO or ADO). 
      ! Model descriptors.
@@ -118,8 +112,9 @@ MODULE AXY
      INTEGER(KIND=INT64) :: MSIV, MEIV, MSIS, MEIS ! model input (vec & shift)
      INTEGER(KIND=INT64) :: MSSV, MESV, MSSS, MESS ! model states (vec & shift)
      INTEGER(KIND=INT64) :: MSOV, MEOV             ! model output
+     INTEGER(KIND=INT64) :: OSEV, OEEV             ! output embedding
      ! Index subsets for data normalization.
-     !   M___ -> model,  A___ -> aggregator
+     !   M___ -> model,  A___ -> aggregator,  O___ -> output
      !   _I__ -> input,  _O__ -> output,      _E__ -> embedding
      !   __S_ -> shift,  __M_ -> multiplier,  __C_ -> center
      !   ___S -> start,  ___E -> end
@@ -129,6 +124,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: MISS, MISE, MOSS, MOSE
      INTEGER(KIND=INT64) :: MIMS, MIME, MOMS, MOME
      INTEGER(KIND=INT64) :: MECS, MECE
+     INTEGER(KIND=INT64) :: OECS, OECE
      ! Function parameter.
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
      ! Optimization related parameters.
@@ -165,8 +161,9 @@ MODULE AXY
      LOGICAL(KIND=C_BOOL) :: RESHUFFLE = .TRUE. ! True if the linear random generator for optimization should be randomized after cycling over all input data.
      LOGICAL(KIND=C_BOOL) :: GRANULAR_PARALLELISM = .FALSE. ! True if parallelism should be pushed down into core operators (evaluate, model_gradient, etc.) during fit.
      ! Normalization and data handling during FIT_MODEL.
-     LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if all intermediate values (in ordered sum of aggregates) should be passed through model.
+     LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if intermediate values (in ordered sum of aggregates) should be passed through model.
      LOGICAL(KIND=C_BOOL) :: PAIRWISE_AGGREGATION = .FALSE. ! True if all pairs of aggregate inputs should be considered in evaluation.
+     LOGICAL(KIND=C_BOOL) :: ORDERED_AGGREGATION = .FALSE. ! True if the elements of the aggregate set are meaningfully ordered.
      LOGICAL(KIND=C_BOOL) :: AX_NORMALIZED = .FALSE. ! False if AX data needs to be normalized.
      LOGICAL(KIND=C_BOOL) :: RESCALE_AX = .TRUE. ! Rescale all AX components to be equally weighted.
      LOGICAL(KIND=C_BOOL) :: AXI_NORMALIZED = .FALSE. ! False if AXI embeddings need to be normalized.
@@ -213,6 +210,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NM,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMXG, EMXG ! M_GRADS(NM,MDS,MNS+1)
+     INTEGER(KIND=INT64) :: SOET, EOET ! O_EMB_TEMP(DOE,NOE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SYG, EYG ! Y_GRADIENT(MDO,NM)
      INTEGER(KIND=INT64) :: SAXIS, EAXIS ! AXI_SHIFT(ADE)
      INTEGER(KIND=INT64) :: SAXIR, EAXIR ! AXI_RESCALE(ADE,ADE)
@@ -287,10 +285,10 @@ CONTAINS
 
   ! Generate a model configuration given state parameters for the model.
   SUBROUTINE NEW_MODEL_CONFIG(ADN, ADE, ANE, ADS, ANS, ADO, &
-       MDN, MDE, MNE, MDS, MNS, MDO, NUM_THREADS, CONFIG)
+       MDN, MDE, MNE, MDS, MNS, MDO, DOE, NOE, NUM_THREADS, CONFIG)
      ! Size related parameters.
      INTEGER(KIND=INT32), INTENT(IN) :: ADN, MDN
-     INTEGER(KIND=INT32), INTENT(IN) :: MDO
+     INTEGER(KIND=INT32), INTENT(IN) :: MDO, DOE, NOE
      INTEGER(KIND=INT32), OPTIONAL, INTENT(IN) :: ADO
      INTEGER(KIND=INT32), OPTIONAL, INTENT(IN) :: ADS, MDS
      INTEGER(KIND=INT32), OPTIONAL, INTENT(IN) :: ANS, MNS
@@ -345,6 +343,15 @@ CONTAINS
         CONFIG%ADSO = 0
         CONFIG%ADO = 0
      END IF
+     ! No aggregate model.
+     IF (CONFIG%ADI .EQ. 0) THEN
+        CONFIG%ADN = 0
+        CONFIG%ADE = 0
+        CONFIG%ANE = 0
+        CONFIG%ADS = 0
+        CONFIG%ANS = 0
+        CONFIG%ADSO = 0
+     END IF
      ! ---------------------------------------------------------------
      ! MNE
      IF (PRESENT(MNE)) CONFIG%MNE = MNE
@@ -374,18 +381,23 @@ CONTAINS
      END IF
      ! MDO
      CONFIG%MDO = MDO
+     ! No fixed model.
      IF (CONFIG%MDO .EQ. 0) THEN
         CONFIG%MDI = 0
         CONFIG%MDE = 0
+        CONFIG%MNE = 0
         CONFIG%MDS = 0
         CONFIG%MNS = 0
         CONFIG%MDSO = 0
      END IF
+     ! DOE, NOE (output embeddings)
+     CONFIG%DOE = DOE
+     CONFIG%NOE = NOE
      ! DO
      IF (CONFIG%MDO .GT. ZERO) THEN
-        CONFIG%DO = CONFIG%MDO
+        CONFIG%DO = CONFIG%MDO + CONFIG%DOE
      ELSE
-        CONFIG%DO = CONFIG%ADO
+        CONFIG%DO = CONFIG%ADO + CONFIG%DOE
      END IF
      ! ---------------------------------------------------------------
      ! NUM_THREADS
@@ -447,6 +459,11 @@ CONTAINS
      CONFIG%MEOV = CONFIG%MSOV-ONE +  CONFIG%MDSO * CONFIG%MDO
      CONFIG%TOTAL_SIZE = CONFIG%MEOV
      ! ---------------------------------------------------------------
+     !   output embedding vecs [DOE by NOE]
+     CONFIG%OSEV = ONE + CONFIG%TOTAL_SIZE
+     CONFIG%OEEV = CONFIG%OSEV-ONE +  CONFIG%DOE * CONFIG%NOE
+     CONFIG%TOTAL_SIZE = CONFIG%OEEV
+     ! ---------------------------------------------------------------
      !   number of variables
      CONFIG%NUM_VARS = CONFIG%TOTAL_SIZE
      ! ---------------------------------------------------------------
@@ -462,6 +479,10 @@ CONTAINS
      CONFIG%MECS = ONE + CONFIG%TOTAL_SIZE
      CONFIG%MECE = CONFIG%MECS-ONE + CONFIG%MDE
      CONFIG%TOTAL_SIZE = CONFIG%MECE
+     !   output embedding center [MDE]
+     CONFIG%OECS = ONE + CONFIG%TOTAL_SIZE
+     CONFIG%OECE = CONFIG%OECS-ONE + CONFIG%DO
+     CONFIG%TOTAL_SIZE = CONFIG%OECE
      ! ---------------------------------------------------------------
      !   aggregator pre-input shift
      CONFIG%AISS = ONE + CONFIG%TOTAL_SIZE
@@ -627,6 +648,10 @@ CONTAINS
     CONFIG%SMXG = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMXG = CONFIG%SMXG-ONE + CONFIG%NMS * CONFIG%MDS * (CONFIG%MNS+ONE)
     CONFIG%RWORK_SIZE = CONFIG%EMXG
+    ! O embedding temp holder
+    CONFIG%SOET = ONE + CONFIG%RWORK_SIZE
+    CONFIG%EOET = CONFIG%SOET-ONE + CONFIG%DOE * CONFIG%NOE * CONFIG%NUM_THREADS
+    CONFIG%RWORK_SIZE = CONFIG%EOET
     ! Y
     CONFIG%SMYB = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMYB = CONFIG%SMYB-ONE + CONFIG%DO * CONFIG%NMS
@@ -732,29 +757,37 @@ CONTAINS
     IF (PRESENT(SEED)) THEN
        CALL SEED_RANDOM(SEED)
     END IF
-    ! Initialize the fixed model.
-    CALL INIT_SUBMODEL(&
-         CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
-         CONFIG%MDSO, CONFIG%MDO, CONFIG%MDE, CONFIG%MNE, &
-         MODEL(CONFIG%MSIV:CONFIG%MEIV), &
-         MODEL(CONFIG%MSIS:CONFIG%MEIS), &
-         MODEL(CONFIG%MSSV:CONFIG%MESV), &
-         MODEL(CONFIG%MSSS:CONFIG%MESS), &
-         MODEL(CONFIG%MSOV:CONFIG%MEOV), &
-         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
-         MODEL(CONFIG%MECS:CONFIG%MECE))
-    ! 
     ! Initialize the aggregator model.
     CALL INIT_SUBMODEL(&
          CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, &
-         CONFIG%ADSO, CONFIG%ADO+1, CONFIG%ADE, CONFIG%ANE, &
+         CONFIG%ADSO, CONFIG%ADO+1, &
          MODEL(CONFIG%ASIV:CONFIG%AEIV), &
          MODEL(CONFIG%ASIS:CONFIG%AEIS), &
          MODEL(CONFIG%ASSV:CONFIG%AESV), &
          MODEL(CONFIG%ASSS:CONFIG%AESS), &
-         MODEL(CONFIG%ASOV:CONFIG%AEOV), &
+         MODEL(CONFIG%ASOV:CONFIG%AEOV))
+    ! Initialize the aggregate model embeddings.
+    CALL INIT_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
          MODEL(CONFIG%ASEV:CONFIG%AEEV), &
          MODEL(CONFIG%AECS:CONFIG%AECE))
+    ! Initialize the fixed model.
+    CALL INIT_SUBMODEL(&
+         CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
+         CONFIG%MDSO, CONFIG%MDO, &
+         MODEL(CONFIG%MSIV:CONFIG%MEIV), &
+         MODEL(CONFIG%MSIS:CONFIG%MEIS), &
+         MODEL(CONFIG%MSSV:CONFIG%MESV), &
+         MODEL(CONFIG%MSSS:CONFIG%MESS), &
+         MODEL(CONFIG%MSOV:CONFIG%MEOV))
+    ! Initialize the fixed model embeddings.
+    CALL INIT_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
+         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
+         MODEL(CONFIG%MECS:CONFIG%MECE))
+    ! Initialize the output embeddings.
+    CALL INIT_EMBEDDINGS(CONFIG%DOE, CONFIG%NOE, &
+         MODEL(CONFIG%OSEV:CONFIG%OEEV), &
+         MODEL(CONFIG%OECS:CONFIG%OECE))
+    ! ---------------------------------------------------------------------
     ! Set the normalization shifts to zero and multipliers to the identity.
     !   aggregator input shift,
     MODEL(CONFIG%AISS:CONFIG%AISE) = 0.0_RT    
@@ -783,18 +816,34 @@ CONTAINS
 
 
   CONTAINS
+    ! Initialize embeddings.
+    SUBROUTINE INIT_EMBEDDINGS(DE, NE, EMBEDDINGS, EMBEDDINGS_MEAN)
+      INTEGER(KIND=INT32), INTENT(IN) :: DE, NE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DE, NE) :: EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(DE) :: EMBEDDINGS_MEAN
+      REAL(KIND=RT) :: D, R
+      INTEGER(KIND=INT64) :: I
+      CALL RANDOM_UNIT_VECTORS(EMBEDDINGS(:,:))
+      ! Multiply the embeddings by random lengths to make them better spaced,
+      !  specifically, try to make them uniformly distributed in the ball.
+      D = 1.0_RT / REAL(DE, RT)
+      DO I = 1, NE
+         CALL RANDOM_REAL(V=R)
+         EMBEDDINGS(:,I) = EMBEDDINGS(:,I) * R**D
+      END DO
+      EMBEDDINGS_MEAN(:) = 0.0_RT
+    END SUBROUTINE INIT_EMBEDDINGS
+
     ! Initialize the model after unpacking it into its constituent parts.
-    SUBROUTINE INIT_SUBMODEL(MDI, MDS, MNS, MDSO, MDO, MDE, MNE, &
+    SUBROUTINE INIT_SUBMODEL(MDI, MDS, MNS, MDSO, MDO, &
          INPUT_VECS, INPUT_SHIFT, STATE_VECS, STATE_SHIFT, &
-         OUTPUT_VECS, EMBEDDINGS, EMBEDDINGS_MEAN)
-      INTEGER(KIND=INT32), INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO, MDE, MNE
+         OUTPUT_VECS)
+      INTEGER(KIND=INT32), INTENT(IN) :: MDI, MDS, MNS, MDSO, MDO
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDI, MDS) :: INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS) :: INPUT_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS, MDS, MAX(ZERO,MNS-ONE)) :: STATE_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDS, MAX(ZERO,MNS-ONE)) :: STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDSO, MDO) :: OUTPUT_VECS
-      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE, MNE) :: EMBEDDINGS
-      REAL(KIND=RT), INTENT(INOUT), DIMENSION(MDE) :: EMBEDDINGS_MEAN
       ! Local holder for "origin" at each layer.
       REAL(KIND=RT) :: R, D
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: ORIGIN ! LOCAL ALLOCATION
@@ -803,21 +852,12 @@ CONTAINS
       ! Allocate local variables.
       ALLOCATE(ORIGIN(1:MDS), ORDER(1:MDS))
       ! Generate well spaced random unit-length vectors (no scaling biases)
-      ! for all initial variables in the input, internal, output, and embedings.
+      ! for all initial variables in the input, internal, and output.
       CALL RANDOM_UNIT_VECTORS(INPUT_VECS(:,:))
       DO I = 1, MNS-1
          CALL RANDOM_UNIT_VECTORS(STATE_VECS(:,:,I))
       END DO
       CALL RANDOM_UNIT_VECTORS(OUTPUT_VECS(:,:))
-      CALL RANDOM_UNIT_VECTORS(EMBEDDINGS(:,:))
-      ! Multiply the embeddings by random lengths to make them better spaced,
-      !  specifically, try to make them uniformly distributed in the ball.
-      D = 1.0_RT / REAL(MDE, RT)
-      DO I = 1, MNE
-         CALL RANDOM_REAL(V=R)
-         EMBEDDINGS(:,I) = EMBEDDINGS(:,I) * R**D
-      END DO
-      EMBEDDINGS_MEAN(:) = 0.0_RT
       ! Make the output vectors have very small magnitude initially.
       OUTPUT_VECS(:,:) = OUTPUT_VECS(:,:) * OUTPUT_SCALE
       ! Generate deterministic equally spaced shifts for inputs and internal layers, 
@@ -1125,7 +1165,6 @@ CONTAINS
        IF (CONFIG%NM .GE. SIZE(Y_IN,2,KIND=INT64)) THEN
           GENDEX = I
        ELSE
-          ! WARNING: Cannot enable reshuffling here because it needs to be repeatable between X and AX.
           GENDEX = GET_NEXT_INDEX(CONFIG%NMT, CONFIG%I_NEXT, CONFIG%I_MULT, &
                CONFIG%I_STEP, CONFIG%I_MOD, CONFIG%I_ITER, &
                RESHUFFLE=CONFIG%RESHUFFLE)
@@ -1143,6 +1182,7 @@ CONTAINS
        X(:CONFIG%MDN,I) = X_IN(:,GENDEX)
        XI(:,I) = XI_IN(:,GENDEX)
        Y(:,I) = Y_IN(:,GENDEX)
+       ! TODO: Fetch Y embeddings and place in the back portion of Y.
        YW(:,I) = YW_IN(:,GENDEX)
     END DO
     ! If there are aggregate inputs ...
@@ -1193,7 +1233,7 @@ CONTAINS
        DO I = 1, MIN(CONFIG%NM, SIZE(SIZES_IN,KIND=INT64))
           GENDEX = GENDEXES(I)
           ! Randomly initialize the iterator for this aggregate set (each time we enter).
-          IF (CONFIG%RESHUFFLE) THEN
+          IF ((CONFIG%RESHUFFLE) .AND. (.NOT. CONFIG%ORDERED_AGGREGATION)) THEN
              CALL INITIALIZE_ITERATOR( &
                   I_LIMIT=AGG_ITERATORS_IN(1,GENDEX), &
                   I_NEXT=AGG_ITERATORS_IN(2,GENDEX), &
@@ -1202,6 +1242,14 @@ CONTAINS
                   I_MOD=AGG_ITERATORS_IN(5,GENDEX), &
                   I_ITER=AGG_ITERATORS_IN(6,GENDEX) &
              )
+          ! If this set is ordered, only iterate over the last SIZE elements.
+          ELSE IF (CONFIG%ORDERED_AGGREGATION) THEN
+             AGG_ITERATORS_IN(1,GENDEX) = AGG_ITERATORS_IN(1,GENDEX) ! I_LIMIT
+             AGG_ITERATORS_IN(2,GENDEX) = AGG_ITERATORS_IN(1,GENDEX) - SIZES(I) ! I_NEXT
+             AGG_ITERATORS_IN(3,GENDEX) = ONE ! I_MULT
+             AGG_ITERATORS_IN(4,GENDEX) = ONE ! I_STEP
+             AGG_ITERATORS_IN(5,GENDEX) = AGG_ITERATORS_IN(5,GENDEX) ! I_MOD
+             AGG_ITERATORS_IN(6,GENDEX) = ZERO ! I_ITER
           END IF
           AS = AGG_STARTS(I)
           ! Pack in those inputs. Note that SIZES(I) is derived from SIZES_IN(GENDEX).
@@ -1237,6 +1285,7 @@ CONTAINS
                       ! Get the single integer representing this pair.
                       CALL PAIR_TO_INDEX(INT(CONFIG%ANE,INT64)+ONE, AXI_IN(L,P1)+ONE, AXI_IN(L,P2)+ONE, K)
                       AXI(L,AS) = K + INT(CONFIG%ANE,INT64)
+                      ! ^ Integer embeddings over the total number are considered to be pairs of embeddings.
                    END DO
                 END IF
              ELSE  ! .NOT. CONFIG%PAIRWISE_AGGREGATION
@@ -3262,7 +3311,7 @@ CONTAINS
                     I_STEP=AGG_ITERATORS(4,I), &
                     I_MOD=AGG_ITERATORS(5,I), &
                     I_ITER=AGG_ITERATORS(6,I) &
-                    )
+               )
             END IF
          END DO
          ! Make all iterators deterministic when all pairs will fit into the model.

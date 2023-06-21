@@ -92,7 +92,9 @@ class AXY:
             self.config = self.AXY.new_model_config(
                 adn=adn, ado=ado, ads=ads, ans=ans, ane=ane, ade=ade,
                 mdn=mdn, mdo=mdo, mds=mds, mns=mns, mne=mne, mde=mde,
-                num_threads=self.num_threads)
+                num_threads=self.num_threads,
+                noe=0, doe=0,  # temporarily disabling output embeddings
+            )
             # Set any configuration keyword arguments given at initialization
             #  that were not passed to "new_model_config".
             for n in ({n for (n,t) in self.config._fields_} & set(kwargs)):
@@ -127,9 +129,12 @@ class AXY:
 
 
     # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
-    def fit(self, ax=None, axi=None, sizes=None, x=None, xi=None,
+    def fit(self, *args, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, nm=None, na=None,
             callback=mse_and_time, **kwargs):
+        # Prevent calls from being made without naming arguments (to ensure alignment).
+        if (len(args) > 0):
+            raise(RuntimeError(f"Calling {type(self).__name__}.fit with unnamed arguments is not allowed to prevent unexpected behavior.\n  Set keyword arguments depending on data and model type: 'ax=...', 'axi=...', 'sizes=...', 'x=...', 'xi=...', 'y=...', 'yi=...'."))
         # Ensure that 'y' values were provided.
         assert ((y is not None) or (yi is not None)), "AXY.fit requires 'y' or 'yi' values, but neitherwere provided (use keyword argument 'y=<values>' or 'yi=<values>')."
         # Make sure that 'sizes' were provided for aggregate inputs.
@@ -267,8 +272,11 @@ class AXY:
 
 
     # Make predictions for new data.
-    def predict(self, x=None, xi=None, ax=None, axi=None, sizes=None,
+    def predict(self, *args, ax=None, axi=None, sizes=None, x=None, xi=None,
                 embedding=False, save_states=False, raw_scores=False, na=None, **kwargs):
+        # Prevent calls from being made without naming arguments (to ensure alignment).
+        if (len(args) > 0):
+            raise(RuntimeError(f"Calling {type(self).__name__}.predict with unnamed arguments is not allowed to prevent unexpected behavior.\n  Set keyword arguments depending on data and model type: 'ax=...', 'axi=...', 'sizes=...', 'x=...', 'xi=...', 'y=...', 'yi=...'."))
         # Evaluate the model at all data.
         assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
         assert (not (embedding and raw_scores)), "AXY.predict cannot provide both 'embedding=True' *and* 'raw_scores=True'."
@@ -325,15 +333,14 @@ class AXY:
                     agg_iterators[:,i] = 0
                 else:
                     agg_iterators[0,i] = sizes[i]
+                    # If pairwise, increase the effective size of each aggregate set.
                     if self.config.pairwise_aggregation:
                         agg_iterators[0,i] = agg_iterators[0,i]**2
-                    # If all fit, use a deterministic iterators [0, 1, 2, ...]
+                    # If all fit, use a deterministic iterator [0, 1, 2, ...].
                     if fits_all:
                         agg_iterators[1:,i] = (0, 1, 1, agg_iterators[0,i], 0) # next, step, mult, mod
                     # Otherwise, use a random linear iterator.
                     else:
-                        # TODO: This line of code will break since INITIALIZE_ITERATOR
-                        #       now lives in the RANDOM module.
                         agg_iterators[1:,i] = self.random.initialize_iterator(
                             i_limit=agg_iterators[0,i],
                         )
@@ -621,8 +628,8 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = False
-    use_x = True
+    use_a = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -646,7 +653,7 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 1000,
+        steps = 10000,
         # nm = nm,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.005,
@@ -665,7 +672,8 @@ if __name__ == "__main__":
         # x_normalized = True,
         # y_normalized = True,
         pairwise_aggregation = False,
-        partial_aggregation = False,
+        partial_aggregation = True,
+        # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,
         # **ONLY_SGD
@@ -769,18 +777,26 @@ if __name__ == "__main__":
         m.save(path)
 
     print("Done fitting, loading..", flush=True)
+
+    trained_model = m
+
     # Load the saved model.
-    m = AXY()
-    m.load(path)
+    loaded_model = AXY()
+    loaded_model.load(path)
+
     # Remove the saved model if only new models are desired.
     if new_model:
         os.remove(path)
 
-    # Print the model.
+    # Print the model, config, and any profiling stats.
     print()
-    print(m, m.config)
+    print(loaded_model)
     print()
-    print(m.AXY.profile("axy.fetch_data"))
+    print(trained_model.config)
+    print(loaded_model.config)
+    print()
+    print(loaded_model.AXY.profile("axy.fetch_data"))
+    print()
 
     # Evaluate the model and compare with the data provided for training.
     # TODO: Add some evaluations of the categorical outputs.
@@ -806,7 +822,7 @@ if __name__ == "__main__":
 
 
     # Define a function that evaluates the model with some different presets.
-    def fhat(x, f=functions[0].__name__, yii=None):
+    def fhat(x, f=functions[0].__name__, yii=None, m=trained_model):
         x = np.asarray(x, dtype="float32").reshape((-1,d)).copy()
         n = x.shape[0]
         xi = np.asarray([f]*n, dtype=object).reshape((-1,1))
@@ -861,7 +877,7 @@ if __name__ == "__main__":
     p.plot(show=False)
 
     # Generate a visual for data projections.
-    m.predict(
+    loaded_output = loaded_model.predict(
         ax=(ax.copy() if use_a else None),
         axi=(axi if use_a else None),
         sizes=(sizes if use_a else None),
@@ -869,6 +885,15 @@ if __name__ == "__main__":
         xi=(xi if use_x else None),
         save_states=True
     )
+    trained_output = trained_model.predict(
+        ax=(ax.copy() if use_a else None),
+        axi=(axi if use_a else None),
+        sizes=(sizes if use_a else None),
+        x=(x.copy() if use_x else None),
+        xi=(xi if use_x else None),
+        save_states=True
+    )
+
     from tlux.math import project
     p = Plot("Data embeddings")
     munpacked = m.unpack()
@@ -905,55 +930,3 @@ if __name__ == "__main__":
         p.show(append=True, show=True)
     print("", "done.", flush=True)
 
-
-# 2023-06-12 20:45:01
-# 
-            ######################################################################################################################
-            # # Show the record if the crash was during a fit.                                                                   #
-            # if ((method == "fit_model") and (SHOW_FAILURE_PLOT)):                                                              #
-            #     print()                                                                                                        #
-            #     from tlux.plot import Plot                                                                                     #
-            #     p = Plot("Model training record")                                                                              #
-            #     # Rescale the columns of the record for visualization.                                                         #
-            #     record = self.record                                                                                           #
-            #     i = record.shape[0]                                                                                            #
-            #     step_indices = list(range(1,i+1))                                                                              #
-            #     p.add("MSE", step_indices, record[:i,0], color=1, mode="lines")                                                #
-            #     p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines")                                       #
-            #     p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines")                                         #
-            #     p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines")                                       #
-            #     p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines")                                   #
-            #     p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines")                                   #
-            #     p.show(show=False, y_range=[-.2, 1.2])                                                                         #
-            #     from tlux.math import project                                                                                  #
-            #     from tlux.approximate.axy.summary import Details                                                               #
-            #     p = Plot("Data and weight projections")                                                                        #
-            #     deets = Details(config=self.config, model=self.model, **info)                                                  #
-            #     for (attr,val) in sorted(deets.items()):                                                                       #
-            #         if ((attr in {"record", "model_grad", "agg_iterators", "a_order", "m_order", "a_lengths", "m_lengths"}) or #
-            #             (not hasattr(val, "size")) or                                                                          #
-            #             (val.size <= 0) or                                                                                     #
-            #             (not hasattr(val, "shape")) or                                                                         #
-            #             (len(val.shape) not in {2,3})                                                                          #
-            #         ): continue                                                                                                #
-            #         # Handle possible matrices of data.                                                                        #
-            #         if (len(val.shape) == 2):                                                                                  #
-            #             print(f" plotting '{attr}'.. {val.shape}")                                                             #
-            #             if (attr == "ay"):                                                                                     #
-            #                 val = val.T                                                                                        #
-            #             minval = np.nanmin(val)                                                                                #
-            #             maxval = np.nanmax(val)                                                                                #
-            #             p.add(attr+f" ({minval:.2e}, {maxval:.2e})",                                                           #
-            #                   *project(val[:1000,:1000].T, 2).T)                                                               #
-            #         # Handle possible stacked matrices (state weights, state values).                                          #
-            #         elif (len(val.shape) == 3):                                                                                #
-            #             print(f" plotting '{attr}'..")                                                                         #
-            #             for i in range(val.shape[-1]):                                                                         #
-            #                 print(f"   {i+1}.. {val[:,:,i].shape}")                                                            #
-            #                 minval = np.nanmin(val)                                                                            #
-            #                 maxval = np.nanmax(val)                                                                            #
-            #                 p.add(attr+f" {i+1} ({minval:.2e}, {maxval:.2e})",                                                 #
-            #                       *project(val[:1000,:1000,i].T, 2).T)                                                         #
-            #     print()                                                                                                        #
-            #     p.show(append=True, show=True)                                                                                 #
-            ######################################################################################################################
