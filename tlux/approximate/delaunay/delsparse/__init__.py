@@ -19,7 +19,7 @@ _shared_object_name = "delsparse." + platform.machine() + ".so"
 _this_directory = os.path.dirname(os.path.abspath(__file__))
 _path_to_lib = os.path.join(_this_directory, _shared_object_name)
 _compile_options = ['-fPIC', '-shared', '-O3', '-std=legacy', '-fopenmp']
-_ordered_dependencies = ['blas.f', 'lapack.f', 'slatec.f', 'delsparse.f90', 'delsparse_c_wrapper.f90']
+_ordered_dependencies = ['real_precision.f90', 'blas.f', 'lapack.f', 'slatec.f', 'delsparse.f90', 'delsparse_c_wrapper.f90']
 _symbol_files = []# 
 # --------------------------------------------------------------------
 #               AUTO-COMPILING
@@ -29,6 +29,17 @@ for _ in _symbol_files:
     _ = ctypes.CDLL(os.path.join(_this_directory, _), mode=ctypes.RTLD_GLOBAL)
 # Try to import the existing object. If that fails, recompile and then try.
 try:
+    # Check to see if the source files have been modified and a recompilation is needed.
+    if (max(max([0]+[os.path.getmtime(os.path.realpath(os.path.join(_this_directory,_))) for _ in _symbol_files]),
+            max([0]+[os.path.getmtime(os.path.realpath(os.path.join(_this_directory,_))) for _ in _ordered_dependencies]))
+        > os.path.getmtime(_path_to_lib)):
+        print()
+        print("WARNING: Recompiling because the modification time of a source file is newer than the library.", flush=True)
+        print()
+        if os.path.exists(_path_to_lib):
+            os.remove(_path_to_lib)
+        raise NotImplementedError(f"The newest library code has not been compiled.")
+    # Import the library.
     clib = ctypes.CDLL(_path_to_lib)
 except:
     # Remove the shared object if it exists, because it is faulty.
@@ -771,21 +782,6 @@ def delaunaysparsep(d, n, pts, m, q, simps, weights, ierr, interp_in=None, inter
 
     # Return final results, 'INTENT(OUT)' arguments only.
     return pts, q, simps, weights, ierr, (interp_out if interp_out_present else None), (rnorm if rnorm_present else None)
-
-
-class real_precision:
-    ''''''
-
-    # Declare 'r8'
-    def get_r8(self):
-        r8 = ctypes.c_int()
-        clib.real_precision_get_r8(ctypes.byref(r8))
-        return r8.value
-    def set_r8(self, r8):
-        raise(NotImplementedError('Module attributes with PARAMETER status cannot be set.'))
-    r8 = property(get_r8, set_r8)
-
-real_precision = real_precision()
 
 
 class delsparse_mod:

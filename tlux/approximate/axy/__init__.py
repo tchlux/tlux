@@ -61,7 +61,6 @@ class AXY:
         self.axi_map = []
         self.xi_map = []
         self.yi_map = []
-        self.yi_embeddings = np.zeros(0, dtype="float32")
         # Initialize the attributes of the model that can be initialized.
         self._init_kwargs = kwargs
         self._init_model(**kwargs)
@@ -141,10 +140,10 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.fit requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Get all inputs as arrays.
-        nm_total, na_total, ax, axi, sizes, x, xi, y, yw_in, shapes, maps = (
+        nm_total, na_total, ax, axi, sizes, x, xi, y, yi, yw_in, shapes, maps = (
             to_array(ax, axi, sizes, x, xi, y, yi, maps=dict(
                 axi_map=self.axi_map, xi_map=self.xi_map,
-                yi_map=self.yi_map, yi_embeddings=self.yi_embeddings,
+                yi_map=self.yi_map,
             ))
         )
         for (k,v) in maps.items(): setattr(self, k, v)
@@ -209,7 +208,7 @@ class AXY:
         # Set up new work space for this minimization process.
         self.AXY.new_fit_config(
             nm=nm, na=na, nmt=nm_total, nat=na_total,
-            adi=axi.shape[1], mdi=xi.shape[1],
+            adi=axi.shape[1], mdi=xi.shape[1], odi=yi.shape[1],
             seed=self.seed, config=self.config
         )
         rwork = np.ones(self.config.rwork_size, dtype="float32")  # beware of allocation, heap vs stack
@@ -233,7 +232,7 @@ class AXY:
         while (self.config.steps_taken < target_steps):
             result = self.AXY.fit_model(
                 self.config, self.model, rwork, iwork, lwork,
-                ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
+                ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T, yw_in.T,
                 yw.T, agg_iterators.T,
                 steps=steps, record=self.record.T,
                 continuing=continuing,
@@ -284,7 +283,7 @@ class AXY:
         if ((ax is not None) or (axi is not None)):
             assert (sizes is not None), "AXY.predict requires 'sizes' to be provided for aggregated input sets (ax and axi)."
         # Make sure that all inputs are numpy arrays.
-        nmt, nat, ax, axi, sizes, x, xi, _, _, _, _ = (
+        nmt, nat, ax, axi, sizes, x, xi, _, _, _, _, _ = (
             to_array(ax, axi, sizes, x, xi, maps=dict(axi_map=self.axi_map, xi_map=self.xi_map))
         )
         # Set the default "number of aggregate inputs" allowed.
@@ -466,13 +465,17 @@ class AXY:
             return last_state
         # If there are categorical outputs, then select by taking the max magnitude output.
         elif ((len(self.yi_map) > 0) and (not raw_scores)):
+            # Extract the YI embeddings matrix from the model.
+            yi_embeddings = self.model[self.config.osev:self.config.oeev+1].reshape(
+                self.config.doe, self.config.noe, order='F'
+            )
             # Get the number of category outputs and the number of numeric outputs.
             yne = sum(map(len, self.yi_map))
             ynn = y.shape[1]-(yne-1)
             # Get the numerical columns first.
             _y = [y[:,i] for i in range(ynn)]
             # Project the categorical embedding outputs into a matrix with "yne" columns.
-            y = np.matmul(y[:,ynn:], self.yi_embeddings.T)
+            y = np.matmul(y[:,ynn:], yi_embeddings)
             # Iterate over each categorical output column, picking the category whose embedding had the largest value.
             start = 0
             for i in range(len(self.yi_map)):
@@ -505,7 +508,6 @@ class AXY:
             "xi_map" : [m.tolist() for m in self.xi_map],
             "axi_map" : [m.tolist() for m in self.axi_map],
             "yi_map" : [m.tolist() for m in self.yi_map],
-            "yi_embeddings" : self.yi_embeddings.tolist(),
         })
         # Write the JSON contents of the model to file.
         if (path.endswith(".gz")):

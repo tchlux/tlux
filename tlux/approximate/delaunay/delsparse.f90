@@ -1,7 +1,3 @@
-MODULE REAL_PRECISION  ! HOMPACK90 module for 64-bit arithmetic.
-INTEGER, PARAMETER:: R8=SELECTED_REAL_KIND(13)
-END MODULE REAL_PRECISION
-
 MODULE DELSPARSE_MOD
 ! This module contains the REAL_PRECISION R8 data type for 64-bit arithmetic
 ! and interface blocks for the DELAUNAYSPARSES and DELAUNAYSPARSEP 

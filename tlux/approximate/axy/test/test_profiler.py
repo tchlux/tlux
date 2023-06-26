@@ -1,7 +1,7 @@
 import fmodpy
 
 # Import the profiler.
-profiler = fmodpy.fimport("axy_profiler.f90", verbose=False, build_dir="__build_axy_profiler").profiler
+profiler = fmodpy.fimport("../axy_profiler.f90", verbose=False, build_dir="test_axy_profiler", name="test_axy_profiler").profiler
 
 # Run a simple test with a sleep command.
 def test_profiler():

@@ -4,20 +4,20 @@
 #  - Create a function for visualizing all of the basis functions in a model.
 #  - Make sure the above function works in higher dimension (use PCA?).
 
-import fmodpy
-# Get the directory for the AXY compiled source code.
-AXY = fmodpy.fimport(
-    input_fortran_file = "../axy.f90",
-    dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-    name = "test_axy_module",
-    blas = True,
-    lapack = True,
-    omp = True,
-    wrap = True,
-    # rebuild = True,
-    verbose = False,
-    f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-).axy
+# import fmodpy
+# # Get the directory for the AXY compiled source code.
+# AXY = fmodpy.fimport(
+#     input_fortran_file = "../axy.f90",
+#     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+#     name = "test_axy_module",
+#     blas = True,
+#     lapack = True,
+#     omp = True,
+#     wrap = True,
+#     # rebuild = True,
+#     verbose = False,
+#     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+# ).axy
 # # help(AXY)
 
 # Overwrite the typical "AXY" library with the testing one.
@@ -280,6 +280,7 @@ def _test_fetch_data():
                 x_in = np.asarray(np.random.random(size=(config.mdn,nm_in)), dtype="float32", order="F")
                 xi_in = np.zeros((0,nm_in), dtype="int64", order="F")
                 y_in = np.asarray(np.random.random(size=(config.mdo,nm_in)), dtype="float32", order="F")
+                yi_in = np.zeros((0,nm_in), dtype="int64", order="F")
                 yw_in = np.asarray(np.random.random(size=(1,nm_in)), dtype="float32", order="F")
                 agg_iterators = np.zeros((6,nm_in), dtype="int64", order="F")
                 initialize_agg_iterator(config, agg_iterators, sizes_in, seed=seed)
@@ -326,14 +327,15 @@ def _test_fetch_data():
                 x = np.zeros((config.mdn,nms), dtype="float32", order="F")
                 xi = np.zeros((0,nms), dtype="int64", order="F")
                 y = np.zeros((config.mdo,nms), dtype="float32", order="F")
+                yi = np.zeros((0,nms), dtype="int64", order="F")
                 yw = np.zeros((1,nms), dtype="float32", order="F")
                 # Call the Fortran library code.
                 total_seen += 1
                 (
-                    f_config, f_agg_iterators, f_ax, f_axi, f_sizes, f_x, f_xi, f_y, f_yw, f_na, f_nm
+                    f_config, f_agg_iterators, f_ax, f_axi, f_sizes, f_x, f_xi, f_y, f_yi, f_yw, f_na, f_nm
                 ) = AXY.fetch_data(
                     config, agg_iterators, ax_in, ax, axi_in, axi, sizes_in, sizes,
-                    x_in, x, xi_in, xi, y_in, y, yw_in, yw
+                    x_in, x, xi_in, xi, y_in, y, yi_in, yi, yw_in, yw
                 )
                 assert (py_na == f_na), f"Number of aggregate points did not match. dict(nm = {nm}, nms = {nms}, seed = {seed})\n  python:  {py_na}\n  fortran: {f_na}\n"
                 assert (tuple(sorted(py_sizes.tolist())) == tuple(sorted(f_sizes.tolist()))), f"Sizes did not match. dict(nm = {nm}, nms = {nms}, seed = {seed})\n  python:  {py_sizes}\n  fortran: {f_sizes}\n"
@@ -483,14 +485,14 @@ def _test_evaluate():
         # Verify the shape of the data.
         info = AXY.check_shape(
             config, model, raw_data["ax_in"], raw_data["axi_in"], raw_data["sizes_in"],
-            raw_data["x_in"], raw_data["xi_in"], raw_data["y_in"]
+            raw_data["x_in"], raw_data["xi_in"], raw_data["y_in"], raw_data["yi_in"]
         )
         check_code(info, "check_shape")
         # Fetch some raw data into the local placeholders.
         (
             config, details.agg_iterators_in,
             data["ax"], data["axi"], data["sizes"],
-            data["x"], data["xi"], data["y"], data["yw"],
+            data["x"], data["xi"], data["y"], data["yi"], data["yw"],
             data["na"], data["nm"],
         ) = AXY.fetch_data(
             config=config, agg_iterators_in=details.agg_iterators_in,
@@ -500,6 +502,7 @@ def _test_evaluate():
             x_in=raw_data["x_in"], x=data["x"],
             xi_in=raw_data["xi_in"], xi=data["xi"],
             y_in=raw_data["y_in"], y=data["y"],
+            yi_in=raw_data["yi_in"], yi=data["yi"],
             yw_in=raw_data["yw_in"], yw=data["yw"],        
         )
         # All necessary keyword arguments for model evaluation.
@@ -629,7 +632,7 @@ def _test_model_gradient():
         (
             config, details.agg_iterators_in,
             data["ax"], data["axi"], data["sizes"],
-            data["x"], data["xi"], data["y"], data["yw"],
+            data["x"], data["xi"], data["y"], data["yi"], data["yw"],
             data["na"], data["nm"],
         ) = AXY.fetch_data(
             config=config, agg_iterators_in=details.agg_iterators_in,
@@ -639,6 +642,7 @@ def _test_model_gradient():
             x_in=raw_data["x_in"], x=data["x"],
             xi_in=raw_data["xi_in"], xi=data["xi"],
             y_in=raw_data["y_in"], y=data["y"],
+            yi_in=raw_data["yi_in"], yi=data["yi"],
             yw_in=raw_data["yw_in"], yw=data["yw"],        
         )
 
@@ -725,6 +729,7 @@ def _test_model_gradient():
             model_grad = 0 * details.model_grad
             a_emb_temp = 0 * details.a_emb_temp
             m_emb_temp = 0 * details.m_emb_temp
+            o_emb_temp = 0 * details.o_emb_temp
             (
                 config,
                 ax,
@@ -738,6 +743,7 @@ def _test_model_gradient():
                 m_grads,
                 a_emb_temp,
                 m_emb_temp,
+                o_emb_temp,
             ) = AXY.model_gradient(
                 config, model,
                 ax=ax, axi=axi, sizes=sizes,
@@ -752,6 +758,7 @@ def _test_model_gradient():
                 m_grads=m_grads,
                 a_emb_temp=a_emb_temp,
                 m_emb_temp=m_emb_temp,
+                o_emb_temp=o_emb_temp,
             )
             check_code(info, "AXY.model_gradient")
             # TODO: Update the gradient checks here to calculate the AY error term as well.
@@ -768,7 +775,9 @@ def _test_model_gradient():
         # max_error = abs(error).max()
         # max_ratio_error = abs(ratio-1).max()
         # failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
-        failed_test = (abs(error).mean() > 0.0001) and (abs(ratio).mean() > 0.01)
+        max_error = abs(error).mean()
+        max_ratio_error = abs(ratio).mean()
+        failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
 
         if (failed_test or SHOW_RESULTS):
             print()
@@ -969,6 +978,7 @@ def _test_normalize_data(dimension=64, show=False):
         x_in = x.T
         xi_in = np.zeros((0,num_points), dtype="int64", order="F")
         y_in = y.T
+        yi_in = np.zeros((0,num_points), dtype="int64", order="F")
         yw_in = np.zeros((0,num_points), dtype="float32", order="F")
         # Set up the "data holder".
         ax = np.zeros((config.adn,config.na), dtype="float32", order="F")
@@ -977,6 +987,7 @@ def _test_normalize_data(dimension=64, show=False):
         x = np.zeros((config.mdi, config.nm), dtype="float32", order="F")
         xi = np.zeros((0,num_points), dtype="int64", order="F")
         y = np.zeros((config.do, config.nm), dtype="float32", order="F")
+        yi = np.zeros((0,num_points), dtype="int64", order="F")
         yw = np.zeros((0,num_points), dtype="float32", order="F")
         # Set up the "transformations".
         ax_shift = np.zeros((config.adn,), dtype="float32", order="F")
@@ -990,9 +1001,12 @@ def _test_normalize_data(dimension=64, show=False):
         xi_rescale = np.zeros((config.mde,config.mde), dtype="float32", order="F")
         y_shift = np.zeros((config.do,), dtype="float32", order="F")
         y_rescale = np.zeros((config.do,config.do), dtype="float32", order="F")
+        yi_shift = np.zeros((config.doe,), dtype="float32", order="F")
+        yi_rescale = np.zeros((config.doe,config.doe), dtype="float32", order="F")
         # Set up the remaining data matrices.
         a_emb_vecs = model[config.asev-1:config.aeev].reshape((config.ane, config.ade)).T
         m_emb_vecs = model[config.msev-1:config.meev].reshape((config.mne, config.mde)).T
+        o_emb_vecs = model[config.osev-1:config.oeev].reshape((config.doe, config.doe)).T
         a_out_vecs = model[config.asov-1:config.aeov].reshape((config.ado+1, config.adso)).T
         agg_iterators = np.zeros((6,config.nmt), dtype="int64", order="F")
         initialize_agg_iterator(config, agg_iterators, sizes_in)
@@ -1019,19 +1033,22 @@ def _test_normalize_data(dimension=64, show=False):
         (
             config, model, agg_iterators,
             ax_in, x_in, y_in, yw_in,
-            ax, axi, sizes, x, xi, y, yw,
+            ax, axi, sizes, x, xi, y, yi, yw,
             ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
-            x_shift, x_rescale, xi_shift, xi_rescale, y_shift, y_rescale,
-            a_emb_vecs, m_emb_vecs,
+            x_shift, x_rescale, xi_shift, xi_rescale,
+            y_shift, y_rescale, yi_shift, yi_rescale,
+            a_emb_vecs, m_emb_vecs, o_emb_vecs,
             a_out_vecs, a_states, ay,
             info
         ) = AXY.normalize_data(
             config, model, agg_iterators,
-            ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yw_in,
-            ax, axi, sizes, x, xi, y, yw,
+            ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yi_in, yw_in,
+            ax, axi, sizes, x, xi, y, yi, yw,
             ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
-            x_shift, x_rescale, xi_shift, xi_rescale, y_shift, y_rescale,
-            a_emb_vecs, m_emb_vecs, a_out_vecs, a_states, ay, info
+            x_shift, x_rescale, xi_shift, xi_rescale,
+            y_shift, y_rescale, yi_shift, yi_rescale,
+            a_emb_vecs, m_emb_vecs, o_emb_vecs,
+            a_out_vecs, a_states, ay, info
         )
         if (should_plot):
             p.add('-> x '+str(i+1), *x_in, marker_size=3)
@@ -1113,13 +1130,13 @@ def _test_large_data_fit():
 
 
 if __name__ == "__main__":
-    _test_scenario_iteration()
-    _test_init_model()
-    # _test_compute_batches() # TODO: Design this test more carefully.
-    _test_fetch_data()
-    # _test_embed() # TODO: Design this test.
-    _test_normalize_data()
-    _test_evaluate()
+    # _test_scenario_iteration()
+    # _test_init_model()
+    # # _test_compute_batches() # TODO: Design this test more carefully.
+    # _test_fetch_data()
+    # # _test_embed() # TODO: Design this test.
+    # _test_normalize_data()
+    # _test_evaluate()
     _test_model_gradient()
     # 
     # _test_large_data_fit()

@@ -491,8 +491,8 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
     # Apply final normalization.
     if (config.normalize):
         if (config.needs_scaling):
-            y[:,:] = m.y_rescale.T @ y
-        y[:,:] = (y.T + m.y_shift).T
+            y[:config.do-config.doe,:] = m.y_rescale.T @ y[:config.do-config.doe,:]
+        y[:config.do-config.doe,:] = (y[:config.do-config.doe,:].T + m.y_shift).T
     state_values["y"] = y
     # Return the final values.
     return state_values

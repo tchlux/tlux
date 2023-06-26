@@ -4,23 +4,53 @@
 # setup should go here to prepare the module on a new computer.
 
 
-# Function to run during module setup.
-def setup():
-    # Try compiling the 'fmath' library.
-    import sys
-    _first = sys.path.pop(0)
+# Build the unique library.
+def build_unique():
+    import os, ctypes, fmodpy
+    # Configure the compilation.
+    _verbose = True
+    # _c_compiler = "cc"  # <- on macOS with Clang, no nested functions allowed.
+    _c_compiler = fmodpy.config.f_compiler  # <- works with gfortran, assuming true for others too.
+    _flags = "-shared -fPIC -O3"  # <- shared library, position independent, O3 optimization.
+    # _flags += " -D_UNIQUE_DEBUG_ENABLED"  # <- enable for testing / debugging.
+    _flags_by_safety = [
+        "-fopenmp -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- slower for small cases, good for *very* large data.
+        "-D_UNIQUE_SINGLE_THREADED -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- disables OpenMP parallelism and imports.
+        "-D_UNIQUE_SINGLE_THREADED", # ^^ enable if compiler supports local functions for variable width comparison.
+        # ^^ safest option, single threaded with no local functions.
+    ]
+    _lib_dir = os.path.dirname(os.path.abspath(__file__))
+    _lib_path = os.path.join(_lib_dir, "unique", "unique.so")
+    _src_path = os.path.join(_lib_dir, "unique", "unique.c")
     try:
-        build_axy()
-        build_balltree()
-        build_delaunay()
-        build_regex()
-        build_unique()
-    except Exception as exc:
-        print(f"WARNING: 'tlux' encountered exception while trying to build compiled libraries.")
-        print()
-        print(exc)
-    finally:
-        sys.path.insert(0, _first)
+        _unique = ctypes.cdll.LoadLibrary(_lib_path)
+    except:
+        # Compile the shared library.
+        import sys
+        # Trial one to compile and load.
+        try:
+            cmd = f'{_c_compiler} {_flags} {_flags_by_safety[0]} -o "{_lib_path}" "{_src_path}"'
+            if _verbose: print("  ", cmd, flush=True)
+            os.system(cmd)
+            if _verbose: print(flush=True)
+            _unique = ctypes.cdll.LoadLibrary(_lib_path)
+        except:
+            # Trial two to compile and load.
+            try:
+                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[1]} -o "{_lib_path}" "{_src_path}"'
+                if _verbose: print(" ", cmd, flush=True)
+                os.system(cmd)
+                if _verbose: print(flush=True)
+                _unique = ctypes.cdll.LoadLibrary(_lib_path)
+            # Trial three to compile and load.
+            except:
+                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[2]} -o "{_lib_path}" "{_src_path}"'
+                if _verbose: print(" ", cmd, flush=True)
+                os.system(cmd)
+                if _verbose: print(flush=True)
+                _unique = ctypes.cdll.LoadLibrary(_lib_path)
+    # Return the compiled module.
+    return _unique
 
 
 # Build the AXY model (compiled Fortran code).
@@ -107,7 +137,7 @@ def build_balltree():
 def build_delaunay():
     # from util.approximate.delaunay import delsparse
     import os, fmodpy
-    _dependencies = ["blas.f", "lapack.f", "slatec.f", "delsparse.f90"]
+    _dependencies = ["real_precision.f90", "blas.f", "lapack.f", "slatec.f", "delsparse.f90"]
     _dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "approximate", "delaunay")
     _path = os.path.join(_dir, "delsparse.f90")
     _delsparse = fmodpy.fimport(
@@ -136,50 +166,86 @@ def build_regex():
     return _regex
 
 
-# Build the unique library.
-def build_unique():
-    import os, ctypes, fmodpy
-    # Configure the compilation.
-    _verbose = True
-    # _c_compiler = "cc"  # <- on macOS with Clang, no nested functions allowed.
-    _c_compiler = fmodpy.config.f_compiler  # <- works with gfortran, assuming true for others too.
-    _flags = "-shared -fPIC -O3"  # <- shared library, position independent, O3 optimization.
-    # _flags += " -D_UNIQUE_DEBUG_ENABLED"  # <- enable for testing / debugging.
-    _flags_by_safety = [
-        "-fopenmp -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- slower for small cases, good for *very* large data.
-        "-D_UNIQUE_SINGLE_THREADED -D_UNIQUE_ALLOW_LOCAL_FUNCTIONS", # <- disables OpenMP parallelism and imports.
-        "-D_UNIQUE_SINGLE_THREADED", # ^^ enable if compiler supports local functions for variable width comparison.
-        # ^^ safest option, single threaded with no local functions.
-    ]
-    _lib_dir = os.path.dirname(os.path.abspath(__file__))
-    _lib_path = os.path.join(_lib_dir, "unique", "unique.so")
-    _src_path = os.path.join(_lib_dir, "unique", "unique.c")
+# Function to run during module setup.
+def build_all():
+    # Try compiling the 'fmath' library.
+    import sys
+    _first = sys.path.pop(0)
     try:
-        _unique = ctypes.cdll.LoadLibrary(_lib_path)
-    except:
-        # Compile the shared library.
-        import sys
-        # Trial one to compile and load.
+        build_unique()
+        build_axy()
+        build_balltree()
+        build_delaunay()
+        build_regex()
+    except Exception as exc:
+        print(f"WARNING: 'tlux' encountered exception while trying to build compiled libraries.")
+        print()
+        print(exc)
+    finally:
+        sys.path.insert(0, _first)
+
+
+# Function for cleaning (before or after a build).
+def clean_all():
+    import os
+    import platform
+    import shutil
+    import tempfile
+    # Get the starting directory.
+    start_dir = os.getcwd()
+    parent_dir = os.path.dirname(os.path.dirname(__file__))
+    os.chdir(parent_dir)
+    # Move files from the provided list of paths to a temporary directory and print the directory path.
+    paths = [
+        # Unique.
+        "tlux/unique/unique.so",
+        # AXY.
+        "tlux/approximate/axy/axy",
+        "tlux/approximate/axy/axy_random",
+        "tlux/approximate/axy/axy.mod",
+        "tlux/approximate/axy/matrix_operations.mod",
+        "tlux/approximate/axy/pcg32_module.mod",
+        "tlux/approximate/axy/profiler.mod",
+        "tlux/approximate/axy/random.mod",
+        "tlux/approximate/axy/sort_and_select.mod",
+        "tlux/approximate/axy/test/test_axy_random",
+        "tlux/approximate/axy/test/test_axy_module",
+        "tlux/approximate/axy/test/test_axy_profiler",
+        "tlux/approximate/axy/test/test_axy_random_OLD",
+        "tlux/approximate/axy/test/test_axy_module_OLD",
+        "tlux/approximate/axy/test/test_axy_profiler_OLD",
+        # Ball Tree.
+        "tlux/approximate/balltree/fast_select",
+        "tlux/approximate/balltree/fast_sort",
+        "tlux/approximate/balltree/prune",
+        "tlux/approximate/balltree/ball_tree",
+        # # Delaunay.
+        # f"tlux/approximate/delaunay/delsparse",
+        # Regex.
+        "tlux/regex/libregex.so",
+    ]
+    # Create a temporary directory
+    temp_dir = tempfile.mkdtemp()
+    # For each path in the provided list
+    for path in paths:
         try:
-            cmd = f'{_c_compiler} {_flags} {_flags_by_safety[0]} -o "{_lib_path}" "{_src_path}"'
-            if _verbose: print(" ", cmd, flush=True)
-            os.system(cmd)
-            if _verbose: print(flush=True)
-            _unique = ctypes.cdll.LoadLibrary(_lib_path)
-        except:
-            # Trial two to compile and load.
-            try:
-                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[1]} -o "{_lib_path}" "{_src_path}"'
-                if _verbose: print(" ", cmd, flush=True)
-                os.system(cmd)
-                if _verbose: print(flush=True)
-                _unique = ctypes.cdll.LoadLibrary(_lib_path)
-            # Trial three to compile and load.
-            except:
-                cmd = f'{_c_compiler} {_flags} {_flags_by_safety[2]} -o "{_lib_path}" "{_src_path}"'
-                if _verbose: print(" ", cmd, flush=True)
-                os.system(cmd)
-                if _verbose: print(flush=True)
-                _unique = ctypes.cdll.LoadLibrary(_lib_path)
-    # Return the compiled module.
-    return _unique
+            # Check if the path exists
+            if os.path.exists(path):
+                # Maintain the relative path structure within the temporary directory and move the file or directory
+                relative_path = os.path.relpath(path)
+                destination_path = os.path.join(temp_dir, relative_path)
+                os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+                print(f"  (tlux.setup) cleaning '{path}' to '{destination_path}'..", flush=True)
+                shutil.move(path, destination_path)
+        except Exception as e:
+            # Handle any exceptions that may occur during the file/directory moving process
+            print(f"ERROR(tlux.setup): Exception while moving '{path}': {str(e)}", flush=True)
+    # Move back to the original directory.
+    os.chdir(start_dir)
+
+
+# Function for orchestrating setup.
+def setup():
+    clean_all()
+    build_all()
+

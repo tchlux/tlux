@@ -3,8 +3,6 @@ import fmodpy
 
 # Matrix operations module.
 mops = fmodpy.fimport("../axy_matrix_operations.f90", blas=True, lapack=True).matrix_operations
-print()
-
 
 # --------------------------------------------------------------------
 #                         ORTHOGONALIZE
@@ -46,8 +44,6 @@ def _test_orthogonalize(max_dimension=64, trials=100, precision=5):
                 f"mops.orthogonalize(ortho.T, lengths)\n" \
                 f"bad_result = ortho @ ortho.T"
     print("passed.", flush=True)
-
-_test_orthogonalize()
 
 
 # --------------------------------------------------------------------
@@ -119,7 +115,6 @@ def _test_radialize(show=True):
     if (show): p.show()
     print("passed.", flush=True)
 
-_test_radialize(show=False)
 
 
 # --------------------------------------------------------------------
@@ -181,4 +176,7 @@ def _test_least_squares():
     print()
 
 
-# _test_least_squares()
+if __name__ == "__main__":
+    _test_orthogonalize()
+    _test_radialize(show=False)
+    # _test_least_squares()

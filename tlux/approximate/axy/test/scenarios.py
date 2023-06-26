@@ -57,7 +57,7 @@ def check_code(exit_code, method):
 
 # Spawn a new model that is ready to be evaluated.
 def spawn_model(adn, mdn, mdo, ade=0, ane=0, ads=3, ans=2, ado=None, mde=0, mne=0, mds=3, mns=2,
-                doe=0, noe=0, seed=0, num_threads=30, initial_shift_range=1.0, initial_output_scale=0.1):
+                doe=None, noe=0, seed=0, num_threads=30, initial_shift_range=1.0, initial_output_scale=0.1):
     import numpy as np
     # Create a new config.
     config = AXY.new_model_config(
@@ -73,8 +73,8 @@ def spawn_model(adn, mdn, mdo, ade=0, ane=0, ads=3, ans=2, ado=None, mde=0, mne=
         mds = mds,
         mns = mns,
         mdo = mdo,
-        doe = doe,
         noe = noe,
+        doe = doe,
         num_threads = num_threads,
     )
     # Initialize the model.
@@ -195,21 +195,12 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
         if scenario["small_data"]:
             yne = scenario.get('yne', 5)
             ydi = scenario.get('ydi', 1)
-            # TODO:
-            #  doe = ..
-            #  noe = ...
         else:
             yne = scenario.get('yne', 5000)
             ydi = scenario.get('ydi', 5)
-            # TODO:
-            #  doe = ..
-            #  noe = ...
     else:
         yne = scenario.get('yne', 0)
         ydi = scenario.get('ydi', 0)
-        # TODO:
-        #  doe = ..
-        #  noe = ...
     # Aggregator only.
     if scenario["aggregator_only"]:
         mns = scenario.get('mns', 0)
@@ -246,8 +237,8 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
         mds=mds,
         mns=mns,
         mdo=mdo,
+        noe=yne,
         num_threads=num_threads,
-        doe=0, noe=0,  # temporarily disabling output embeddings
     )
     # Generate a fit configuration.
     config.partial_aggregation = scenario.get('partial_aggregation', False)
@@ -258,6 +249,7 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
         nat=na_in,
         adi=adi,
         mdi=mdi,
+        odi=ydi,
         seed=seed,
         config=config,
     )
@@ -282,9 +274,9 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     sizes_in = asarray(np.random.randint(0, max(1,round(2*(config.nat / nm_in))), size=(nm_in if config.nat > 0 else 0,)), ltype)
     x_in = asarray(np.random.normal(size=(mdn, nm_in)), ftype)
     xi_in = asarray(np.random.randint(*nm_range, size=(mdi, nm_in)), ltype)
-    y_in = asarray(np.random.normal(size=(config.do, nm_in)), ftype)
-    if (ydi > 0): yi_in = asarray(np.random.randint(1, yne, size=(ydi, nm_in)), ltype)
-    else:         yi_in = None
+    y_in = asarray(np.random.normal(size=(config.do-config.doe, nm_in)), ftype)
+    if (config.noe > 0): yi_in = asarray(np.random.randint(1, config.noe, size=(ydi, nm_in)), ltype)
+    else:                yi_in = np.zeros((0,nm_in), **ltype)
     yw_in = asarray(np.random.normal(size=(ywd, nm_in)), ftype)
     # Set two of the sizes to zero (to make sure there are zeros in there.
     if (len(sizes_in) > 0):
@@ -314,6 +306,7 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
             nat=na_in,
             adi=adi,
             mdi=mdi,
+            odi=ydi,
             seed=seed,
             config=config,
         )

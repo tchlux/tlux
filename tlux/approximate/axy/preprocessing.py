@@ -65,12 +65,10 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         axi_map = list()
         xi_map = list()
         yi_map = list()
-        yi_embeddings = None
     else:
         axi_map = maps.get("axi_map", list())
         xi_map = maps.get("xi_map", list())
         yi_map = maps.get("yi_map", list())
-        yi_embeddings = maps.get("yi_embeddings", None)
     # Get the number of inputs.
     if   (y  is not None): nm = len(y)
     elif (yi is not None): nm = len(yi)
@@ -150,30 +148,12 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         yi = i_encode(yi, yi_map)
         yne = sum(map(len, yi_map))
     else: yne = 0
-    # Handle mapping integer encoded "yi" into a single real valued y.
-    if (yne > 0):
-        # Use a regular simplex to construct equally spaced embeddings for the categories.
-        if ((yi_embeddings is None) or (yi_embeddings.size == 0)):
-            from tlux.math import regular_simplex
-            yi_embeddings = regular_simplex(yne).astype("float32")
-        else:
-            assert (yi_embeddings.shape[1] == (yne-1)), f"Provided 'yi_embeddings' had shape {yi_embeddings.shape}, but expected a dimension of {yne-1} based on the number of categories."
-        # Add a zero vector to the front for "unknown" outputs.
-        embedded = np.concatenate((
-            np.zeros((1,yne-1), dtype="float32"),
-            yi_embeddings), axis=0)
-        _y = np.zeros((nm, mdo+yne-1), dtype="float32")
-        _y[:,:mdo] = y[:,:]
-        for i in range(yi.shape[1]):
-            _y[:,mdo:] += embedded[yi[:,i]]
-        y = _y
-        mdo += yne-1
     # Update all maps and return.
     maps.update(dict(
         axi_map = axi_map,
         xi_map = xi_map,
         yi_map = yi_map,
-        yi_embeddings = yi_embeddings,
+        # yi_embeddings = yi_embeddings,
     ))
     # Return all the shapes and numpy formatted inputs.
     shapes = dict(
@@ -184,4 +164,29 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         ane = ane,
         yne = yne,
     )
-    return nm, na, ax, axi, sizes, x, xi, y, yw, shapes, maps
+    return nm, na, ax, axi, sizes, x, xi, y, yi, yw, shapes, maps
+
+
+# 2023-06-22 21:27:58
+# 
+###########################################################################################################################################################################################
+# # Handle mapping integer encoded "yi" into a single real valued y.                                                                                                                      #
+# if (yne > 0):                                                                                                                                                                           #
+#     # Use a regular simplex to construct equally spaced embeddings for the categories.                                                                                                  #
+#     if ((yi_embeddings is None) or (yi_embeddings.size == 0)):                                                                                                                          #
+#         from tlux.math import regular_simplex                                                                                                                                           #
+#         yi_embeddings = regular_simplex(yne).astype("float32")                                                                                                                          #
+#     else:                                                                                                                                                                               #
+#         assert (yi_embeddings.shape[1] == (yne-1)), f"Provided 'yi_embeddings' had shape {yi_embeddings.shape}, but expected a dimension of {yne-1} based on the number of categories." #
+#     # Add a zero vector to the front for "unknown" outputs.                                                                                                                             #
+#     embedded = np.concatenate((                                                                                                                                                         #
+#         np.zeros((1,yne-1), dtype="float32"),                                                                                                                                           #
+#         yi_embeddings), axis=0)                                                                                                                                                         #
+#     _y = np.zeros((nm, mdo+yne-1), dtype="float32")                                                                                                                                     #
+#     _y[:,:mdo] = y[:,:]                                                                                                                                                                 #
+#     for i in range(yi.shape[1]):                                                                                                                                                        #
+#         _y[:,mdo:] += embedded[yi[:,i]]                                                                                                                                                 #
+#     y = _y                                                                                                                                                                              #
+#     mdo += yne-1                                                                                                                                                                        #
+###########################################################################################################################################################################################
+    
