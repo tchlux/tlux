@@ -82,6 +82,9 @@ class AXY:
         mns = kwargs.pop("mns", None)
         mde = kwargs.pop("mde", None)
         mne = kwargs.pop("mne", None)
+        # Number of output embeddings.
+        noe = kwargs.pop("noe", 0)
+        doe = kwargs.pop("doe", None)
         # Number of threads.
         self.num_threads = kwargs.pop("num_threads", self.num_threads)
         self.seed = kwargs.pop("seed", self.seed)
@@ -90,9 +93,9 @@ class AXY:
         if (None not in {adn, mdn, mdo}):
             self.config = self.AXY.new_model_config(
                 adn=adn, ado=ado, ads=ads, ans=ans, ane=ane, ade=ade,
+                noe=noe, doe=doe,
                 mdn=mdn, mdo=mdo, mds=mds, mns=mns, mne=mne, mde=mde,
                 num_threads=self.num_threads,
-                noe=0, doe=0,  # temporarily disabling output embeddings
             )
             # Set any configuration keyword arguments given at initialization
             #  that were not passed to "new_model_config".
@@ -185,6 +188,7 @@ class AXY:
                 "mdn":shapes["mdn"],
                 "mne":max(shapes["mne"], kwargs.get("mne",0)),
                 "mdo":kwargs.get("mdo", shapes["mdo"]),
+                "noe":max(shapes["noe"], kwargs.get("noe",0)),
             })
             self._init_model(**kwargs)
         else:
@@ -220,9 +224,15 @@ class AXY:
         self.record = np.zeros((steps,6), dtype="float32", order="C")
         # Check all shapes to validate.
         info = self.AXY.fit_check(self.config, self.model, rwork, iwork, lwork,
-                                  ax.T, axi.T, sizes, x.T, xi.T, y.T, yw_in.T,
+                                  ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T, yw_in.T,
                                   yw.T, agg_iterators.T,
                                   steps=steps, record=self.record.T, sum_squared_error=0.0)
+        print("", flush=True)
+        print("__init__.py Line 226: ", flush=True)
+        print("yi.shape: ", yi.shape, flush=True)
+        print("yi.min(): ", yi.min(), flush=True)
+        print("yi.max(): ", yi.max(), flush=True)
+        print("config.noe: ", self.config.noe, flush=True)
         # Check for a nonzero exit code.
         self._check_code(info, "fit_precheck")
         # Store the number of steps already taken.
@@ -294,9 +304,10 @@ class AXY:
                 na = nat
         # Initialize holder for y output.
         y = np.zeros((nmt, self.config.do), dtype="float32", order="C")
+        yi = np.zeros((nmt, 0), dtype="int64", order="C")
         # ------------------------------------------------------------
         # Call the unerlying library to make sure input shapes are appropriate.
-        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T)
+        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T)
         # Check for a nonzero exit code.
         self._check_code(info, "check_shape")
         # Normalize the numeric inputs.
@@ -621,7 +632,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1, f2, f3]
+    functions = [f1] #, f2, f3]
 
     seed = 0
     np.random.seed(seed)
@@ -630,8 +641,8 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = True
-    use_x = False
+    use_a = False
+    use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -655,7 +666,7 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 10000,
+        steps = 1000,
         # nm = nm,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.005,
@@ -674,7 +685,7 @@ if __name__ == "__main__":
         # x_normalized = True,
         # y_normalized = True,
         pairwise_aggregation = False,
-        partial_aggregation = True,
+        partial_aggregation = False,
         # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,

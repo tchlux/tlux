@@ -137,6 +137,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: OECS, OECE
      ! Function parameter.
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
+     REAL(KIND=RT) :: CATEGORY_GAP = 0.0_RT
      ! Optimization related parameters.
      REAL(KIND=RT) :: MAX_STEP_FACTOR = 0.01_RT ! Maximum multiplier on gradient steps.
      REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
@@ -213,7 +214,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SAXB, EAXB ! AX(ADI,NA)
      INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO+1)
      INTEGER(KIND=INT64) :: SMXB, EMXB ! X(MDI,NMS)
-     INTEGER(KIND=INT64) :: SMYB, EMYB ! Y(DO,NMS)
+     INTEGER(KIND=INT64) :: SMYB, EMYB ! Y(DO-DOE,NMS)
      INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1)
@@ -961,8 +962,8 @@ CONTAINS
        INFO = 5 ! Aggregator output dimension is bad, does not match Y.
     ELSE IF ((CONFIG%NOE .GT. 0) .AND. (SIZE(YI,2,INT64) .NE. SIZE(Y,2,INT64))) THEN
        INFO = 6 ! Input integer YI size does not match Y.
-    ELSE IF ((MINVAL(YI) .LT. 0) .OR. (MAXVAL(YI) .GT. CONFIG%NOE)) THEN
-       INFO = 7 ! Input integer YI out of range.
+    ELSE IF ((MINVAL(YI) .LE. 0) .OR. (MAXVAL(YI) .GT. CONFIG%NOE)) THEN
+       INFO = 7 ! Input integer YI out of range [1, number of output embeddings].
     ELSE IF ((CONFIG%MNE .GT. 0) .AND. (SIZE(XI,2,INT64) .NE. SIZE(X,2,INT64))) THEN
        INFO = 8 ! Input integer XI size does not match X.
     ELSE IF ((MINVAL(XI) .LT. 0) .OR. (MAXVAL(XI) .GT. CONFIG%MNE)) THEN
@@ -2168,11 +2169,106 @@ CONTAINS
     END SUBROUTINE UNPACKED_BASIS_GRADIENT
   END SUBROUTINE BASIS_GRADIENT
 
+  
+  ! Given the model output values "Y_GRADIENT", the 'true' numeric
+  ! values "Y", and the true categorical values "YI", produce the
+  ! gradient at the output and store it in "Y_GRADIENT".
+  SUBROUTINE OUTPUT_GRADIENT(CONFIG, Y_GRADIENT, Y, YI, YW, O_EMB_VECS, O_EMB_GRAD, O_EMB_TEMP, SSG, DON)
+    TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_GRADIENT
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: YI
+    REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW
+    REAL(KIND=RT), INTENT(IN), DIMENSION(CONFIG%DOE,CONFIG%NOE) :: O_EMB_VECS
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(CONFIG%DOE,CONFIG%NOE) :: O_EMB_GRAD
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: O_EMB_TEMP
+    REAL(KIND=RT), INTENT(INOUT) :: SSG
+    INTEGER, INTENT(IN) :: DON
+    INTEGER :: D, I, C
+    ! TODO: Local allocation, needs to be moved.
+    REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: EMBEDDING_OUTPUTS, EMBEDDING_GRADIENTS
+    ALLOCATE( &
+         EMBEDDING_GRADIENTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)), &
+         EMBEDDING_OUTPUTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)) &
+    )
+    ! TODO: Remove MATMUL in favor of GEMM.
+    ! Compute embedding outputs (1:NOE,1:N) by taking the dot product
+    ! of output vectors with the matrix of all output emeddings.
+    EMBEDDING_OUTPUTS(:,:) = MATMUL( &
+         TRANSPOSE(O_EMB_VECS(:,:)), &
+         Y_GRADIENT(DON+ONE:,:))
+    ! First, assume all categories are negative examples, compute those gradients.
+    WHERE (EMBEDDING_OUTPUTS(:,:) .GT. 1.0_RT - CONFIG%CATEGORY_GAP)
+       EMBEDDING_GRADIENTS(:,:) = EMBEDDING_OUTPUTS(:,:) - (1.0_RT - CONFIG%CATEGORY_GAP)
+    ELSEWHERE
+       EMBEDDING_GRADIENTS(:,:) = 0.0_RT
+    END WHERE
+    ! Then for each data point, we will compute the "correct embedding" gradient at that point.
+    DO I = 1, SIZE(EMBEDDING_OUTPUTS,2,KIND=INT64)
+       ! For each output component of YI we will compute a gradient score.
+       DO D = 1, SIZE(YI,1,KIND=INT64)
+          C = YI(D,I)
+          IF (EMBEDDING_OUTPUTS(C,I) .LT. 1.0_RT + CONFIG%CATEGORY_GAP) THEN
+             EMBEDDING_GRADIENTS(C,I) = EMBEDDING_OUTPUTS(C,I) - (1.0_RT + CONFIG%CATEGORY_GAP)
+          ELSE
+             EMBEDDING_GRADIENTS(C,I) = 0.0_RT
+          END IF
+       END DO
+    END DO
+    ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
+    Y_GRADIENT(:DON,:) = Y_GRADIENT(:DON,:) - Y(:DON,:) ! squared error gradient
+    ! TODO: Handle case where YW has DON+ONE elements, assuming the +1 is for the embeddings.
+    ! Apply weights to the computed gradients (if they were provided.
+    IF (SIZE(YW,1) .EQ. DON) THEN
+       ! Handle 1 weight per component of each point.
+       WHERE (YW(:,:) .GT. 0.0_RT)
+          Y_GRADIENT(:DON,:) = Y_GRADIENT(:DON,:) * YW(:,:)
+       ELSEWHERE (YW(:,:) .LT. 0.0_RT)
+          ! TODO: Check to see if this is even useful, because it is "costly".
+          ! Compute a weighting function that translates [0, -inf) -> [1, 0).
+          Y_GRADIENT(:DON,:) = Y_GRADIENT(:DON,:) * (1.0_RT / (1.0_RT - YW(:,:)))
+       END WHERE
+    ELSE IF (SIZE(YW,1) .EQ. 1) THEN
+       ! Handle 1 weight per point.
+       DO D = 1, DON
+          WHERE (YW(1,:) .GT. 0.0_RT)
+             Y_GRADIENT(D,:) = Y_GRADIENT(D,:) * YW(1,:)
+          ELSEWHERE (YW(1,:) .LT. 0.0_RT)
+             ! TODO: Check to see if this is even useful, because it is "costly".
+             ! Compute a weighting function that translates [0, -inf) -> [1, 0).
+             Y_GRADIENT(D,:) = Y_GRADIENT(D,:) * (1.0_RT / (1.0_RT - YW(1,:)))
+          END WHERE
+       END DO
+       ! Apply weights to categorical output gradients.
+       DO D = 1, CONFIG%NOE
+          WHERE (YW(1,:) .GT. 0.0_RT)
+             EMBEDDING_GRADIENTS(D,:) = EMBEDDING_GRADIENTS(D,:) * YW(1,:)
+          ELSEWHERE (YW(1,:) .LT. 0.0_RT)
+             ! TODO: Check to see if this is even useful, because it is "costly".
+             ! Compute a weighting function that translates [0, -inf) -> [1, 0).
+             EMBEDDING_GRADIENTS(D,:) = EMBEDDING_GRADIENTS(D,:) * (1.0_RT / (1.0_RT - YW(1,:)))
+          END WHERE
+       END DO
+    END IF
+    ! TODO: Remove MATMUL in favor of GEMM.
+    ! Compute the gradient of the embeddings.
+    O_EMB_GRAD(:,:) = MATMUL( & ! (DOE, NOE) = ...
+         Y_GRADIENT(DON+ONE:,:), & ! (DOE, N)
+         TRANSPOSE(EMBEDDING_GRADIENTS(:,:))) ! TRANSPOSE((NOE, N))
+    ! TODO: Remove MATMUL in favor of GEMM.
+    ! Compute the parts of Y_GRADIENT that come from the embeddings.
+    Y_GRADIENT(DON+ONE:,:) = MATMUL( & ! (DOE, N) = ...
+         O_EMB_VECS(:,:), & ! (DOE, NOE)
+         EMBEDDING_GRADIENTS(:,:)) ! (NOE, N)
+    ! Compute the total squared gradient.
+    SSG = SSG + SUM(Y_GRADIENT(:,:)**2)
+  END SUBROUTINE OUTPUT_GRADIENT
+
 
   ! Compute the gradient of the sum of squared error of this regression
   ! model with respect to its variables given input and output pairs.
   SUBROUTINE MODEL_GRADIENT(CONFIG, MODEL, &
-       AX, AXI, SIZES, X, XI, Y, YW, &
+       AX, AXI, SIZES, X, XI, Y, YI, YW, &
        SUM_SQUARED_GRADIENT, MODEL_GRAD, INFO, &
        AY_GRADIENT, Y_GRADIENT, A_GRADS, M_GRADS, &
        A_EMB_TEMP, M_EMB_TEMP, O_EMB_TEMP)
@@ -2184,6 +2280,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
+    INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: YI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: YW
     ! Sum (over all data) squared error (summed over dimensions).
     REAL(KIND=RT), INTENT(INOUT) :: SUM_SQUARED_GRADIENT
@@ -2225,34 +2322,11 @@ CONTAINS
        MS = BATCHM_STARTS(BATCH)
        ME = BATCHM_ENDS(BATCH)
        IF (MS .GT. ME) CYCLE
-       ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
-       Y_GRADIENT(:,MS:ME) = Y_GRADIENT(:,MS:ME) - Y(:,MS:ME) ! squared error gradient
-       ! Apply weights to the computed gradients (if they were provided.
-       IF (SIZE(YW,1) .EQ. SIZE(Y,1)) THEN
-          ! Handle 1 weight per component of each point.
-          WHERE (YW(:,MS:ME) .GT. 0.0_RT)
-             Y_GRADIENT(:,MS:ME) = Y_GRADIENT(:,MS:ME) * YW(:,MS:ME)
-          ELSEWHERE (YW(:,MS:ME) .LT. 0.0_RT)
-             ! TODO: Check to see if this is even useful, because it is "costly".
-             ! Compute a weighting function that translates [0, -inf) -> [1, 0).
-             Y_GRADIENT(:,MS:ME) = Y_GRADIENT(:,MS:ME) * &
-                  (1.0_RT / (1.0_RT - YW(:,MS:ME)))
-          END WHERE
-       ELSE IF (SIZE(YW,1) .EQ. 1) THEN
-          ! Handle 1 weight per point.
-          DO D = 1, SIZE(Y,1)
-             WHERE (YW(1,MS:ME) .GT. 0.0_RT)
-                Y_GRADIENT(D,MS:ME) = Y_GRADIENT(D,MS:ME) * YW(1,MS:ME)
-             ELSEWHERE (YW(1,MS:ME) .LT. 0.0_RT)
-                ! TODO: Check to see if this is even useful, because it is "costly".
-                ! Compute a weighting function that translates [0, -inf) -> [1, 0).
-                Y_GRADIENT(D,MS:ME) = Y_GRADIENT(D,MS:ME) * &
-                     (1.0_RT / (1.0_RT - YW(1,MS:ME)))
-             END WHERE
-          END DO
-       END IF
-       ! Compute the total squared gradient.
-       SSG = SSG + SUM(Y_GRADIENT(:,MS:ME)**2)
+       TN = OMP_GET_THREAD_NUM() + ONE
+       ! Compute the gradient out the output (handle any YI embeddings).
+       CALL OUTPUT_GRADIENT(CONFIG, Y_GRADIENT(:,MS:ME), Y(:,MS:ME), YI(:,MS:ME), YW(:,MS:ME), &
+            MODEL(CONFIG%OSEV:CONFIG%OEEV), MODEL_GRAD(CONFIG%OSEV:CONFIG%OEEV,TN), &
+            O_EMB_TEMP(:,:,TN), SSG, CONFIG%DO-CONFIG%DOE)
     END DO error_gradient
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SSG
     ! Adjust the batches to be defined based on inputs (aggregate sets kept together).
@@ -3491,7 +3565,7 @@ CONTAINS
             SUM_SQUARED_ERROR = 0.0_RT
             CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
                  AX(:,:NA), AXI(:,:NA), SIZES(:), X(:,:NM), XI(:,:NM), &
-                 Y(:,:NM), YW(:,:NM), &
+                 Y(:,:NM), YI(:,:NM), YW(:,:NM), &
                  SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:NA,:),  &
                  Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), &
                  A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), O_EMB_TEMP(:,:,:))
@@ -3575,7 +3649,7 @@ CONTAINS
                !  Otherwise, only compute the gradients and reuse that memory space.
                CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
                     AX(:,BSA:BEA), AXI(:,BSA:BEA), SIZES(SS:SE), X(:,BS:BE), XI(:,BS:BE), &
-                    Y(:,BS:BE), YW(:,BS:BE), &
+                    Y(:,BS:BE), YI(:,BS:BE), YW(:,BS:BE), &
                     SUM_SQUARED_ERROR, MODEL_GRAD(:,TN:TN), INFO, AY_GRADIENT(BSA:BEA,:),  &
                     Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), &
                     A_EMB_TEMP(:,:,TN:TN), M_EMB_TEMP(:,:,TN:TN), O_EMB_TEMP(:,:,TN:TN))

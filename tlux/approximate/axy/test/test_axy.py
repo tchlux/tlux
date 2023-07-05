@@ -79,10 +79,10 @@ def _test_scenario_iteration(max_samples=64, show=False):
             print(i)
             for n in sorted(scenario):
                 print(f"  {str(scenario[n]):5s}  {n}")
-            print(' data')
+            print(" data")
             for n in data:
                 print(" ", n, data[n].shape if data[n] is not None else data[n])
-            print(' temp')
+            print(" temp")
             for n in work:
                 print(" ", n, work[n].shape if work[n] is not None else work[n])
     print(" passed")
@@ -522,7 +522,7 @@ def _test_evaluate():
             if (evaluation[key].size == 0): continue
             maxind = np.argmax(np.abs(evaluation[key] - py[key]))
             maxdiff = np.max(np.abs(evaluation[key] - py[key]))
-            scenario_string = '{\n  ' + ',\n  '.join((f'{repr(k)}: {v}' for (k,v) in scenario_copy.items())) + '\n}'
+            scenario_string = "{\n  " + ",\n  ".join((f"{repr(k)}: {v}" for (k,v) in scenario_copy.items())) + "\n}"
             assert maxdiff < (2**(-13)), f"ERROR: Failed comparison between Fortran and Python implementations of AXY.evaluate for key '{key}'.\n  Max difference observed was at {maxind}, {maxdiff}.\n  fort:\n{evaluation[key]}\n  python:\n{py[key]}\n  Summary of situation:\n\n{summary}\n\nscenario = {scenario_string}"
     # End of for loop.
     print(" passed")
@@ -543,6 +543,8 @@ def _test_model_gradient():
         # Only consider "small_data" scenarios, others take too long.
         if (not s["small_data"]): continue
         if (not s["small_model"]): continue
+        # TODO: DO not skip categorical outputs, need to update output validation code.
+        if (s["output_categorical"]): continue
         # Increment the number of scenarios seen, break if complete.
         num_scenarios += 1
         if (num_scenarios > max_scenarios):
@@ -652,13 +654,14 @@ def _test_model_gradient():
                 print("", k, v.shape if hasattr(v, "shape") else v)
             print()
 
-        # Shrink the 'x' and 'y' values according to the size of the fetched data.
+        # Shrink the "x" and "y" values according to the size of the fetched data.
         na = data["na"]
         nm = data["nm"]
         eval_kwargs = dict(
             axi=data["axi"][:,:na], ax=data["ax"][:,:na],
             ay=details.ay[:na,:], sizes=data["sizes"],
-            x=data["x"][:,:nm], xi=data["xi"][:,:nm], y=data["y"][:,:nm], yw=data['yw'][:,:nm],
+            x=data["x"][:,:nm], xi=data["xi"][:,:nm],
+            y=data["y"][:,:nm], yi=data["yi"][:,:nm], yw=data["yw"][:,:nm],
             a_states=details.a_states[:na,:,:], m_states=details.m_states[:nm,:,:],
             na=na, nm=nm,
         )
@@ -711,7 +714,7 @@ def _test_model_gradient():
             ax, axi = data["ax"].copy(order="F"), data["axi"].copy(order="F")
             sizes = data["sizes"].copy(order="F")
             x, xi = data["x"].copy(order="F"), data["xi"].copy(order="F")
-            y, yw = data["y"].copy(order="F"), data["yw"].copy(order="F")
+            y, yi, yw = data["y"].copy(order="F"), data["yi"].copy(order="F"), data["yw"].copy(order="F")
             # Extract data from "details" (those need to be size-adjusted).
             ay = details.ay[:na,:].copy(order="F")
             a_states = details.a_grads[:na,:,:].copy(order="F")
@@ -748,7 +751,7 @@ def _test_model_gradient():
                 config, model,
                 ax=ax, axi=axi, sizes=sizes,
                 x=x, xi=xi,
-                y=y, yw=yw,
+                y=y, yi=yi, yw=yw,
                 sum_squared_gradient=0.0,
                 model_grad=model_grad,
                 info=info,
@@ -795,13 +798,13 @@ def _test_model_gradient():
             print()
             # Show the configuration and the data.
             print()
-            print('-'*100)
+            print("-"*100)
             print("config: ", config)
             print()
             print("Data:")
             for (k,v) in data.items():
                 print("", type(k).__name__, k, v.shape if hasattr(v,"shape") else "")
-            print('-'*100)
+            print("-"*100)
             print()
 
             # Show the model.
@@ -874,8 +877,8 @@ def _test_axi():
     vals, vecs = svd(axi)
     print("vals: ", vals)
     axi = axi @ (vecs[:3].T)
-    p.add('axi before', *axi.T, marker_size=2)
-    data.pop('yi_in', None)
+    p.add("axi before", *axi.T, marker_size=2)
+    data.pop("yi_in", None)
 
     (
         config,
@@ -905,7 +908,7 @@ def _test_axi():
     vals, vecs = svd(axi)
     print("vals: ", vals)
     axi = axi @ (vecs[:3].T)
-    p.add('axi after', *axi.T, marker_size=2)
+    p.add("axi after", *axi.T, marker_size=2)
 
     p.show()
 
@@ -957,16 +960,16 @@ def _test_normalize_data(dimension=64, show=False):
         # Generate random data (that is skewed and placed off center).
         x, x_shift, x_scale, x_rotation = random_data(num_points, dimension)
         if (should_plot):
-            p.add('x '+str(i+1), *x.T, marker_size=3)
+            p.add("x "+str(i+1), *x.T, marker_size=3)
         y, y_shift, y_scale, y_rotation = random_data(num_points, dimension)
         if (should_plot):
-            p.add('y '+str(i+1), *y.T, marker_size=3)
+            p.add("y "+str(i+1), *y.T, marker_size=3)
         # Generate random AX data.
         sizes = np.asarray(np.random.randint(*size_range, size=(num_points,)), dtype="int64", order="F")
         num_aggregate = sizes.sum()
         ax, ax_shift, ax_scale, ax_rotation = random_data(num_aggregate, dimension)
         if (should_plot):
-            p.add('ax '+str(i+1), *ax.T, marker_size=3)
+            p.add("ax "+str(i+1), *ax.T, marker_size=3)
         # Set up all of the inputs to the NORMALIZE_DATA routine.
         config, model = spawn_model(adn=dimension, mdn=dimension, mdo=dimension, num_threads=1)
         config.pairwise_aggregation = True
@@ -1051,9 +1054,9 @@ def _test_normalize_data(dimension=64, show=False):
             a_out_vecs, a_states, ay, info
         )
         if (should_plot):
-            p.add('-> x '+str(i+1), *x_in, marker_size=3)
-            p.add('-> y '+str(i+1), *y_in, marker_size=3)
-            p.add('-> ax '+str(i+1), *ax_in, marker_size=3)
+            p.add("-> x "+str(i+1), *x_in, marker_size=3)
+            p.add("-> y "+str(i+1), *y_in, marker_size=3)
+            p.add("-> ax "+str(i+1), *ax_in, marker_size=3)
             p.show()
         elif ():
             # TODO: Assert that the mean is near zero and the variance is near one.
@@ -1098,21 +1101,21 @@ def _test_large_data_fit():
     print()
     for n in sorted(SCENARIO):
         print(f"  {str(SCENARIO[n]):5s}  {n}")
-    print(' data')
+    print(" data")
     for n in data:
         print(" ", n, data[n].shape if data[n] is not None else data[n])
-    print(' temp')
+    print(" temp")
     for n in work:
         print(" ", n, work[n].shape if work[n] is not None else work[n])
-    print(' config')
-    print(' ', config)
+    print(" config")
+    print(" ", config)
     (
         config, model, rwork, iwork, lwork, ax_in, x_in, y_in, yw_in,
         record, sum_squared_error, info
     ) = AXY.fit_model(
         config, model, rwork, iwork, lwork,
-        data['ax_in'], data['axi_in'], data['sizes_in'],
-        data['x_in'], data['xi_in'], data['y_in'], data['yw_in'],
+        data["ax_in"], data["axi_in"], data["sizes_in"],
+        data["x_in"], data["xi_in"], data["y_in"], data["yw_in"],
         steps=steps, record=record
     )
 

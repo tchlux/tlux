@@ -146,8 +146,8 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         else:
             assert (yi_cols == len(yi_map)), f"Bad number of columns in 'yi', {yi_cols}, expected {len(yi_map)} columns based on provided 'yi_map' map."
         yi = i_encode(yi, yi_map)
-        yne = sum(map(len, yi_map))
-    else: yne = 0
+        noe = sum(map(len, yi_map))
+    else: noe = 0
     # Update all maps and return.
     maps.update(dict(
         axi_map = axi_map,
@@ -162,31 +162,6 @@ def to_array(ax, axi, sizes, x, xi, y=None, yi=None, yw=None, maps=None):
         mdo = mdo,
         adn = adn,
         ane = ane,
-        yne = yne,
+        noe = noe,
     )
     return nm, na, ax, axi, sizes, x, xi, y, yi, yw, shapes, maps
-
-
-# 2023-06-22 21:27:58
-# 
-###########################################################################################################################################################################################
-# # Handle mapping integer encoded "yi" into a single real valued y.                                                                                                                      #
-# if (yne > 0):                                                                                                                                                                           #
-#     # Use a regular simplex to construct equally spaced embeddings for the categories.                                                                                                  #
-#     if ((yi_embeddings is None) or (yi_embeddings.size == 0)):                                                                                                                          #
-#         from tlux.math import regular_simplex                                                                                                                                           #
-#         yi_embeddings = regular_simplex(yne).astype("float32")                                                                                                                          #
-#     else:                                                                                                                                                                               #
-#         assert (yi_embeddings.shape[1] == (yne-1)), f"Provided 'yi_embeddings' had shape {yi_embeddings.shape}, but expected a dimension of {yne-1} based on the number of categories." #
-#     # Add a zero vector to the front for "unknown" outputs.                                                                                                                             #
-#     embedded = np.concatenate((                                                                                                                                                         #
-#         np.zeros((1,yne-1), dtype="float32"),                                                                                                                                           #
-#         yi_embeddings), axis=0)                                                                                                                                                         #
-#     _y = np.zeros((nm, mdo+yne-1), dtype="float32")                                                                                                                                     #
-#     _y[:,:mdo] = y[:,:]                                                                                                                                                                 #
-#     for i in range(yi.shape[1]):                                                                                                                                                        #
-#         _y[:,mdo:] += embedded[yi[:,i]]                                                                                                                                                 #
-#     y = _y                                                                                                                                                                              #
-#     mdo += yne-1                                                                                                                                                                        #
-###########################################################################################################################################################################################
-    
