@@ -5,32 +5,38 @@ from tlux.approximate.base import Approximator
 
 # Wrapper class for using the Delaunay fortran code
 class Delaunay(Approximator):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         # Set up the algorithm for parallel or serial evaluation.
         try:
-            # TODO: Enable nested parallization.
+            # # TODO: Enable nested parallization.
             # os.environ["OMP_NESTED"] = "TRUE"
-            from tlux.approximate.delaunay.delsparse import delaunaysparses
+            # from tlux.approximate.delaunay.delsparse import delaunaysparsep as delaunaysparse
+            from tlux.approximate.delaunay.delsparse import delaunaysparses as delaunaysparse
         except:
             from tlux.setup import build_delaunay
             delsparse = build_delaunay()
-            delaunaysparses = delsparse.delaunaysparses
-        self.delaunay = delaunaysparses
+            delaunaysparse = delsparse.delaunaysparses
+        self.delaunay = delaunaysparse
         # Initialize containers.
         self.x = None
         self.y = None
         self.errs = {}
+        # If this model was initialized with data, assume it was a fit.
+        if (max(len(args),len(kwargs)) > 0):
+            self.fit(*args, **kwargs)
 
     # Use fortran code to compute the boxes for the given data
-    def _fit(self, x, y):
+    def _fit(self, x, y=None):
         self.x = np.asarray(x, dtype="float64", order="C").T
-        self.y = np.asarray(y, dtype="float64", order="C").T
+        if (y is not None):
+            self.y = np.asarray(y, dtype="float64", order="C").T
         self.errs = {}
 
     # Return just the points and the weights associated with them for
     # creating the correct interpolation
     def _predict(self, x, allow_extrapolation=True, print_errors=True,
-                 eps=2**(-26), ibudget=10000, extrap=100.0, **kwargs):
+                 interpolate=True, eps=2**(-26), ibudget=10000,
+                 extrap=100.0, **kwargs):
         # Get the predictions from Delaunay Fortran code.
         d = self.x.shape[0]
         n = self.x.shape[1]
@@ -40,9 +46,11 @@ class Delaunay(Approximator):
         simps = np.ones(shape=(d+1, m), dtype="int32", order="F")
         weights = np.ones(shape=(d+1, m), dtype="float64", order="F")
         ierr = np.ones(shape=(m,), dtype="int32", order="F")
-        ir = self.y.shape[0]
-        interp_in = np.array(self.y, order="F")
-        y = np.zeros(shape=(ir,m), dtype="float64", order="F")
+        if ((self.y is not None) and (interpolate)):
+            ir = self.y.shape[0]
+            interp_in = np.array(self.y, order="F")
+            y = np.zeros(shape=(ir,m), dtype="float64", order="F")
+        else: interp_in = y = None
         self.delaunay(d, n, pts, m, q, simps, weights, ierr,
                       interp_in=interp_in, interp_out=y,
                       ibudget=ibudget, eps=eps, extrap=extrap,
@@ -63,9 +71,24 @@ class Delaunay(Approximator):
                 print("] ")
             # Reset the errors to simplex of 1s (to be 0) and weights of 0s.
             bad_indices = (ierr > 0)
-            y[:,bad_indices] = 0.0
-        # Return the values.
-        return y.T
+            if ((self.y is not None) and (interpolate)):
+                y[:,bad_indices] = 0.0
+            else:
+                simps[:,bad_indices] = 0
+                weights[:,bad_indices] = 0.0
+        # Return the appropriate values.
+        if ((self.y is not None) and (interpolate)):
+            # Return the values.
+            return y.T
+        else:
+            # Return the weights and indices.
+            return simps-1, weights
+
+    # Get the weights and indices of the source points from the Delaunay
+    #  simplicial mesh that recreate the provided points 'x'.
+    def weights(self, *args, **kwargs):
+        kwargs["interpolate"] = False
+        return self.predict(*args, **kwargs)
 
 
 # Define a simple test to make sure it is working.

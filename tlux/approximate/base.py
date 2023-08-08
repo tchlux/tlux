@@ -45,12 +45,12 @@ def regular_simplex(num_categories):
 # Subclasses are expected to implement _fit and _predict methods which
 # take 2D numpy arrays of points as input.
 class Approximator:
-    _y_shape = 2
+    _y_shape = None
     _classifier = False
 
     # By default, return the 
     def __str__(self):
-        return type(self).split("'")[1] + " object"
+        return f"<{type(self).__name__} object>"
 
     # These functions should be defined by child classes.
     def _fit(*args, **kwargs): raise(NotImplemented())
@@ -58,46 +58,48 @@ class Approximator:
     def _gradient(*args, **kwargs): raise(NotImplemented())
 
     # Fit a 2D x and a 2D y with this model.
-    def fit(self, x, y, xi=None, *args, **kwargs):
+    def fit(self, x, y=None, xi=None, *args, **kwargs):
         # Sanity check the input.
         assert issubclass(type(x), np.ndarray), f"Expected 'x' to be a subclass of 'np.ndarray', received {type(x)}."
         assert len(x.shape) == 2, f"Expected 'x' to be a 2D array, received shape {x.shape}."
-        assert issubclass(type(y), np.ndarray), f"Expected 'y' to be a subclass of 'np.ndarray', received {type(y)}."
-        assert (x.shape[0] == y.shape[0]), f"First dimension of 'x' ({x.shape[0]}) and 'y' ({y.shape[0]}) do not match."
         if (xi is not None):
             assert issubclass(type(xi), np.ndarray), f"Expected 'xi' to be a subclass of 'np.ndarray', received {type(x)}."
             assert len(xi.shape) == 2, f"Expected 'xi' to be a 2D array, received shape {xi.shape}."
             assert (x.shape[0] == xi.shape[0]), f"First dimension of 'x' ({x.shape[0]}) and 'xi' ({xi.shape[0]}) do not match."
             kwargs["xi"] = xi
-        # Check shape of y (allowed to be 1D or 2D). Coerce into 2D.
-        self._y_shape = len(y.shape)
-        if (len(y.shape) == 1):
-            y = y.reshape((-1,1))
-        # Check to see if this should be a classifier (because output is not continuous).
-        if (not np.issubdtype(y.dtype, np.floating)):
-            self._classifier = True
-            self._categories = []
-            self._embeddings = []
-            # Generate embeddings for all categorical values.
-            output_size = 0
-            for i in range(y.shape[1]):
-                unique_values = np.unique(y[:,i])
-                embeddings = np.identity(len(unique_values))
-                self._categories.append( unique_values )
-                self._embeddings.append( embeddings )
-                output_size += len(unique_values)
-            # Map the provied categorical values into embeddings.
-            yi = y
-            y = np.zeros((y.shape[0], output_size))
-            col_start = 0
-            for i in range(len(self._categories)):
-                size = len(self._categories[i])
-                col_end = col_start + size
-                indices = yi[:,i] == self._categories[i]
-                y[:,col_start:col_end] = self._embeddings[i][indices]
-                col_start = col_end
+        # Check "y".
+        if (y is not None):
+            assert issubclass(type(y), np.ndarray), f"Expected 'y' to be a subclass of 'np.ndarray', received {type(y)}."
+            assert (x.shape[0] == y.shape[0]), f"First dimension of 'x' ({x.shape[0]}) and 'y' ({y.shape[0]}) do not match."
+            # Check shape of y (allowed to be 1D or 2D). Coerce into 2D.
+            self._y_shape = len(y.shape)
+            if (len(y.shape) == 1):
+                y = y.reshape((-1,1))
+            # Check to see if this should be a classifier (because output is not continuous).
+            if (not np.issubdtype(y.dtype, np.floating)):
+                self._classifier = True
+                self._categories = []
+                self._embeddings = []
+                # Generate embeddings for all categorical values.
+                output_size = 0
+                for i in range(y.shape[1]):
+                    unique_values = np.unique(y[:,i])
+                    embeddings = np.identity(len(unique_values))
+                    self._categories.append( unique_values )
+                    self._embeddings.append( embeddings )
+                    output_size += len(unique_values)
+                # Map the provied categorical values into embeddings.
+                yi = y
+                y = np.zeros((y.shape[0], output_size))
+                col_start = 0
+                for i in range(len(self._categories)):
+                    size = len(self._categories[i])
+                    col_end = col_start + size
+                    indices = yi[:,i] == self._categories[i]
+                    y[:,col_start:col_end] = self._embeddings[i][indices]
+                    col_start = col_end
         # Apply the fit function.
-        return self._fit(x, y, *args, **kwargs)
+        return self._fit(x=x, y=y, *args, **kwargs)
         
     # Predict y at new x locations from fit model.
     def predict(self, x, *args, **kwargs):
@@ -109,20 +111,22 @@ class Approximator:
             x = x.reshape((1,x.size))
         # Produce predictions.
         y = self._predict(x, *args, **kwargs)
-        # Return categories back to their format given during fit.
-        if (self._classifier):
-            yi = []
-            col_start = 0
-            for i in range(len(self._categories)):
-                size = len(self._categories[i])
-                col_end = col_start + size
-                indices = np.argmax(y[:,col_start:col_end], axis=1)
-                yi.append( self._categories[i][indices] )
-                col_start = col_end
-            y = np.asarray(yi)
-        # Reduce output to expected shape.
-        if (self._y_shape == 1) or single_response:
-            y = y.reshape((-1,))
+        # Only process the output further if there was a "y" at fit time.
+        if (self._y_shape is not None):
+            # Return categories back to their format given during fit.
+            if (self._classifier):
+                yi = []
+                col_start = 0
+                for i in range(len(self._categories)):
+                    size = len(self._categories[i])
+                    col_end = col_start + size
+                    indices = np.argmax(y[:,col_start:col_end], axis=1)
+                    yi.append( self._categories[i][indices] )
+                    col_start = col_end
+                y = np.asarray(yi)
+            # Reduce output to expected shape.
+            if (self._y_shape == 1) or single_response:
+                y = y.reshape((-1,))
         # Return prediction.
         return y
 
