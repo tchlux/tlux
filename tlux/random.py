@@ -252,3 +252,49 @@ def uniform(count, value=None, offset=4091, multiplier=1048573, max_numbers=2**3
         # Calculate the next value in the sequence.
         value = (value*multiplier + offset) % modulus
 
+# Create a tensor mesh of "len(nodes)" in R^"dimension" space of all
+# pairs of elements inside of "nodes". If "sample" is provided, then a
+# random sample of size "sample" is drawn from that mesh.
+# 
+#    `mesh([0, 1], 2) = [[0, 0], [1, 0], [0, 1], [1, 1]]`
+# 
+def mesh(nodes, dimension, sample=None):
+    # If a flat list of nodes is given, repeat it "dimension" times.
+    if not hasattr(nodes[0], "__len__"):
+        nodes = [nodes for i in range(dimension)]
+    assert (len(nodes) == dimension), f"Provided list of nodes contained {len(nodes)} sublist{'s' if len(nodes) > 1 else ''}, but should either be flat or have one list per axis ({dimension} lists of numbers)."
+    from numpy import asarray
+    # Start of the actual function.
+    from numpy import vstack, meshgrid
+    if sample:
+        # Compute the multiplicative product of a list of integers.
+        # Make sure everything is PYTHON INTEGER to avoid overflow.
+        def product(integers):
+            p = int(integers[0])
+            for i in range(1,len(integers)): p *= int(integers[i])
+            return p
+        mesh_size = product(list(map(len,nodes)))
+        # Only continue if the sample does *not* include the whole grid.
+        if (sample < mesh_size):
+            from tlux.random import random_range
+            from numpy import zeros
+            # Compute the total mesh size (and track the size of each component).
+            sizes = list(map(len, nodes))
+            # Randomly draw points from the mesh.
+            points = zeros((sample, dimension), dtype=float)
+            for i,index in enumerate(random_range(mesh_size, count=sample)):
+                smaller_prod = mesh_size
+                # Decode the index into a set of indices for each component.
+                for s in range(len(sizes)):
+                    smaller_prod = int(smaller_prod // sizes[s])
+                    curr_ind = int(index // smaller_prod )
+                    # Handle the special case where remaining sizes are 1.
+                    if (smaller_prod == 1):
+                        curr_ind = min(curr_ind, sizes[s]-1)
+                    # Subtract out the effect of the chosen index.
+                    index -= curr_ind * smaller_prod
+                    points[i,s] = nodes[s][curr_ind]
+            # Return the randomly selected mesh points.
+            return points
+    # Default operation, return the full tensor product of "nodes".
+    return vstack([_.flatten() for _ in meshgrid(*nodes)]).T

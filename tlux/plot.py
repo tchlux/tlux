@@ -1122,7 +1122,9 @@ class Plot:
     # LAYOUT CONTROL:
     #  layout          -- Update to be performed to the plotly
     #                     layout-dictionary that is generated.
-    #  aspect_mode     -- For 3D plotting, standard plotly.
+    #  aspect_mode     -- For 3D plotting, standard plotly,
+    #                      'cube' -> scale to make data fit in cube,
+    #                      'data' -> maintain data aspect ratio.
     #  legend          -- Legend settings, like the font and location.
     #  scene_settings  -- Standard plotly, for updating the "scene"
     #                     dictionary for 3D plotting.
@@ -1345,9 +1347,13 @@ class Plot:
               show_line=False, show_zero_line=False,
               show_legend=False, show_titles=False, **kwargs):
         # Set the axis labels
-        if (not show_titles) and ("x_title" not in kwargs) and ("y_title" not in kwargs):
-            self.x_title = ""
-            self.y_title = ""
+        if (not show_titles):
+            if ("x_title" not in kwargs):
+                self.x_title = ""
+            if ("y_title" not in kwargs):
+                self.y_title = ""
+            if ("z_title" not in kwargs):
+                self.z_title = ""
         # Set the default axis settings
         axis_settings = dict(showgrid=show_grid, showticklabels=show_ticks,
                              showline=show_line, zeroline=show_zero_line)
