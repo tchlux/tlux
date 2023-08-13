@@ -205,7 +205,7 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     if scenario["aggregator_only"]:
         mns = scenario.get('mns', 0)
         mds = scenario.get('mds', 0)
-        mdo = scenario.get('mdo', 0)
+        mdo = scenario.get('mdo', -1)
     else:
         mdo = ydn + yne
     # Weighted output dimensioned.

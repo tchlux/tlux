@@ -4,21 +4,21 @@
 #  - Create a function for visualizing all of the basis functions in a model.
 #  - Make sure the above function works in higher dimension (use PCA?).
 
-# import fmodpy
-# # Get the directory for the AXY compiled source code.
-# AXY = fmodpy.fimport(
-#     input_fortran_file = "../axy.f90",
-#     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-#     name = "test_axy_module",
-#     blas = True,
-#     lapack = True,
-#     omp = True,
-#     wrap = True,
-#     # rebuild = True,
-#     verbose = False,
-#     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-# ).axy
-# # help(AXY)
+import fmodpy
+# Get the directory for the AXY compiled source code.
+AXY = fmodpy.fimport(
+    input_fortran_file = "../axy.f90",
+    dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+    name = "test_axy_module",
+    blas = True,
+    lapack = True,
+    omp = True,
+    wrap = True,
+    # rebuild = True,
+    verbose = False,
+    f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+).axy
+# help(AXY)
 
 # Overwrite the typical "AXY" library with the testing one.
 from test_axy_module import axy as AXY
@@ -180,7 +180,7 @@ def _test_compute_batches():
     config = AXY.new_model_config(
         adn = 0,
         mdn = 0,
-        mdo = 0,
+        mdo = -1,
         num_threads = 30,
         noe=0, doe=0,  # temporarily disabling output embeddings
     )
@@ -534,7 +534,7 @@ def _test_evaluate():
 def _test_model_gradient():
     print("MODEL_GRADIENT")
 
-    SIMPLIFY_SCENARIO = False
+    SIMPLIFY_SCENARIO = True
     SHOW_RESULTS = False
     seed = 0
     num_scenarios = 0
@@ -558,42 +558,69 @@ def _test_model_gradient():
 
         # Simplify the scenario however we want.
         if SIMPLIFY_SCENARIO:
-            #   Special aggregator only model.
-            s["aggregator_only"] = False
-            #   Batching.
-            s["batch_aggregate_constrained"] = False
-            s["batch_fixed_constrained"] = False
-            #   Aggregate input.
-            s["input_aggregate_categorical"] = False
-            s["input_aggregate_numeric"] = True
-            #   Fixed input.
-            s["input_fixed_categorical"] = False
-            s["input_fixed_numeric"] = True
-            #   Layering.
-            s["model_aggregate_layered"] = False
-            s["model_fixed_layered"] = False
-            #   Outputs.
-            s["output_categorical"] = False
-            s["output_numeric"] = True
-            #   Special aggregations.
-            s["pairwise_aggregation"] = False
-            s["partial_aggregation"] = True
-            #   Data and model size.
-            s["small_data"] = True
-            s["small_model"] = True
-            #   Threading.
-            s["threaded"] = False
-            #   Weigthed outputs.
-            s["weighted_output"] = False
-            s["weights_dimensioned"] = False
-            # 
-            # # Set the number of threads.
-            # s["num_threads"] = 1
-            # 
-            # Set the number of data points.
-            s["na_in"], s["na"] = 1, 1
-            s["nm_in"], s["nm"] = 2, 2
-            # 
+            # #   Special aggregator only model.
+            # s["aggregator_only"] = False
+            # #   Batching.
+            # s["batch_aggregate_constrained"] = False
+            # s["batch_fixed_constrained"] = False
+            # #   Aggregate input.
+            # s["input_aggregate_categorical"] = False
+            # s["input_aggregate_numeric"] = True
+            # #   Fixed input.
+            # s["input_fixed_categorical"] = False
+            # s["input_fixed_numeric"] = True
+            # #   Layering.
+            # s["model_aggregate_layered"] = False
+            # s["model_fixed_layered"] = False
+            # #   Outputs.
+            # s["output_categorical"] = False
+            # s["output_numeric"] = True
+            # #   Special aggregations.
+            # s["pairwise_aggregation"] = False
+            # s["partial_aggregation"] = True
+            # #   Data and model size.
+            # s["small_data"] = True
+            # s["small_model"] = True
+            # #   Threading.
+            # s["threaded"] = False
+            # #   Weigthed outputs.
+            # s["weighted_output"] = False
+            # s["weights_dimensioned"] = False
+            # # 
+            # # # Set the number of threads.
+            # # s["num_threads"] = 1
+            # # 
+            # # Set the number of data points.
+            # s["na_in"], s["na"] = 1, 1
+            # s["nm_in"], s["nm"] = 2, 2
+            # # 
+
+            s.update({
+                'steps': 50,
+                'ade': None,
+                'ado': None,
+                'mde': None,
+                'aggregator_only': False,
+                'partial_aggregation': True,
+                'pairwise_aggregation': False,
+                'batch_aggregate_constrained': False,
+                'batch_fixed_constrained': False,
+                'input_aggregate_categorical': True,
+                'input_aggregate_numeric': False,
+                'input_fixed_categorical': False,
+                'input_fixed_numeric': False,
+                'model_aggregate_layered': False,
+                'model_fixed_layered': True,
+                'output_categorical': False,
+                'output_numeric': True,
+                'small_data': True,
+                'small_model': True,
+                'threaded': True,
+                'weighted_output': False,
+                'weights_dimensioned': False,
+                'na_in': 6,
+                'nm_in': 6,
+            })
             # Ensure that no more iterations happen after the modified one.
             num_scenarios = max_scenarios
         else:
@@ -603,6 +630,8 @@ def _test_model_gradient():
 
         # Record the scenario for later.
         initial_scenario = s.copy()
+
+        print("s: ", s, flush=True)
 
         # Create the scenario.
         config, details, raw_data, data = gen_config_data(
@@ -765,8 +794,9 @@ def _test_model_gradient():
             )
             check_code(info, "AXY.model_gradient")
             # TODO: Update the gradient checks here to calculate the AY error term as well.
-            # Overwrite the gradient for the AY error term to be zero.
-            model_grad[config.asov-1:config.aeov,:].reshape(config.adso, config.ado+1, -1, order="F")[:,-1,:] = 0.0
+            if (config.asov <= config.aeov):
+                # Overwrite the gradient for the AY error term to be zero.
+                model_grad[config.asov-1:config.aeov,:].reshape(config.adso, config.ado+1, -1, order="F")[:,-1,:] = 0.0
             # div = min(model_grad.shape[1], y.shape[1])
             return np.concatenate((model_grad.sum(axis=1), model[config.num_vars:]))
 
@@ -837,7 +867,8 @@ def _test_model_gradient():
             print()
             print(AxyModel(config, ratio.astype("float64").round(2), show_vecs=True, show_times=False))
             print()
-            assert (not failed_test), f"Either the maximum error ({float(max_error)}) was too high or the ratio between the exact gradient and computed gradient ({float(max_ratio_error)}) was too far from 1."
+            scenario_string = "{\n  " + ",\n  ".join((f"{repr(k)}: {v}" for (k,v) in initial_scenario.items())) + "\n}"
+            assert (not failed_test), f"Either the maximum error ({float(max_error)}) was too high or the ratio between the exact gradient and computed gradient ({float(max_ratio_error)}) was too far from 1.\n\nscenario = {scenario_string}"
 
     # Only arrives here if no tests fail.
     print(" passed")
@@ -1133,14 +1164,14 @@ def _test_large_data_fit():
 
 
 if __name__ == "__main__":
-    # _test_scenario_iteration()
-    # _test_init_model()
-    # # _test_compute_batches() # TODO: Design this test more carefully.
-    # _test_fetch_data()
-    # # _test_embed() # TODO: Design this test.
-    # _test_normalize_data()
-    # _test_evaluate()
-    _test_model_gradient()
+    _test_scenario_iteration()
+    _test_init_model()
+    # _test_compute_batches() # TODO: Design this test more carefully.
+    _test_fetch_data()
+    # _test_embed() # TODO: Design this test.
+    _test_normalize_data()
+    _test_evaluate()
+    # _test_model_gradient()
     # 
     # _test_large_data_fit()
     # _test_axi()

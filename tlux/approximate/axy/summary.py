@@ -26,7 +26,7 @@ class AxyModel:
         self.m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
         self.m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
         self.m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, max(0,self.config.mns-1), order="F")
-        self.m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
+        self.m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, max(0,self.config.mdo), order="F")
         self.y_shift       = self.model[self.config.moss-1:self.config.mose].reshape(self.config.do - self.config.doe, order="F")
         self.y_rescale     = self.model[self.config.moms-1:self.config.mome].reshape(self.config.do - self.config.doe, self.config.do - self.config.doe, order="F")
         self.o_embeddings  = self.model[self.config.osev-1:self.config.oeev].reshape(self.config.doe, self.config.noe, order="F")
@@ -194,7 +194,7 @@ class Details(dict):
             m_input_shift = model[config.msis-1:config.meis].reshape(config.mds, order="F"),
             m_state_vecs  = model[config.mssv-1:config.mesv].reshape(config.mds, config.mds, max(0,config.mns-1), order="F"),
             m_state_shift = model[config.msss-1:config.mess].reshape(config.mds, max(0,config.mns-1), order="F"),
-            m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, config.mdo, order="F"),
+            m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, max(0,config.mdo), order="F"),
             ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
             ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
             ay_shift = model[config.aoss-1:config.aose].reshape(config.ado, order="F"),
@@ -234,7 +234,7 @@ class Details(dict):
             axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi <= config.eaxi) else np.zeros((0,config.na), **ltype),
             sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, **ltype),
             xi = lwork[config.smxi-1:config.emxi].reshape(-1, config.nms, order="F") if (config.smxi <= config.emxi) else np.zeros((0,config.nms), **ltype),
-            yi = lwork[config.soxi-1:config.eoxi].reshape(ydi, config.nms, order="F") if (config.soxi <= config.eoxi) else np.zeros((0,config.nms), **ltype),
+            yi = lwork[config.soxi-1:config.eoxi].reshape(-1, config.nms, order="F") if (config.soxi <= config.eoxi) else np.zeros((0,config.nms), **ltype),
             a_order = iwork[config.sao-1:config.eao].reshape(config.ads, config.num_threads, order="F"),
             m_order = iwork[config.smo-1:config.emo].reshape(config.mds, config.num_threads, order="F"),
             update_indices = lwork[config.sui-1:config.eui].reshape(config.num_vars, order="F"),

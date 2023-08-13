@@ -131,6 +131,7 @@ class AXY:
 
 
     # Fit this model given whichever types of data are available. *i are categorical, a* are aggregate. 
+    #   Set "mdo=-1" to disable the fixed model on only have an aggregate model.
     def fit(self, *args, ax=None, axi=None, sizes=None, x=None, xi=None,
             y=None, yi=None, yw=None, new_model=False, nm=None, na=None,
             callback=mse_and_time, **kwargs):
@@ -184,7 +185,7 @@ class AXY:
             kwargs.update({
                 "adn":shapes["adn"],
                 "ane":max(shapes["ane"], kwargs.get("ane",0)),
-                "ado":kwargs.get("ado", (shapes["mdo"] if (kwargs.get("mdo",None) == 0) else None)),
+                "ado":kwargs.get("ado", (shapes["mdo"] if (kwargs.get("mdo",None) == -1) else None)),
                 "mdn":shapes["mdn"],
                 "mne":max(shapes["mne"], kwargs.get("mne",0)),
                 "mdo":kwargs.get("mdo", shapes["mdo"]),
@@ -227,12 +228,6 @@ class AXY:
                                   ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T, yw_in.T,
                                   yw.T, agg_iterators.T,
                                   steps=steps, record=self.record.T, sum_squared_error=0.0)
-        print("", flush=True)
-        print("__init__.py Line 226: ", flush=True)
-        print("yi.shape: ", yi.shape, flush=True)
-        print("yi.min(): ", yi.min(), flush=True)
-        print("yi.max(): ", yi.max(), flush=True)
-        print("config.noe: ", self.config.noe, flush=True)
         # Check for a nonzero exit code.
         self._check_code(info, "fit_precheck")
         # Store the number of steps already taken.
@@ -259,7 +254,7 @@ class AXY:
                         steps=self.config.steps_taken,
                         rwork=rwork, iwork=iwork, lwork=lwork,
                         agg_iterators_in=agg_iterators, record=self.record,
-                        yw=yw, yi=yi
+                        yw=yw, yi=yi, ydi=yi.shape[1],
                     )
                 )
         # Store the multiplier to be used in embeddings (to level the norm contribution).
@@ -285,7 +280,7 @@ class AXY:
                 embedding=False, save_states=False, raw_scores=False, na=None, **kwargs):
         # Prevent calls from being made without naming arguments (to ensure alignment).
         if (len(args) > 0):
-            raise(RuntimeError(f"Calling {type(self).__name__}.predict with unnamed arguments is not allowed to prevent unexpected behavior.\n  Set keyword arguments depending on data and model type: 'ax=...', 'axi=...', 'sizes=...', 'x=...', 'xi=...', 'y=...', 'yi=...'."))
+            raise(RuntimeError(f"Calling {type(self).__name__}.predict with unnamed arguments is not allowed to prevent unexpected behavior.\n  Set keyword arguments depending on data and model type: 'ax=...', 'axi=...', 'sizes=...', 'x=...', 'xi=...'."))
         # Evaluate the model at all data.
         assert ((x is not None) or (xi is not None) or (sizes is not None)), "AXY.predict requires at least one of 'x', 'xi', or 'sizes' to not be None."
         assert (not (embedding and raw_scores)), "AXY.predict cannot provide both 'embedding=True' *and* 'raw_scores=True'."
@@ -307,7 +302,7 @@ class AXY:
         yi = np.zeros((nmt, 0), dtype="int64", order="C")
         # ------------------------------------------------------------
         # Call the unerlying library to make sure input shapes are appropriate.
-        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T)
+        info = self.AXY.check_shape(self.config, self.model, ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T, for_evaluation=True)
         # Check for a nonzero exit code.
         self._check_code(info, "check_shape")
         # Normalize the numeric inputs.
@@ -365,8 +360,12 @@ class AXY:
             x = np.zeros((self.config.mdi, nmt), dtype="float32", order="F")
             xi = np.zeros((xi_in.shape[0], nmt), dtype="int64", order="F")
             y_in = yw_in = np.zeros((0,nmt), dtype="float32", order="F")
+            yi_in = np.zeros((0,nmt), dtype="int64", order="F")
+            # Disable partial aggregation if it was enabled.
+            pa = self.config.partial_aggregation
+            self.config.partial_aggregation = False
             # Use FETCH_DATA to do the pairwise aggreagtion.
-            config, agg_iterators, ax, axi, sizes, x, xi, y_in, yw_in, na, nm = self.AXY.fetch_data(
+            config, agg_iterators, ax, axi, sizes, x, xi, y_in, yi_in, yw_in, na, nm = self.AXY.fetch_data(
                 config = self.config,
                 agg_iterators_in = agg_iterators,
                 ax_in = ax_in,
@@ -381,14 +380,17 @@ class AXY:
                 xi = xi,
                 y_in = y_in,
                 y = y_in,
+                yi_in = yi_in,
+                yi = yi_in,
                 yw_in = yw_in,
                 yw = yw_in,
             )
+            self.config.partial_aggregation = pa
             # Reset the config.
             for (name, value) in temp_confg.items():
                 setattr(self.config, name, value)
             # Delete all scratch space.
-            del ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yw_in, agg_iterators, name, value, temp_confg
+            del ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yi_in, yw_in, agg_iterators, name, value, temp_confg
             ax = ax[:,:na].T
             axi = axi[:,:na].T
             ay = np.zeros((na, config.ado+1), dtype="float32", order="F")
@@ -477,16 +479,17 @@ class AXY:
         # If there are categorical outputs, then select by taking the max magnitude output.
         elif ((len(self.yi_map) > 0) and (not raw_scores)):
             # Extract the YI embeddings matrix from the model.
-            yi_embeddings = self.model[self.config.osev:self.config.oeev+1].reshape(
+            yi_embeddings = self.model[self.config.osev-1:self.config.oeev].reshape(
                 self.config.doe, self.config.noe, order='F'
             )
             # Get the number of category outputs and the number of numeric outputs.
+            doe = self.config.doe
             yne = sum(map(len, self.yi_map))
-            ynn = y.shape[1]-(yne-1)
+            ynn = y.shape[1]-doe
             # Get the numerical columns first.
             _y = [y[:,i] for i in range(ynn)]
             # Project the categorical embedding outputs into a matrix with "yne" columns.
-            y = np.matmul(y[:,ynn:], yi_embeddings)
+            y = np.matmul(y[:,-doe:], yi_embeddings)
             # Iterate over each categorical output column, picking the category whose embedding had the largest value.
             start = 0
             for i in range(len(self.yi_map)):
@@ -581,35 +584,45 @@ class AXY:
 
 
 if __name__ == "__main__":
-    np.set_printoptions(linewidth=1000) #, threshold=sys.max something?)
+    # Make sure we have unlimited print width.
+    import sys
+    np.set_printoptions(linewidth=sys.maxsize)
     print("_"*70)
     print(" TESTING AXY MODULE")
 
-    # # Compile and import testing version of the modules (with testing related compilation flags).
-    # import fmodpy
-    # RANDOM_MOD = fmodpy.fimport(
-    #     input_fortran_file = "axy_random.f90",
-    #     dependencies = ["pcg32.f90"],
-    #     name = "axy_random",
-    #     autocompile = False,
-    #     wrap = True,
-    #     # rebuild = True,
-    #     verbose = False,
-    #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-    # ).random
-    # AXY_MOD = fmodpy.fimport(
-    #     input_fortran_file = "axy.f90",
-    #     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-    #     name = "axy",
-    #     blas = True,
-    #     lapack = True,
-    #     omp = True,
-    #     wrap = True,
-    #     autocompile = False,
-    #     # rebuild = True,
-    #     verbose = False,
-    #     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-    # ).axy
+    # Compile and import testing version of the modules (with testing related compilation flags).
+    DEBUG_BUILD = True
+    if DEBUG_BUILD:
+        # Build all of the ".mod" files before making the library.
+        import subprocess
+        result = subprocess.run("gfortran -c pcg32.f90 axy_random.f90 axy_sort_and_select.f90 axy_matrix_operations.f90 axy_profiler.f90 axy.f90 && rm axy_random.o pcg32.o axy_sort_and_select.o axy_matrix_operations.o axy_profiler.o axy.o", shell=True, capture_output=True)
+        if (result.returncode != 0):
+            print("ERROR:", result.stderr.decode(), flush=True)        
+        # Build the testing versions of the libraries.
+        import fmodpy
+        RANDOM_MOD = fmodpy.fimport(
+            input_fortran_file = "axy_random.f90",
+            dependencies = ["pcg32.f90"],
+            name = "axy_random",
+            autocompile = False,
+            wrap = True,
+            # rebuild = True,
+            verbose = False,
+            f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+        ).random
+        AXY_MOD = fmodpy.fimport(
+            input_fortran_file = "axy.f90",
+            dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+            name = "axy",
+            blas = True,
+            lapack = True,
+            omp = True,
+            wrap = True,
+            autocompile = False,
+            # rebuild = True,
+            verbose = False,
+            f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+        ).axy
 
     # Import codes that will be used for testing.
     from tlux.plot import Plot
@@ -641,7 +654,7 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = False
+    use_a = True
     use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
@@ -675,7 +688,7 @@ if __name__ == "__main__":
         # min_update_ratio = 1.0,
         # max_step_factor = 0.005,
         # min_step_factor = 0.001,
-        # num_threads = 20,
+        num_threads = 10,
         # granular_parallelism = True,
         log_grad_norm_frequency = 1,
         rank_check_frequency = 10,
@@ -684,8 +697,8 @@ if __name__ == "__main__":
         # ay_normalized = True,
         # x_normalized = True,
         # y_normalized = True,
-        pairwise_aggregation = False,
-        partial_aggregation = False,
+        pairwise_aggregation = True,
+        partial_aggregation = True,
         # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,
@@ -803,11 +816,14 @@ if __name__ == "__main__":
 
     # Print the model, config, and any profiling stats.
     print()
+    print("Loaded model:")
     print(loaded_model)
     print()
+    print("Trained / Loaded configs:")
     print(trained_model.config)
     print(loaded_model.config)
     print()
+    print("Profile for 'axy.fetch_data'")
     print(loaded_model.AXY.profile("axy.fetch_data"))
     print()
 
@@ -907,6 +923,8 @@ if __name__ == "__main__":
         save_states=True
     )
 
+    print()
+    print("Plotting embeddings..")
     from tlux.math import project
     p = Plot("Data embeddings")
     munpacked = m.unpack()
@@ -917,8 +935,14 @@ if __name__ == "__main__":
         p.add("ay", *project(m.states["ay"], 3).T)
     if (munpacked.m_embeddings.size > 0):
         p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
+    if (munpacked.o_embeddings.size > 0):
+        p.add("o-embs", *project(munpacked.o_embeddings.T, 3).T)
     if (m.states["x"].size > 0):
         p.add("x", *project(m.states["x"], 3).T)
+    if ((len(m.states["m_states"]) > 0) and (m.states["m_states"][-1].size > 0)):
+        p.add("m-last-state", *project(m.states["m_states"][-1], 3).T)
+    print()
+
 
     # Generate a visual for the training loss.
     print("Generating surface plot..")

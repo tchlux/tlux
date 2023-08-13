@@ -105,6 +105,7 @@ MODULE AXY
      INTEGER(KIND=INT32) :: DOE     ! dimension of output embeddings
      INTEGER(KIND=INT32) :: NOE     ! number of output embeddings
      ! Summary numbers that are computed.
+     INTEGER(KIND=INT32) :: DON     ! dimension of output numeric values
      INTEGER(KIND=INT32) :: DO      ! Dimension output (either MDO or ADO plus DOE). 
      ! Model descriptors.
      INTEGER(KIND=INT64) :: TOTAL_SIZE
@@ -214,7 +215,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SAXB, EAXB ! AX(ADI,NA)
      INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO+1)
      INTEGER(KIND=INT64) :: SMXB, EMXB ! X(MDI,NMS)
-     INTEGER(KIND=INT64) :: SMYB, EMYB ! Y(DO-DOE,NMS)
+     INTEGER(KIND=INT64) :: SMYB, EMYB ! Y(DON,NMS)
      INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1)
@@ -391,17 +392,6 @@ CONTAINS
         CONFIG%MDS = 0
         CONFIG%MDSO = CONFIG%MDI
      END IF
-     ! MDO
-     CONFIG%MDO = MDO
-     ! No fixed model.
-     IF (CONFIG%MDO .EQ. 0) THEN
-        CONFIG%MDI = 0
-        CONFIG%MDE = 0
-        CONFIG%MNE = 0
-        CONFIG%MDS = 0
-        CONFIG%MNS = 0
-        CONFIG%MDSO = 0
-     END IF
      ! DOE, NOE (output embeddings)
      CONFIG%NOE = NOE
      IF (PRESENT(DOE)) THEN
@@ -414,14 +404,26 @@ CONTAINS
         ! There is no output embedding.
         CONFIG%DOE = ZERO
      END IF
+     ! MDO
+     CONFIG%MDO = MDO
+     ! No fixed model.
+     IF (CONFIG%MDO .LT. 0) THEN
+        CONFIG%MDI = 0
+        CONFIG%MDE = 0
+        CONFIG%MNE = 0
+        CONFIG%MDS = 0
+        CONFIG%MNS = 0
+        CONFIG%MDSO = 0
+     END IF
      ! DO
-     IF (CONFIG%MDO .GT. ZERO) THEN
+     IF (CONFIG%MDO .GE. ZERO) THEN
         CONFIG%MDO = CONFIG%MDO + CONFIG%DOE
         CONFIG%DO = CONFIG%MDO
      ELSE
         CONFIG%ADO = CONFIG%ADO + CONFIG%DOE
         CONFIG%DO = CONFIG%ADO
      END IF
+     CONFIG%DON = CONFIG%DO - CONFIG%DOE
      ! ---------------------------------------------------------------
      ! NUM_THREADS
      IF (PRESENT(NUM_THREADS)) THEN
@@ -525,11 +527,11 @@ CONTAINS
      CONFIG%TOTAL_SIZE = CONFIG%MIME
      !   model post-output shift
      CONFIG%MOSS = ONE + CONFIG%TOTAL_SIZE
-     CONFIG%MOSE = CONFIG%MOSS-ONE + (CONFIG%DO - CONFIG%DOE)
+     CONFIG%MOSE = CONFIG%MOSS-ONE + CONFIG%DON
      CONFIG%TOTAL_SIZE = CONFIG%MOSE
      !   model post-output multiplier
      CONFIG%MOMS = ONE + CONFIG%TOTAL_SIZE
-     CONFIG%MOME = CONFIG%MOMS-ONE + (CONFIG%DO - CONFIG%DOE) ** TWO
+     CONFIG%MOME = CONFIG%MOMS-ONE + CONFIG%DON ** TWO
      CONFIG%TOTAL_SIZE = CONFIG%MOME
      ! ---------------------------------------------------------------
      !   set all time counters to zero
@@ -937,7 +939,7 @@ CONTAINS
 
 
   ! Returnn nonzero INFO if any shapes or values do not match expectations.
-  SUBROUTINE CHECK_SHAPE(CONFIG, MODEL, AX, AXI, SIZES, X, XI, Y, YI, INFO)
+  SUBROUTINE CHECK_SHAPE(CONFIG, MODEL, AX, AXI, SIZES, X, XI, Y, YI, INFO, FOR_EVALUATION)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AX
@@ -947,7 +949,20 @@ CONTAINS
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: YI
+    LOGICAL(KIND=C_BOOL), INTENT(IN), OPTIONAL :: FOR_EVALUATION
     INTEGER(KIND=INT32), INTENT(OUT) :: INFO
+    ! Local variable for tracking the additional (not present in Y) output dimensions.
+    INTEGER(KIND=INT32) :: ADDITIONAL_OUTPUT
+    IF (PRESENT(FOR_EVALUATION)) THEN
+       IF (FOR_EVALUATION) THEN
+          ADDITIONAL_OUTPUT = 0
+       ELSE
+          ADDITIONAL_OUTPUT = CONFIG%DOE
+       END IF
+    ELSE
+       ADDITIONAL_OUTPUT = CONFIG%DOE
+    END IF
+    ! Default code is 0.
     INFO = 0
     ! Compute whether the shape matches the CONFIG.
     IF (SIZE(MODEL,KIND=INT64) .NE. CONFIG%TOTAL_SIZE) THEN
@@ -956,9 +971,9 @@ CONTAINS
        INFO = 2 ! Input arrays do not match in size.
     ELSE IF (SIZE(X,1,INT64) .NE. CONFIG%MDN) THEN
        INFO = 3 ! X input dimension is bad.
-    ELSE IF ((CONFIG%MDO .GT. 0) .AND. (SIZE(Y,1,INT64)+CONFIG%DOE .NE. CONFIG%MDO)) THEN
+    ELSE IF ((CONFIG%MDO .GT. 0) .AND. (SIZE(Y,1,INT64)+ADDITIONAL_OUTPUT .NE. CONFIG%MDO)) THEN
        INFO = 4 ! Model output dimension is bad, does not match Y.
-    ELSE IF ((CONFIG%MDO .EQ. 0) .AND. (SIZE(Y,1,INT64)+CONFIG%DOE .NE. CONFIG%ADO)) THEN
+    ELSE IF ((CONFIG%MDO .EQ. 0) .AND. (SIZE(Y,1,INT64)+ADDITIONAL_OUTPUT .NE. CONFIG%ADO)) THEN
        INFO = 5 ! Aggregator output dimension is bad, does not match Y.
     ELSE IF ((CONFIG%NOE .GT. 0) .AND. (SIZE(YI,2,INT64) .NE. SIZE(Y,2,INT64))) THEN
        INFO = 6 ! Input integer YI size does not match Y.
@@ -1238,9 +1253,12 @@ CONTAINS
        END IF
        X(:CONFIG%MDN,I) = X_IN(:,GENDEX)
        XI(:,I) = XI_IN(:,GENDEX)
-       Y(:CONFIG%DO-CONFIG%DOE,I) = Y_IN(:,GENDEX)
-       YI(:,I) = YI_IN(:,GENDEX)
-       YW(:,I) = YW_IN(:,GENDEX)
+       ! For evaluation, no Y will be provided.
+       IF (SIZE(Y,1) .GT. ZERO) THEN
+          Y(:CONFIG%DON,I) = Y_IN(:,GENDEX)
+          YI(:,I) = YI_IN(:,GENDEX)
+          YW(:,I) = YW_IN(:,GENDEX)
+       END IF
     END DO
     ! If there are aggregate inputs ...
     IF (SIZE(SIZES_IN) .GT. 0) THEN
@@ -1373,9 +1391,12 @@ CONTAINS
              DO J = AGG_STARTS_IN(I), AGG_STARTS_IN(I) + MAX(ONE,SIZES(I)) - ONE
                 X(:CONFIG%MDN,J) = X(:CONFIG%MDN,I)
                 XI(:,J) = XI(:,I)
-                Y(:CONFIG%DO-CONFIG%DOE,J) = Y(:CONFIG%DO-CONFIG%DOE,I)
-                YI(:,J) = YI(:,I)
-                YW(:,J) = YW(:,I)
+                ! For evaluation, no Y will be provided.
+                IF (SIZE(Y,1) .GT. ZERO) THEN
+                   Y(:CONFIG%DON,J) = Y(:CONFIG%DON,I)
+                   YI(:,J) = YI(:,I)
+                   YW(:,J) = YW(:,I)
+                END IF
              END DO
           END DO
           ! Set the total NM.
@@ -1733,10 +1754,10 @@ CONTAINS
     IF (CONFIG%NORMALIZE) THEN
        ! Set the pointers to the appropriate spots in model memory.
        IF (CONFIG%NEEDS_SHIFTING) THEN
-          Y_SHIFT(1:CONFIG%DO-CONFIG%DOE) => MODEL(CONFIG%MOSS:CONFIG%MOSE)
+          Y_SHIFT(1:CONFIG%DON) => MODEL(CONFIG%MOSS:CONFIG%MOSE)
        END IF
        IF (CONFIG%NEEDS_SCALING) THEN
-          Y_RESCALE(1:CONFIG%DO-CONFIG%DOE,1:CONFIG%DO-CONFIG%DOE) => MODEL(CONFIG%MOMS:CONFIG%MOME)
+          Y_RESCALE(1:CONFIG%DON,1:CONFIG%DON) => MODEL(CONFIG%MOMS:CONFIG%MOME)
        END IF
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
        output_normalization : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
@@ -1747,12 +1768,12 @@ CONTAINS
           IF (BT .LE. 0) CYCLE output_normalization
           ! Apply scaling multiplier.
           IF (CONFIG%NEEDS_SCALING) THEN
-             Y(:CONFIG%DO-CONFIG%DOE,BS:BE) = MATMUL(TRANSPOSE(Y_RESCALE(:,:)), Y(:CONFIG%DO-CONFIG%DOE,BS:BE))
+             Y(:CONFIG%DON,BS:BE) = MATMUL(TRANSPOSE(Y_RESCALE(:,:)), Y(:CONFIG%DON,BS:BE))
           END IF
           ! Apply shift.
           IF (CONFIG%NEEDS_SHIFTING) THEN
              DO I = BS, BE
-                Y(:CONFIG%DO-CONFIG%DOE,I) = Y(:CONFIG%DO-CONFIG%DOE,I) - Y_SHIFT(:)
+                Y(:CONFIG%DON,I) = Y(:CONFIG%DON,I) - Y_SHIFT(:)
              END DO
           END IF
        END DO output_normalization
@@ -2185,6 +2206,8 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT) :: SSG
     INTEGER, INTENT(IN) :: DON
     INTEGER :: D, I, C
+    ! ----------------------------------------------------------------------------------------
+    !                             Embedding gradient calculation
     ! TODO: Local allocation, needs to be moved.
     REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: EMBEDDING_OUTPUTS, EMBEDDING_GRADIENTS
     ALLOCATE( &
@@ -2194,9 +2217,9 @@ CONTAINS
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute embedding outputs (1:NOE,1:N) by taking the dot product
     ! of output vectors with the matrix of all output emeddings.
-    EMBEDDING_OUTPUTS(:,:) = MATMUL( &
-         TRANSPOSE(O_EMB_VECS(:,:)), &
-         Y_GRADIENT(DON+ONE:,:))
+    EMBEDDING_OUTPUTS(:,:) = MATMUL( & ! (NOE, N)
+         TRANSPOSE(O_EMB_VECS(:,:)), & ! TRANSPOSE((DOE, NOE))
+         Y_GRADIENT(DON+ONE:,:)) ! (DOE, N)
     ! First, assume all categories are negative examples, compute those gradients.
     WHERE (EMBEDDING_OUTPUTS(:,:) .GT. 1.0_RT - CONFIG%CATEGORY_GAP)
        EMBEDDING_GRADIENTS(:,:) = EMBEDDING_OUTPUTS(:,:) - (1.0_RT - CONFIG%CATEGORY_GAP)
@@ -2215,8 +2238,12 @@ CONTAINS
           END IF
        END DO
     END DO
+    ! ----------------------------------------------------------------------------------------
+    !                             Value gradient calculation
     ! Compute the gradient of the model outputs, overwriting "Y_GRADIENT"
     Y_GRADIENT(:DON,:) = Y_GRADIENT(:DON,:) - Y(:DON,:) ! squared error gradient
+    ! ----------------------------------------------------------------------------------------
+    !                   Weighting gradient (only relevant for a weighted fit)
     ! TODO: Handle case where YW has DON+ONE elements, assuming the +1 is for the embeddings.
     ! Apply weights to the computed gradients (if they were provided.
     IF (SIZE(YW,1) .EQ. DON) THEN
@@ -2250,6 +2277,7 @@ CONTAINS
           END WHERE
        END DO
     END IF
+    ! ----------------------------------------------------------------------------------------
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute the gradient of the embeddings.
     O_EMB_GRAD(:,:) = MATMUL( & ! (DOE, NOE) = ...
@@ -2315,7 +2343,7 @@ CONTAINS
     ! Set gradients to zero initially.
     MODEL_GRAD(:,:) = 0.0_RT
     SSG = 0.0_RT
-    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(MS, ME, D) &
+    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(MS, ME, TN) &
     !$OMP& REDUCTION(+:SSG) IF(NT > 1)
     error_gradient : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
        ! Set batch start and end indices. Exit early if there is no data.
@@ -2326,7 +2354,7 @@ CONTAINS
        ! Compute the gradient out the output (handle any YI embeddings).
        CALL OUTPUT_GRADIENT(CONFIG, Y_GRADIENT(:,MS:ME), Y(:,MS:ME), YI(:,MS:ME), YW(:,MS:ME), &
             MODEL(CONFIG%OSEV:CONFIG%OEEV), MODEL_GRAD(CONFIG%OSEV:CONFIG%OEEV,TN), &
-            O_EMB_TEMP(:,:,TN), SSG, CONFIG%DO-CONFIG%DOE)
+            O_EMB_TEMP(:,:,TN), SSG, CONFIG%DON)
     END DO error_gradient
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SSG
     ! Adjust the batches to be defined based on inputs (aggregate sets kept together).
@@ -2439,7 +2467,7 @@ CONTAINS
     LOGICAL(KIND=C_BOOL), ALLOCATABLE, DIMENSION(:,:) :: YW_MASK ! LOCAL ALLOCATION
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: Y_SCALE ! LOCAL ALLOCATION
     LOGICAL(KIND=C_BOOL) :: NORMALIZE
-    INTEGER(KIND=INT64) :: D, E, NA, NM
+    INTEGER(KIND=INT64) :: I, D, E, NA, NM
     INTEGER :: TO_FLATTEN
     REAL(KIND=RT) :: SCALAR
     REAL :: CPU_TIME_START, CPU_TIME_END
@@ -2565,35 +2593,68 @@ CONTAINS
        CONFIG%XI_NORMALIZED = .TRUE.
     END IF
     ! Y
-    IF (.NOT. CONFIG%Y_NORMALIZED) THEN
-       IF (CONFIG%RESCALE_Y) THEN
-          TO_FLATTEN = CONFIG%DO - CONFIG%DOE
+    IF (CONFIG%DO .GT. CONFIG%DOE) THEN
+       IF (.NOT. CONFIG%Y_NORMALIZED) THEN
+          IF (CONFIG%RESCALE_Y) THEN
+             TO_FLATTEN = CONFIG%DON
+          ELSE
+             TO_FLATTEN = 0
+          END IF
+          CALL RADIALIZE(Y(:TO_FLATTEN,:NM), Y_SHIFT(:), Y_SCALE(:,:), &
+               INVERSE=Y_RESCALE(:,:), MAX_TO_FLATTEN=TO_FLATTEN)
+          !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
+          DO D = 1, CONFIG%DON
+             Y_IN(D,:) = Y_IN(D,:) + Y_SHIFT(D)
+          END DO
+          !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
+          DO D = 1, SIZE(Y_IN,2,INT64)
+             Y_IN(:,D) = MATMUL(Y_IN(:,D), Y_SCALE(:,:))
+          END DO
+          ! Set all invalid values to zeros.
+          WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
+             Y_IN(:,:) = 0.0_RT
+          END WHERE
+          CONFIG%Y_NORMALIZED = .TRUE.
        ELSE
-          TO_FLATTEN = 0
+          Y_SHIFT(:) = 0.0_RT
+          Y_RESCALE(:,:) = 0.0_RT
+          FORALL (D=1:SIZE(Y,1)) Y_RESCALE(D,D) = 1.0_RT
+          ! Set all invalid values to zeros.
+          WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
+             Y_IN(:,:) = 0.0_RT
+          END WHERE
        END IF
-       CALL RADIALIZE(Y(:,:NM), Y_SHIFT(:), Y_SCALE(:,:), &
-            INVERSE=Y_RESCALE(:,:), MAX_TO_FLATTEN=TO_FLATTEN)
-       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
-       DO D = 1, CONFIG%DO - CONFIG%DOE
-          Y_IN(D,:) = Y_IN(D,:) + Y_SHIFT(D)
+    END IF
+    ! YI
+    IF ((.NOT. CONFIG%YI_NORMALIZED) .AND. (CONFIG%DOE .GT. 0)) THEN
+       ! Populate the "target" values for the output embeddings.
+       Y(CONFIG%DON+ONE:,:NM) = 0.0_RT
+       DO I = 1, NM
+          DO D = 1, SIZE(YI,1,KIND=INT64)
+             E = CONFIG%DON + YI(D,I)
+             Y(E,I) = 1.0_RT
+          END DO
        END DO
+       ! Transform the embeddings so they are "uniformly spaced" after
+       !  considering their occurrence. They will be re-transformed to
+       !  be unit length again later, but that is left as a TODO.
+       CALL RADIALIZE(Y(CONFIG%DON+ONE:,:NM), YI_SHIFT(:), YI_RESCALE(:,:))
+       ! Apply the shift to the source embeddings.
        !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
-       DO D = 1, SIZE(Y_IN,2,INT64)
-          Y_IN(:,D) = MATMUL(Y_IN(:,D), Y_SCALE(:,:))
+       DO D = 1, CONFIG%DOE
+          O_EMB_VECS(D,:) = O_EMB_VECS(D,:) + YI_SHIFT(D)
        END DO
-       ! Set all invalid values to zeros.
-       WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
-          Y_IN(:,:) = 0.0_RT
-       END WHERE
-       CONFIG%Y_NORMALIZED = .TRUE.
-    ELSE
-       Y_SHIFT(:) = 0.0_RT
-       Y_RESCALE(:,:) = 0.0_RT
-       FORALL (D=1:SIZE(Y,1)) Y_RESCALE(D,D) = 1.0_RT
-       ! Set all invalid values to zeros.
-       WHERE (IS_NAN(Y_IN(:,:)) .OR. (.NOT. IS_FINITE(Y_IN(:,:))))
-          Y_IN(:,:) = 0.0_RT
-       END WHERE
+       ! Apply the transformation to the source embeddings.
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
+       DO D = 1, SIZE(O_EMB_VECS,2,INT64)
+          O_EMB_VECS(:,D) = MATMUL(O_EMB_VECS(:,D), YI_RESCALE(:,:))
+       END DO
+       ! Renormalize the embeddings to have a consistent maximum norm.
+       SCALAR = MAXVAL(SUM(O_EMB_VECS(:,:)**2, 1))
+       IF (SCALAR .GT. 0.0_RT) THEN
+          O_EMB_VECS(:,:) = O_EMB_VECS(:,:) / SQRT(SCALAR)
+       END IF
+       CONFIG%YI_NORMALIZED = .TRUE.
     END IF
     ! YW
     IF (SIZE(YW_IN,KIND=INT64) .GT. 0) THEN
@@ -2719,7 +2780,8 @@ CONTAINS
          MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
          MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
          MODEL(CONFIG%MSSS:CONFIG%MESS), & ! M state shift
-         MODEL(CONFIG%MSOV:CONFIG%MEOV)) ! M output vecs
+         MODEL(CONFIG%MSOV:CONFIG%MEOV), & ! M output vecs
+         MODEL(CONFIG%OSEV:CONFIG%OEEV)) ! Output embeddings
     ! 
     ! Check rank and optionally replace redundant basis functions.
     ! 
@@ -2791,7 +2853,7 @@ CONTAINS
          A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, &
          A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, SIZES, &
          M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, &
-         M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS)
+         M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS, OUTPUT_EMBEDDINGS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER(KIND=INT32), INTENT(IN) :: NUM_THREADS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE) :: A_EMBEDDINGS_MEAN
@@ -2811,6 +2873,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%NOE) :: OUTPUT_EMBEDDINGS
       ! Local variables.
       INTEGER(KIND=INT64) :: L, D
       REAL(KIND=RT) :: SCALAR
@@ -2818,7 +2881,7 @@ CONTAINS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
-      DO L = 1, CONFIG%MNS+CONFIG%ANS
+      DO L = 1, CONFIG%MNS+CONFIG%ANS+CONFIG%NOE
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN
             SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
@@ -2839,6 +2902,10 @@ CONTAINS
             SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
             M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
+         ! [ANS+MNS+1, ANS+MNS+NOE] -> OUTPUT_EMBEDDINGS
+         ELSE
+            SCALAR = SQRT(SUM(OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS)**2))
+            OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS) = OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS) / SCALAR
          END IF
       END DO
       ! AY_SHIFT, and componentwise variance of AY 
@@ -3396,8 +3463,8 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%MDN, CONFIG%MDN) :: X_RESCALE
       REAL(KIND=RT), DIMENSION(CONFIG%MDE) :: XI_SHIFT
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MDE) :: XI_RESCALE
-      REAL(KIND=RT), DIMENSION(CONFIG%DO-CONFIG%DOE) :: Y_SHIFT
-      REAL(KIND=RT), DIMENSION(CONFIG%DO-CONFIG%DOE, CONFIG%DO-CONFIG%DOE) :: Y_RESCALE
+      REAL(KIND=RT), DIMENSION(CONFIG%DON) :: Y_SHIFT
+      REAL(KIND=RT), DIMENSION(CONFIG%DON, CONFIG%DON) :: Y_RESCALE
       REAL(KIND=RT), DIMENSION(CONFIG%DOE) :: YI_SHIFT
       REAL(KIND=RT), DIMENSION(CONFIG%DOE, CONFIG%DOE) :: YI_RESCALE
       REAL(KIND=RT), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_LENGTHS
