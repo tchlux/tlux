@@ -138,7 +138,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: OECS, OECE
      ! Function parameter.
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
-     REAL(KIND=RT) :: CATEGORY_GAP = 0.0_RT
+     REAL(KIND=RT) :: CATEGORY_GAP = 0.1_RT
      ! Optimization related parameters.
      REAL(KIND=RT) :: MAX_STEP_FACTOR = 0.01_RT ! Maximum multiplier on gradient steps.
      REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
@@ -2278,6 +2278,8 @@ CONTAINS
        END DO
     END IF
     ! ----------------------------------------------------------------------------------------
+    ! TODO: Find out what the "best" multiplier is here for the output errors.
+    EMBEDDING_GRADIENTS(:,:) = EMBEDDING_GRADIENTS(:,:) * SQRT(REAL(CONFIG%DOE,RT))
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute the gradient of the embeddings.
     O_EMB_GRAD(:,:) = MATMUL( & ! (DOE, NOE) = ...

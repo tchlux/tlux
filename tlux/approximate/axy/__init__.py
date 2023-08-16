@@ -162,7 +162,7 @@ class AXY:
         else:
             pairwise = self._init_kwargs.get("pairwise_aggregation",None)
             nm = nm or self._init_kwargs.get("nm",None)
-            na = nm or self._init_kwargs.get("na",None)
+            na = na or self._init_kwargs.get("na",None)
         # Set the number of aggregate and model input limits.
         if (nm is None): nm = nm_total
         else:            nm = min(nm, nm_total)
