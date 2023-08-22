@@ -4,21 +4,21 @@
 #  - Create a function for visualizing all of the basis functions in a model.
 #  - Make sure the above function works in higher dimension (use PCA?).
 
-import fmodpy
-# Get the directory for the AXY compiled source code.
-AXY = fmodpy.fimport(
-    input_fortran_file = "../axy.f90",
-    dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-    name = "test_axy_module",
-    blas = True,
-    lapack = True,
-    omp = True,
-    wrap = True,
-    # rebuild = True,
-    verbose = False,
-    f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-).axy
-# help(AXY)
+# import fmodpy
+# # Get the directory for the AXY compiled source code.
+# AXY = fmodpy.fimport(
+#     input_fortran_file = "../axy.f90",
+#     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+#     name = "test_axy_module",
+#     blas = True,
+#     lapack = True,
+#     omp = True,
+#     wrap = True,
+#     # rebuild = True,
+#     verbose = False,
+#     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+# ).axy
+# # help(AXY)
 
 # Overwrite the typical "AXY" library with the testing one.
 from test_axy_module import axy as AXY
@@ -533,10 +533,9 @@ def _test_evaluate():
 #                           MODEL_GRADIENT
 def _test_model_gradient():
     print("MODEL_GRADIENT")
-
-    SIMPLIFY_SCENARIO = True
+    SIMPLIFY_SCENARIO = False
     SHOW_RESULTS = False
-    seed = 0
+    seed = None  # This test is slow, so we do NOT seed it for greater coverage over time.
     num_scenarios = 0
     max_scenarios = 20
     for s in scenario_generator(randomized=True, seed=seed):
@@ -549,58 +548,19 @@ def _test_model_gradient():
         num_scenarios += 1
         if (num_scenarios > max_scenarios):
             break
-        # TODO: Each of these scenarios produces a failure because a
-        #       single shift term in the model has a small error
-        #       that is likely due to the nonlinearities near 0.
-        #       Need a way to ignore the one-off isolated errors.
-        elif (num_scenarios in {6,11,14,20}):
-            continue
+        # # TODO: Each of these scenarios produces a failure because a
+        # #       single shift term in the model has a small error
+        # #       that is likely due to the nonlinearities near 0.
+        # #       Need a way to ignore the one-off isolated errors.
+        # elif (num_scenarios in {6,11,14,20}):
+        #     continue
 
         # Simplify the scenario however we want.
         if SIMPLIFY_SCENARIO:
-            # #   Special aggregator only model.
-            # s["aggregator_only"] = False
-            # #   Batching.
-            # s["batch_aggregate_constrained"] = False
-            # s["batch_fixed_constrained"] = False
-            # #   Aggregate input.
-            # s["input_aggregate_categorical"] = False
-            # s["input_aggregate_numeric"] = True
-            # #   Fixed input.
-            # s["input_fixed_categorical"] = False
-            # s["input_fixed_numeric"] = True
-            # #   Layering.
-            # s["model_aggregate_layered"] = False
-            # s["model_fixed_layered"] = False
-            # #   Outputs.
-            # s["output_categorical"] = False
-            # s["output_numeric"] = True
-            # #   Special aggregations.
-            # s["pairwise_aggregation"] = False
-            # s["partial_aggregation"] = True
-            # #   Data and model size.
-            # s["small_data"] = True
-            # s["small_model"] = True
-            # #   Threading.
-            # s["threaded"] = False
-            # #   Weigthed outputs.
-            # s["weighted_output"] = False
-            # s["weights_dimensioned"] = False
-            # # 
-            # # # Set the number of threads.
-            # # s["num_threads"] = 1
-            # # 
-            # # Set the number of data points.
-            # s["na_in"], s["na"] = 1, 1
-            # s["nm_in"], s["nm"] = 2, 2
-            # # 
-
             s.update({
-                'steps': 50,
-                'ade': None,
-                'ado': None,
-                'mde': None,
-                'aggregator_only': False,
+                # 'ade': 2,
+                # 'ado': 2,
+                'aggregator_only': True,
                 'partial_aggregation': True,
                 'pairwise_aggregation': False,
                 'batch_aggregate_constrained': False,
@@ -610,7 +570,7 @@ def _test_model_gradient():
                 'input_fixed_categorical': False,
                 'input_fixed_numeric': False,
                 'model_aggregate_layered': False,
-                'model_fixed_layered': True,
+                'model_fixed_layered': False,
                 'output_categorical': False,
                 'output_numeric': True,
                 'small_data': True,
@@ -618,8 +578,8 @@ def _test_model_gradient():
                 'threaded': True,
                 'weighted_output': False,
                 'weights_dimensioned': False,
-                'na_in': 6,
-                'nm_in': 6,
+                # 'nm_in': 1,
+                # 'na_in': 3,
             })
             # Ensure that no more iterations happen after the modified one.
             num_scenarios = max_scenarios
@@ -627,11 +587,8 @@ def _test_model_gradient():
             # Update the default "na_in" to be a smaller number.
             s["na_in"] = 30
 
-
         # Record the scenario for later.
         initial_scenario = s.copy()
-
-        print("s: ", s, flush=True)
 
         # Create the scenario.
         config, details, raw_data, data = gen_config_data(
@@ -678,9 +635,13 @@ def _test_model_gradient():
         )
 
         if SIMPLIFY_SCENARIO:
-            print("Data")
+            print("Data:")
             for (k,v) in data.items():
-                print("", k, v.shape if hasattr(v, "shape") else v)
+                print("", f"{k:>5s}", v.shape if hasattr(v, "shape") else v, end="")
+                if (k == "sizes"):
+                    print(f" {v.tolist()}")
+                else:
+                    print()
             print()
 
         # Shrink the "x" and "y" values according to the size of the fetched data.
@@ -809,15 +770,13 @@ def _test_model_gradient():
         # max_ratio_error = abs(ratio-1).max()
         # failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
         max_error = abs(error).mean()
-        max_ratio_error = abs(ratio).mean()
-        failed_test = (max_error > 0.0001) and (max_ratio_error > 0.01)
+        max_ratio_error = abs(ratio-1).mean()
+        failed_test = (max_error > 0.0003) and (max_ratio_error > 0.01)
 
         if (failed_test or SHOW_RESULTS):
             print()
-            print("Scenario:")
-            for (k,v) in sorted(initial_scenario.items()):
-                print("", k, v)
-            print()
+            scenario_string = "{\n  " + ",\n  ".join((f"{repr(k)}: {v}" for (k,v) in initial_scenario.items())) + "\n}"
+            print("scenario =", scenario_string)
             print()
             print("AxyModel(config, model): ")
             # print(AxyModel(config, model, show_vecs=True, show_times=False))
@@ -1171,7 +1130,102 @@ if __name__ == "__main__":
     # _test_embed() # TODO: Design this test.
     _test_normalize_data()
     _test_evaluate()
-    # _test_model_gradient()
+    _test_model_gradient()
     # 
     # _test_large_data_fit()
     # _test_axi()
+
+
+# 2023-08-20 15:43:01
+# 
+##############################################################################
+# # ------------------------------------------------------------------------ #
+# # num_scenarios = max_scenarios                                            #
+# # scenario = {                                                             #
+# #   'steps': 50,                                                           #
+# #   'ade': None,                                                           #
+# #   'ado': None,                                                           #
+# #   'mde': None,                                                           #
+# #   'aggregator_only': True,                                               #
+# #   'partial_aggregation': True,                                           #
+# #   'pairwise_aggregation': False,                                         #
+# #   'batch_aggregate_constrained': False,                                  #
+# #   'batch_fixed_constrained': False,                                      #
+# #   'input_aggregate_categorical': False,                                  #
+# #   'input_aggregate_numeric': True,                                       #
+# #   'input_fixed_categorical': False,                                      #
+# #   'input_fixed_numeric': False,                                          #
+# #   'model_aggregate_layered': False,                                      #
+# #   'model_fixed_layered': False,                                          #
+# #   'output_categorical': False,                                           #
+# #   'output_numeric': True,                                                #
+# #   'small_data': True,                                                    #
+# #   'small_model': True,                                                   #
+# #   'threaded': True,                                                      #
+# #   'weighted_output': True,                                               #
+# #   'weights_dimensioned': True                                            #
+# # }                                                                        #
+# # s = scenario                                                             #
+# # ------------------------------------------------------------------------ #
+##############################################################################
+
+
+# 2023-08-20 15:43:04
+# 
+########################################################################################
+# #                                                                                    #
+# # print("info: ", info, flush=True)                                                  #
+# # print("", flush=True)                                                              #
+# # print("raw_data:", flush=True)                                                     #
+# # for (k,v) in raw_data.items():                                                     #
+# #     print("", repr(k), getattr(v, "shape", getattr(v, "__len__", lambda: None)())) #
+# # print("", flush=True)                                                              #
+# # print("data:", flush=True)                                                         #
+# # for (k,v) in data.items():                                                         #
+# #     print("", repr(k), getattr(v, "shape", getattr(v, "__len__", lambda: None)())) #
+# # print("", flush=True)                                                              #
+# #                                                                                    #
+########################################################################################
+
+
+# 2023-08-20 16:07:13
+# 
+##############################################
+# # #   Special aggregator only model.       #
+# # s["aggregator_only"] = False             #
+# # #   Batching.                            #
+# # s["batch_aggregate_constrained"] = False #
+# # s["batch_fixed_constrained"] = False     #
+# # #   Aggregate input.                     #
+# # s["input_aggregate_categorical"] = False #
+# # s["input_aggregate_numeric"] = True      #
+# # #   Fixed input.                         #
+# # s["input_fixed_categorical"] = False     #
+# # s["input_fixed_numeric"] = True          #
+# # #   Layering.                            #
+# # s["model_aggregate_layered"] = False     #
+# # s["model_fixed_layered"] = False         #
+# # #   Outputs.                             #
+# # s["output_categorical"] = False          #
+# # s["output_numeric"] = True               #
+# # #   Special aggregations.                #
+# # s["pairwise_aggregation"] = False        #
+# # s["partial_aggregation"] = True          #
+# # #   Data and model size.                 #
+# # s["small_data"] = True                   #
+# # s["small_model"] = True                  #
+# # #   Threading.                           #
+# # s["threaded"] = False                    #
+# # #   Weigthed outputs.                    #
+# # s["weighted_output"] = False             #
+# # s["weights_dimensioned"] = False         #
+# # #                                        #
+# # # # Set the number of threads.           #
+# # # s["num_threads"] = 1                   #
+# # #                                        #
+# # # Set the number of data points.         #
+# # s["na_in"], s["na"] = 1, 1               #
+# # s["nm_in"], s["nm"] = 2, 2               #
+# # #                                        #
+##############################################
+

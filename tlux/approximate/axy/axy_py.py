@@ -1,3 +1,11 @@
+# This file is (an attempt at a) reimplementation of the core Fortran library
+#  routines for the AXY model entirely in python. This is much slower, but
+#  provides the portability and readability benefits of being in python.
+# 
+# This implementation is occasionally lagging, so be cautious with its usage
+#  and prepared to submit an Issue in the case it produces incongruent outputs.
+
+
 import ctypes
 import numpy as np
 from tlux.approximate.axy.summary import AxyModel

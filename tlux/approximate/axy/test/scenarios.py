@@ -258,6 +258,9 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
     scenario.pop("adi", None)
     scenario.pop("adn", None)
     for (name, value) in scenario.items():
+        # These items should not be overwritten.
+        if (name in {"num_threads"}): continue
+        # Any other items are probably explicitly being declared by the user.
         if (hasattr(config, name) and (value is not None) and (getattr(config, name) != value)):
             # print(f" overwriting '{name}' with {value}")
             setattr(config, name, value)

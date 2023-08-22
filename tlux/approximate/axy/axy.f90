@@ -1011,7 +1011,7 @@ CONTAINS
     LOGICAL(KIND=C_BOOL), INTENT(IN) :: JOINT
     INTEGER(KIND=INT32), INTENT(INOUT) :: INFO
     ! Local variables.
-    INTEGER(KIND=INT64) :: BATCH, BN, BE, BS, GE, GS, I, MB, NUM_A_BATCHES, NUM_M_BATCHES
+    INTEGER(KIND=INT64) :: BATCH, BN, BE, BS, GE, GS, I, MB, NB, NUM_A_BATCHES, NUM_M_BATCHES
     ! Check for errors.
     IF (CONFIG%NUM_THREADS .LT. 1) THEN
        WRITE (*,*) 'ERROR (COMPUTE_BATCHES): Number of threads (NUM_THREADS) is not positive.', CONFIG%NUM_THREADS
@@ -1043,10 +1043,22 @@ CONTAINS
        ! Compute a max batch size that will be more amenable to the number of threads, if possible.
        MB = MIN(CONFIG%MAX_BATCH, SUM(SIZES) / MAX(ONE,CONFIG%NUM_THREADS-ONE))
        DO I = ONE, SIZE(SIZES)
-          BE = BE + SIZES(I)
+          ! Get the size of this set.
+          NB = SIZES(I)
+          IF (CONFIG%PARTIAL_AGGREGATION .AND. (NB .EQ. ZERO)) THEN
+             NB = NB + ONE
+          END IF
+          ! Add it to the end.
+          BE = BE + NB
           ! Transition batches based on size of next iterate.
           IF (I .LT. SIZE(SIZES)) THEN
-             IF (SIZES(I+ONE) + BE - BS + ONE .GT. MB) THEN
+             ! Get the size of the next set.
+             NB = SIZES(I+ONE)
+             IF (CONFIG%PARTIAL_AGGREGATION .AND. (NB .EQ. ZERO)) THEN
+                NB = NB + ONE
+             END IF
+             ! If the (set size + current size > max batch size) ...
+             IF (NB + BE - BS + ONE .GT. MB) THEN
                 BS = BE + ONE
                 NUM_M_BATCHES = NUM_M_BATCHES + ONE
              END IF
@@ -1077,7 +1089,7 @@ CONTAINS
        ! Compute the location of the first index in each aggregate set.
        AGG_STARTS(1) = ONE
        FIX_STARTS(1) = ONE
-       DO I = 2_INT64, SIZE(SIZES,KIND=INT64)
+       DO I = TWO, SIZE(SIZES,KIND=INT64)
           AGG_STARTS(I) = AGG_STARTS(I-ONE) + SIZES(I-ONE)
           FIX_STARTS(I) = FIX_STARTS(I-ONE) + MAX(ONE, SIZES(I-ONE))
        END DO
@@ -1133,10 +1145,11 @@ CONTAINS
                 END IF
              END DO
              ! Perform steps for last batch.
-             BE = BE + SIZES(SIZE(SIZES,KIND=INT64))
+             NB = SIZES(SIZE(SIZES,KIND=INT64))
+             BE = BE + NB
              BATCHA_STARTS(BATCH) = BS
              BATCHA_ENDS(BATCH) = BE
-             GE = GE + SIZES(MAX(ONE,SIZE(SIZES,KIND=INT64)))
+             GE = GE + MAX(ONE,NB)
              BATCHM_STARTS(BATCH) = GS
              BATCHM_ENDS(BATCH) = GE
              NUM_A_BATCHES = NUM_M_BATCHES
@@ -1693,7 +1706,7 @@ CONTAINS
           END DO set_aggregation_to_x
        ELSE
           ! If there is no model after this, place results directly in Y.
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, GS, GE) IF(NT > 1)
+          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE) IF(NT > 1)
           set_aggregation_to_y : DO I = ONE, SIZE(SIZES,KIND=INT64)
              IF (SIZES(I) .GT. 0) THEN
                 ! Take the mean of all outputs from the aggregator model, store
@@ -1980,7 +1993,7 @@ CONTAINS
        ! Propogate gradient from the input to the fixed model.
        IF (CONFIG%MDO .GT. 0) THEN
           XDG = SIZE(X,1) - CONFIG%ADO + ONE  ! <- the first X column for aggregated values
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, FE, GS, GE, I, J, K, YSUM) IF(NT > 1)
+          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, YSUM) IF(NT > 1)
           DO I = ONE, SIZE(SIZES, KIND=INT64)
              GS = AGG_STARTS(I)
              IF (CONFIG%PARTIAL_AGGREGATION) THEN
@@ -2009,8 +2022,8 @@ CONTAINS
                 END IF
              ELSE
                 ! Without partial aggregation, all AY receive equal weight.
-                YSUM = SUM(ABS(Y(:,I)))
                 GE = AGG_STARTS(I) + SIZES(I) - ONE
+                YSUM = SUM(ABS(Y(:,I)))
                 DO J = GS, GE
                    ! TODO: The X / DIV computation inside this loop is redundant.
                    AY(J,:CONFIG%ADO) =  X(XDG:,I) / REAL(SIZES(I),RT)
@@ -2022,20 +2035,48 @@ CONTAINS
           END DO
        ! Propogate gradient directly from the aggregate output.
        ELSE
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(GS, GE, I, J, YSUM) IF(NT > 1)
+          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, YSUM) IF(NT > 1)
           DO I = ONE, SIZE(SIZES, KIND=INT64)
              GS = AGG_STARTS(I)
-             GE = AGG_STARTS(I) + SIZES(I)-ONE
-             YSUM = SUM(ABS(Y(:,I)))
-             DO J = GS, GE
-                AY(J,:CONFIG%ADO) = Y(:,I) / REAL(SIZES(I),RT)
-                ! Compute the target value for the last column of AY to be sum
-                !  of componentwise squared errors values for all outputs.
-                AY(J,CONFIG%ADO+1) = AY(J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-             END DO
+             ! Partial aggregation.
+             IF (CONFIG%PARTIAL_AGGREGATION) THEN
+                IF (SIZES(I) .GT. ZERO) THEN
+                   FS = FIX_STARTS(I)
+                   ! Compute the initial gradient for the element that occurs only once,
+                   !  the first position which is added to all other elements.
+                   AY(GS,:CONFIG%ADO) = Y(:,FS) / REAL(SIZES(I),KIND=RT)
+                   ! Error term
+                   YSUM = SUM(ABS(Y(:,FS))) / REAL(SIZES(I),KIND=RT)
+                   AY(GS,CONFIG%ADO+ONE) = AY(GS,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
+                   ! 
+                   ! Compute the gradient for each aggregate element, which is now
+                   !  the sum of the gradients from the X.
+                   DO J = ONE, SIZES(I) - ONE
+                      ! Add to the running total gradient.
+                      AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + Y(:,FS+J) / REAL(SIZES(I)-J,KIND=RT)
+                      ! Store this aggregate value's gradient term.
+                      AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
+                      ! Error term
+                      YSUM = YSUM + SUM(ABS(Y(:,FS+J))) / REAL(SIZES(I)-J,KIND=RT)
+                      AY(GS+J,CONFIG%ADO+ONE) = AY(GS+J,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
+                   END DO
+                   ! Reset the computation of the first AY that was used to aggregate.
+                   AY(GS,:CONFIG%ADO) = Y(:,FS) / REAL(SIZES(I),KIND=RT)
+                END IF                
+             ! No partial aggregation.
+             ELSE
+                GE = AGG_STARTS(I) + SIZES(I)-ONE
+                YSUM = SUM(ABS(Y(:,I)))
+                DO J = GS, GE
+                   AY(J,:CONFIG%ADO) = Y(:,I) / REAL(SIZES(I),RT)
+                   ! Compute the target value for the last column of AY to be sum
+                   !  of componentwise squared errors values for all outputs.
+                   AY(J,CONFIG%ADO+1) = AY(J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
+                END DO
+             END IF
           END DO
        END IF
-       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(GS, GE, TN) IF(NT > 1)
+       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(BATCH, GS, GE, TN) IF(NT > 1)
        DO BATCH = ONE, SIZE(BATCHA_STARTS, KIND=INT64)
           GS = BATCHA_STARTS(BATCH)
           GE = BATCHA_ENDS(BATCH)
@@ -2345,7 +2386,7 @@ CONTAINS
     ! Set gradients to zero initially.
     MODEL_GRAD(:,:) = 0.0_RT
     SSG = 0.0_RT
-    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(MS, ME, TN) &
+    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(BATCH, MS, ME, TN) &
     !$OMP& REDUCTION(+:SSG) IF(NT > 1)
     error_gradient : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
        ! Set batch start and end indices. Exit early if there is no data.
@@ -2376,7 +2417,7 @@ CONTAINS
          JOINT=.FALSE._C_BOOL, INFO=INFO)
     IF (CONFIG%MDE .GT. 0) THEN
        !$OMP PARALLEL DO NUM_THREADS(NT) &
-       !$OMP& PRIVATE(MS, ME, TN) IF(NT > 1)
+       !$OMP& PRIVATE(BATCH, MS, ME, TN) IF(NT > 1)
        m_embeddings_gradient : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
           ! Set batch start and end indices. Exit early if there is no data.
           MS = BATCHM_STARTS(BATCH)
@@ -2392,7 +2433,7 @@ CONTAINS
     END IF
     IF (CONFIG%ADE .GT. 0) THEN
        !$OMP PARALLEL DO NUM_THREADS(NT) &
-       !$OMP& PRIVATE(SS, SE, TN) IF(NT > 1)
+       !$OMP& PRIVATE(BATCH, SS, SE, TN) IF(NT > 1)
        a_embeddings_gradient : DO BATCH = 1, SIZE(BATCHA_STARTS, KIND=INT64)
           SS = BATCHA_STARTS(BATCH)
           SE = BATCHA_ENDS(BATCH)
@@ -2501,11 +2542,11 @@ CONTAINS
        END IF
        CALL RADIALIZE(AX(:CONFIG%ADN,:NA), AX_SHIFT(:), AX_RESCALE(:,:), &
             MAX_TO_FLATTEN=TO_FLATTEN, MAXBOUND=.TRUE.)
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%ADN
           AX_IN(D,:) = AX_IN(D,:) + AX_SHIFT(D)
        END DO
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, SIZE(AX_IN,2,INT64)
           AX_IN(:,D) = MATMUL(AX_IN(:,D), AX_RESCALE(:,:))
        END DO
@@ -2527,12 +2568,12 @@ CONTAINS
     IF ((.NOT. CONFIG%AXI_NORMALIZED) .AND. (CONFIG%ADE .GT. 0)) THEN
        CALL RADIALIZE(AX(CONFIG%ADN+1:CONFIG%ADN+CONFIG%ADE,:NA), AXI_SHIFT(:), AXI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%ADE
           A_EMB_VECS(D,:) = A_EMB_VECS(D,:) + AXI_SHIFT(D)
        END DO
        ! Apply the transformation to the source embeddings.
-       !$OMP PARALLEL DO
+       !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, SIZE(A_EMB_VECS,2,INT64)
           A_EMB_VECS(:,D) = MATMUL(A_EMB_VECS(:,D), AXI_RESCALE(:,:))
        END DO
@@ -2697,7 +2738,7 @@ CONTAINS
           CONFIG%MDO = D
           ! Compute AY shift as the mean of mean-aggregated outputs, apply it.
           AY_SHIFT(:) = -SUM(X(E:,:NM),2) / REAL(NM,RT)
-          !$OMP PARALLEL DO
+          !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
           DO D = 0, CONFIG%ADO-1
              X(E+D,:NM) = X(E+D,:NM) + AY_SHIFT(D+1)
           END DO
@@ -2882,7 +2923,7 @@ CONTAINS
       INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: AGG_STARTS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
-      !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(SCALAR)
+      !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(L, D, SCALAR)
       DO L = 1, CONFIG%MNS+CONFIG%ANS+CONFIG%NOE
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN
@@ -2906,8 +2947,9 @@ CONTAINS
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
          ! [ANS+MNS+1, ANS+MNS+NOE] -> OUTPUT_EMBEDDINGS
          ELSE
-            SCALAR = SQRT(SUM(OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS)**2))
-            OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS) = OUTPUT_EMBEDDINGS(:,L-CONFIG%ANS-CONFIG%MNS) / SCALAR
+            D = L-CONFIG%ANS-CONFIG%MNS
+            SCALAR = SQRT(SUM(OUTPUT_EMBEDDINGS(:,D)**2))
+            OUTPUT_EMBEDDINGS(:,D) = OUTPUT_EMBEDDINGS(:,D) / SCALAR
          END IF
       END DO
       ! AY_SHIFT, and componentwise variance of AY 
@@ -3078,7 +3120,7 @@ CONTAINS
        DO I = 1, NS
           STATE_USAGE(:,:) = 0
           TER = 0; TGR = 0;
-          !$OMP PARALLEL DO PRIVATE(BS,BE) NUM_THREADS(NT) &
+          !$OMP PARALLEL DO PRIVATE(BATCH,BS,BE) NUM_THREADS(NT) &
           !$OMP& REDUCTION(MAX: TER, TGR)
           DO BATCH = 1, NT
              BS = BN*(BATCH-1) + 1
@@ -3524,7 +3566,7 @@ CONTAINS
             ELSE
                AGG_ITERATORS(1,I) = INT(SIZES_IN(I), INT64)
                IF (CONFIG%PAIRWISE_AGGREGATION) THEN
-                  AGG_ITERATORS(1,I) = AGG_ITERATORS(1,I)**2_INT64
+                  AGG_ITERATORS(1,I) = AGG_ITERATORS(1,I)**TWO
                END IF
                CALL INITIALIZE_ITERATOR( &
                     I_LIMIT=AGG_ITERATORS(1,I), &
@@ -3609,21 +3651,17 @@ CONTAINS
             ! Embed all integer inputs into real vector inputs.
             CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI(:,:NM), AX(:,:NA), X(:,:NM))
             ! Evaluate the model, storing internal states (for gradient calculation).
-            ! If we are checking rank, we need to store evaluations and gradients separately.
-            IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
-                 (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
-               CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY(:NA,:), SIZES(:), &
-                    X(:,:NM), Y_GRADIENT(:,:NM), A_STATES(:NA,:,:), M_STATES(:NM,:,:), INFO)
-               ! Copy the state values into holders for the gradients.
-               A_GRADS(:NA,:,:) = A_STATES(:NA,:,:)
-               M_GRADS(:NM,:,:) = M_STATES(:NM,:,:)
-               AY_GRADIENT(:NA,:) = AY(:NA,:)
-               ! Here we can reuse the same memory from evaluation for gradient computation.
-            ELSE
-               CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY_GRADIENT(:NA,:), SIZES(:), &
-                    X(:,:NM), Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), INFO)
-            END IF
+            CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY_GRADIENT(:NA,:), SIZES(:), &
+                 X(:,:NM), Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), INFO)
             IF (INFO .NE. 0) RETURN
+            ! If we are checking rank, we need to store evaluations separately from gradients.
+            IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
+               IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
+                  A_STATES(:NA,:,:) = A_GRADS(:NA,:,:)
+                  M_STATES(:NM,:,:) = M_GRADS(:NM,:,:)
+                  AY(:NA,:) = AY_GRADIENT(:NA,:)
+               END IF
+            END IF
             ! 
             ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
             !                       Compute model gradient 
@@ -3731,7 +3769,7 @@ CONTAINS
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !           Update the step factors, early stop if appropaite.
          ! 
-         CALL ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN(:))
+         CALL ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:))
          IF (INFO .NE. 0) RETURN
          IF (NS .EQ. HUGE(NS)) EXIT fit_loop
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3745,19 +3783,20 @@ CONTAINS
          ! Rescale internal vectors to have a maximum 2-norm of 1.
          ! Center the outputs of the aggregator model about the origin.
          ! Measure the "total rank" of all internal state representations of data.
-         IF ((CONFIG%CONDITION_FREQUENCY .GT. 0) .AND. &
-              (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%CONDITION_FREQUENCY) .EQ. 0)) THEN
-            CALL CONDITION_MODEL(CONFIG, &
-                 MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
-                 AX(:,:NA), AXI(:,:NA), AY(:NA,:), AY_GRADIENT(:NA,:), SIZES(:), & ! Data.
-                 X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
-                 CONFIG%NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
-                 A_STATES(:NA,:,:), M_STATES(:,:,:), & ! State values at basis functions.
-                 A_GRADS(:NA,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.
-                 A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
-                 A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
-                 A_ORDER(:,:), M_ORDER(:,:), &
-                 TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+         IF (CONFIG%CONDITION_FREQUENCY .GT. 0) THEN
+            IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%CONDITION_FREQUENCY) .EQ. 0) THEN
+               CALL CONDITION_MODEL(CONFIG, &
+                    MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
+                    AX(:,:NA), AXI(:,:NA), AY(:NA,:), AY_GRADIENT(:NA,:), SIZES(:), & ! Data.
+                    X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
+                    CONFIG%NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
+                    A_STATES(:NA,:,:), M_STATES(:,:,:), & ! State values at basis functions.
+                    A_GRADS(:NA,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.
+                    A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
+                    A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
+                    A_ORDER(:,:), M_ORDER(:,:), &
+                    TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+            END IF
          END IF
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          ! Record statistics about the model and write an update about 
@@ -3838,9 +3877,10 @@ CONTAINS
 
     
     ! Adjust the rates of the model optimization parameters.
-    SUBROUTINE ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN)
+    SUBROUTINE ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN, MODEL_GRAD_CURV)
       REAL(KIND=RT), DIMENSION(:) :: BEST_MODEL
       REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_MEAN
+      REAL(KIND=RT), DIMENSION(:) :: MODEL_GRAD_CURV
       REAL :: CPU_TIME_START, CPU_TIME_END
       INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
       CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
@@ -3857,26 +3897,19 @@ CONTAINS
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_TO_UPDATE + &
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
          ! TODO: Should the mean and curvature adjustment rates be updated too?
-         !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%FASTER_RATE
-         !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-         !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE
-         !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
       ! If the MSE has gotten too large, then do a reset of the model fit process from the previous best.
       ELSE IF (MSE .GT. CONFIG%MSE_UPPER_LIMIT) THEN
          CONFIG%STEP_FACTOR = CONFIG%MIN_STEP_FACTOR
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_VARS
          MODEL(:) = BEST_MODEL(:)
          MODEL_GRAD_MEAN(:) = 0.0_RT
+         MODEL_GRAD_CURV(:) = 1.0_RT
       ELSE
          CONFIG%STEP_FACTOR = CONFIG%STEP_FACTOR * CONFIG%SLOWER_RATE
          CONFIG%STEP_FACTOR = MAX(CONFIG%STEP_FACTOR, CONFIG%MIN_STEP_FACTOR)
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_TO_UPDATE - &
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
          ! TODO: Should the mean and curvature adjustment rates be updated too?
-         !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%SLOWER_RATE
-         !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-         !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%SLOWER_RATE
-         !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
       END IF
       ! Project the number of variables to update into allowable bounds.
       CONFIG%NUM_TO_UPDATE = MIN(CONFIG%NUM_VARS, MAX(MIN_TO_UPDATE, CONFIG%NUM_TO_UPDATE))
@@ -4012,3 +4045,23 @@ CONTAINS
 
 END MODULE AXY
 
+
+
+!2023-08-20 15:38:31
+!
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%FASTER_RATE !
+         ! !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE                    !
+         ! !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE !
+         ! !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE                    !
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+!2023-08-20 15:38:33
+!
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+         ! !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%SLOWER_RATE !
+         ! !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE                    !
+         ! !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%SLOWER_RATE !
+         ! !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE                    !
+         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
