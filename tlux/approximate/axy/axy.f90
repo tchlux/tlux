@@ -2246,7 +2246,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: O_EMB_TEMP
     REAL(KIND=RT), INTENT(INOUT) :: SSG
     INTEGER, INTENT(IN) :: DON
-    INTEGER :: D, I, C
+    INTEGER :: D, I, C, NT
     ! ----------------------------------------------------------------------------------------
     !                             Embedding gradient calculation
     ! TODO: Local allocation, needs to be moved.
@@ -2254,7 +2254,9 @@ CONTAINS
     ALLOCATE( &
          EMBEDDING_GRADIENTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)), &
          EMBEDDING_OUTPUTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)) &
-    )
+         )
+    ! Compute the number of threads based on number of points.
+    NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute embedding outputs (1:NOE,1:N) by taking the dot product
     ! of output vectors with the matrix of all output emeddings.
@@ -2268,10 +2270,11 @@ CONTAINS
        EMBEDDING_GRADIENTS(:,:) = 0.0_RT
     END WHERE
     ! Then for each data point, we will compute the "correct embedding" gradient at that point.
-    DO I = 1, SIZE(EMBEDDING_OUTPUTS,2,KIND=INT64)
+    !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, D, C) IF(NT > 1)
+    DO I = 1, SIZE(EMBEDDING_OUTPUTS,2,KIND=INT64) ! Loop over N
        ! For each output component of YI we will compute a gradient score.
        DO D = 1, SIZE(YI,1,KIND=INT64)
-          C = YI(D,I)
+          C = YI(D,I) ! No category should exist in two columns YI, so this is unique to column D.
           IF (EMBEDDING_OUTPUTS(C,I) .LT. 1.0_RT + CONFIG%CATEGORY_GAP) THEN
              EMBEDDING_GRADIENTS(C,I) = EMBEDDING_OUTPUTS(C,I) - (1.0_RT + CONFIG%CATEGORY_GAP)
           ELSE
