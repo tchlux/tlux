@@ -2677,8 +2677,8 @@ CONTAINS
        Y(CONFIG%DON+ONE:,:NM) = 0.0_RT
        DO I = 1, NM
           DO D = 1, SIZE(YI,1,KIND=INT64)
-             E = CONFIG%DON + YI(D,I)
-             Y(E,I) = 1.0_RT
+             E = YI(D,I)
+             Y(CONFIG%DON+ONE:,I) = Y(CONFIG%DON+ONE:,I) + O_EMB_VECS(:,E)
           END DO
        END DO
        ! Transform the embeddings so they are "uniformly spaced" after

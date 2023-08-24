@@ -136,7 +136,6 @@ CONTAINS
     INTEGER(KIND=INT64), INTENT(OUT) :: I_NEXT, I_MULT, I_STEP, I_MOD, I_ITER
     INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: SEED
     !  Storage for seeding the random number generator (for repeatability). LOCAL ALLOCATION
-    INTEGER, DIMENSION(:), ALLOCATABLE :: SEED_ARRAY
     INTEGER :: I
     ! Set a random seed, if one was provided (otherwise leave default).
     IF (PRESENT(SEED)) CALL SEED_RANDOM(SEED)
@@ -152,7 +151,16 @@ CONTAINS
     I_NEXT = ONE + RANDOM_INTEGER(MAX_VALUE=I_LIMIT) ! Pick a random initial value.
     I_MULT = ONE + FOUR * (I_LIMIT + ONE + RANDOM_INTEGER(MAX_VALUE=I_LIMIT)) ! Pick a multiplier 1 greater than a multiple of 4.
     I_STEP = ONE + TWO * (ONE + RANDOM_INTEGER(MAX_VALUE=I_LIMIT)) ! Pick a random odd-valued additive term.
-    I_MOD = TWO ** MIN(62,CEILING(LOG(REAL(I_LIMIT)) / LOG(2.0_REAL32))) ! Pick a power-of-2 modulus just big enough to generate all numbers.
+    ! Handle cases where I_LIMIT value could cause numerical issues.
+    IF (I_LIMIT .LT. ZERO) THEN
+       WRITE (0,*) 'ERROR (axy_random.f90): Invalid negative value provided for I_LIMIT to subroutine INITIALIZE_ITERATOR.'
+       CALL EXIT(1)
+    ELSE IF (I_LIMIT .LE. ZERO) THEN
+       I_MOD = ONE
+    ELSE
+       ! Pick a power-of-2 modulus just big enough to generate all numbers.
+       I_MOD = TWO ** MIN(62_INT64,CEILING(LOG(REAL(I_LIMIT,KIND=REAL32)) / LOG(2.0_REAL32), KIND=INT64))
+    END IF
     ! Cap the multiplier and step by the "I_MOD" (since it doesn't matter if they are larger).
     I_MULT = MOD(I_MULT, I_MOD)
     I_STEP = MOD(I_STEP, I_MOD)
