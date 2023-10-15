@@ -78,41 +78,50 @@ def random_data(num_points, dimension, box=10, skew=lambda x: 1 * x**2 / sum(x**
     return np.asarray(data @ rotation), center, variance, rotation
 
 # Test function for visually checking the "radialize" function.
-def _test_radialize(show=True):
+def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=10, seed=0, precision=4):
     print("radialize..", end=" ", flush=True)
     # Generate data to test with.
-    num_trials = 10
-    np.random.seed(0)
-    num_points = 1000
-    dimension = 3
-    from tlux.plot import Plot
-    p = Plot()
+    np.random.seed(seed)
+    # Plotting.
+    show = show and (dimension in {2,3}) and (num_points <= 5000)
+    if show:
+        from tlux.plot import Plot
+        p = Plot()
+    # Trials.
     for i in range(num_trials):
         # Generate random data (that is skewed and placed off center).
         x, shift, scale, rotation = random_data(num_points, dimension)
-        p.add(str(i+1), *x.T, marker_size=3)
-
         # Generate the radialized version.
         shift = np.zeros(dimension, dtype="float32")
         transform = np.zeros((dimension, dimension), dtype="float32", order="F")
         inverse = np.zeros((dimension, dimension), dtype="float32", order="F")
         to_flatten = (i % 2) == 0
-        descriptor = 'radialized' if to_flatten else 'normalized'
         xr, shift, transform, inverse = mops.radialize(
             x=(x.copy()).T, shift=shift, vecs=transform, inverse=inverse,
             max_to_flatten=(0 if to_flatten else None),
         )
-        p.add(f"{i+1} {descriptor}", *xr, marker_size=3)
-
         # Use the inverse to "fix" the data back to its original form.
         xf = (inverse.T @ xr).T
         xf -= shift
-        p.add(f"{i+1} fixed", *xf.T, marker_size=3)
-
         # Use the provided shift and transform to repeate the radialization process.
-        xrr = (x + shift) @ transform
-        p.add(f"{i+1} re {descriptor}", *xrr.T, marker_size=3)
+        xrr = ((x + shift) @ transform).T
+        print("", flush=True)
+        print("i: ", i, flush=True)
+        print("  abs(x - xf).max():   ", abs(x - xf).mean(), flush=True)
+        print("  abs(xr - xrr).max(): ", abs(xr - xrr).mean(), flush=True)
+        # Plotting.
+        if show:
+            descriptor = 'radialized' if to_flatten else 'normalized'
+            p.add(f"{i+1}", *x.T, marker_size=3)
+            p.add(f"{i+1} {descriptor}", *xr, marker_size=3)
+            p.add(f"{i+1} fixed", *xf.T, marker_size=3)
+            p.add(f"{i+1} re {descriptor}", *xrr, marker_size=3)
+        # Validate the accuracy of the transformations.
+        assert (abs(x - xf).mean() < 10**(-precision)), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
+        assert (abs(xr - xrr).mean() < 10**(-precision)), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
+    # Plotting.
     if (show): p.show()
+    # Finished.
     print("passed.", flush=True)
 
 
@@ -178,5 +187,5 @@ def _test_least_squares():
 
 if __name__ == "__main__":
     _test_orthogonalize()
-    _test_radialize(show=False)
+    _test_radialize(show=True)
     # _test_least_squares()

@@ -38,7 +38,11 @@ def orthogonalize(col_vecs, essentially_zero=2**(-26)):
 
 # Compute the singular values and the right singular vectors for a matrix of row vectors.
 def svd(row_vecs, steps=5, bias=1.0):
+    # Get the dimension of the vectors.
     dim = row_vecs.shape[1]
+    # Handle zero-sized inputs by returning zero-sized outputs.
+    if (row_vecs.size == 0):
+        return np.zeros((0,), dtype=float), np.zeros((0,dim), dtype=float)
     # Initialize a holder for the singular values and the right
     #   singular vectors (the principal components).
     # Rescale the data for stability control, exit early when given only zeros.

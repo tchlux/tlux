@@ -65,6 +65,7 @@ class Delaunay(Approximator):
                 print(" [Delaunay errors:",end="")
                 for e in unique_errors:
                     if (e == 0): continue
+                    self.errs[e] = np.arange(len(ierr))[ierr == e]
                     print(" %3i"%e,"at","{"+",".join(tuple(
                         str(i) for i in range(len(ierr))
                         if (ierr[i] == e)))+"}", end=";")

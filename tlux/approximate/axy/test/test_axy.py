@@ -4,24 +4,25 @@
 #  - Create a function for visualizing all of the basis functions in a model.
 #  - Make sure the above function works in higher dimension (use PCA?).
 
-# import fmodpy
-# # Get the directory for the AXY compiled source code.
-# AXY = fmodpy.fimport(
-#     input_fortran_file = "../axy.f90",
-#     dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
-#     name = "test_axy_module",
-#     blas = True,
-#     lapack = True,
-#     omp = True,
-#     wrap = True,
-#     # rebuild = True,
-#     verbose = False,
-#     f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
-# ).axy
-# # help(AXY)
+try:
+    from test_axy_module import axy as AXY
+except ModuleNotFoundError:
+    import fmodpy
+    # Get the directory for the AXY compiled source code.
+    AXY = fmodpy.fimport(
+        input_fortran_file = "../axy.f90",
+        dependencies = ["pcg32.f90", "axy_profiler.f90", "axy_random.f90", "axy_matrix_operations.f90", "axy_sort_and_select.f90", "axy.f90"],
+        name = "test_axy_module",
+        blas = True,
+        lapack = True,
+        omp = True,
+        wrap = True,
+        # rebuild = True,
+        verbose = False,
+        f_compiler_args = "-fPIC -shared -O0 -pedantic -fcheck=bounds -ftrapv -ffpe-trap=invalid,overflow,underflow,zero",
+    ).axy
 
 # Overwrite the typical "AXY" library with the testing one.
-from test_axy_module import axy as AXY
 import tlux.approximate.axy.axy
 tlux.approximate.axy.axy.axy = AXY
 
@@ -723,6 +724,8 @@ def _test_model_gradient():
             a_emb_temp = 0 * details.a_emb_temp
             m_emb_temp = 0 * details.m_emb_temp
             o_emb_temp = 0 * details.o_emb_temp
+            emb_outs = details.emb_outs
+            emb_grads = details.emb_grads
             (
                 config,
                 ax,
@@ -737,6 +740,8 @@ def _test_model_gradient():
                 a_emb_temp,
                 m_emb_temp,
                 o_emb_temp,
+                emb_outs,
+                emb_grads,
             ) = AXY.model_gradient(
                 config, model,
                 ax=ax, axi=axi, sizes=sizes,
@@ -752,6 +757,8 @@ def _test_model_gradient():
                 a_emb_temp=a_emb_temp,
                 m_emb_temp=m_emb_temp,
                 o_emb_temp=o_emb_temp,
+                emb_outs=emb_outs,
+                emb_grads=emb_grads,
             )
             check_code(info, "AXY.model_gradient")
             # TODO: Update the gradient checks here to calculate the AY error term as well.

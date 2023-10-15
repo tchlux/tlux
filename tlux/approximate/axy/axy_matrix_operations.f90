@@ -206,7 +206,7 @@ CONTAINS
        ! Otherwise, the length is nearly zero and this was the largest vector. Exit.
        ELSE ! (LENGTHS(I) .LE. EPSILON(1.0_RT))
           LENGTHS(I:) = 0.0_RT
-          ! A(:,I:) = 0.0_RT ! <- Expected or not? Unclear. They're already practically zero.
+          ! A(:,I:) = 0.0_RT ! <- Expected or not? Unclear. They're already (practically) zero.
           EXIT column_orthogonolization
        END IF
     END DO column_orthogonolization
@@ -238,7 +238,7 @@ CONTAINS
     K = MIN(SIZE(A,1), SIZE(A,2))
     ! Allocate ATA and Q.
     ALLOCATE( ATA(K,K), Q(K,K) )
-    ! Find the multiplier on A (default to making the largest value 1).
+    ! Find the multiplier on A (default to making the largest value magnitude 1).
     MULTIPLIER = MAXVAL(ABS(A(:,:)))
     IF (MULTIPLIER .LE. 0.0_RT) THEN
        S(:) = 0.0_RT
@@ -381,8 +381,8 @@ CONTAINS
   !                     (rescale by their singular value) while the rest simply get divided
   !                     by the first (maximum) singular value.
   ! 
-  !   MAXBOUND -- Optional input, TRUE to normalize by the firs (maximum) singular value,
-  !               dfeaults to FALSE, to normalize so that the 2-norm of the data matrix is 1.
+  !   MAXBOUND -- Optional input, TRUE to normalize by the first (maximum) singular value,
+  !               defaults to FALSE, to normalize so that the 2-norm of the data matrix is 1.
   ! 
   !   MAX_TO_SQUARE -- Optional, the integer maximum number of points (second component of X)
   !                    that will be considered for the routine (to bound compute for large data).

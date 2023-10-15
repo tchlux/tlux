@@ -1,7 +1,7 @@
 import os, re, math, sys, logging
 import numpy as np
 from tlux.approximate.axy.preprocessing import to_array
-from tlux.approximate.axy.summary import Details, mse_and_time
+from tlux.approximate.axy.summary import Details, mse_and_time, visualize_training_geometries
 from tlux.unique import ByteArray
 
 
@@ -253,8 +253,8 @@ class AXY:
                         config=self.config, model=self.model,
                         steps=self.config.steps_taken,
                         rwork=rwork, iwork=iwork, lwork=lwork,
-                        agg_iterators_in=agg_iterators, record=self.record,
-                        yw=yw, yi=yi, ydi=yi.shape[1],
+                        agg_iterators_in=agg_iterators, 
+                        record=self.record, yw=yw,
                     )
                 )
         # Store the multiplier to be used in embeddings (to level the norm contribution).
@@ -591,7 +591,7 @@ if __name__ == "__main__":
     print(" TESTING AXY MODULE")
 
     # Compile and import testing version of the modules (with testing related compilation flags).
-    DEBUG_BUILD = True
+    DEBUG_BUILD = False
     if DEBUG_BUILD:
         # Build all of the ".mod" files before making the library.
         import subprocess
@@ -655,7 +655,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -691,17 +691,18 @@ if __name__ == "__main__":
         num_threads = 10,
         # granular_parallelism = True,
         log_grad_norm_frequency = 1,
-        rank_check_frequency = 10,
+        rank_check_frequency = 1,
         early_stop = False,
         # ax_normalized = True,
         # ay_normalized = True,
         # x_normalized = True,
         # y_normalized = True,
-        pairwise_aggregation = True,
-        partial_aggregation = True,
+        pairwise_aggregation = False,
+        partial_aggregation = False,
         # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,
+        interrupt_delay_sec = 0, # Make the intermediate function be called at every step.
         # **ONLY_SGD
     )
 
@@ -797,6 +798,7 @@ if __name__ == "__main__":
             xi=(xi if use_x else None),
             y=(y.copy() if use_y else None),
             yi=(yi if use_yi else None),
+            callback=visualize_training_geometries,
         )
         # Save and load the model.
         print("  saving..", flush=True)
@@ -967,3 +969,5 @@ if __name__ == "__main__":
         p.show(append=True, show=True)
     print("", "done.", flush=True)
 
+
+    visualize_training_geometries()

@@ -10,7 +10,7 @@
 #   NewtonPolynomial -- A Newton polynomial with stored coefficients,
 #                       offsets, evaluation, derivative, and a string method.
 #   Vector -- A limited-usage pure Python vector class, used for 
-#             convenience, but WARNING it does check for usage errors.
+#             convenience, but WARNING it does not check for usage errors.
 # 
 # The following functions are provided:
 # 

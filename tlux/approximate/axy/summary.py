@@ -152,9 +152,9 @@ class AxyModel:
 
 # Holder for the model and its work space (with named attributes).
 class Details(dict):
-    def __init__(self, config, steps=10, ydi=0, ywd=0,
+    def __init__(self, config, steps=0, ywd=0,
                  model=None, rwork=None, iwork=None, lwork=None,
-                 agg_iterators_in=None, record=None, yw=None, yi=None):
+                 agg_iterators_in=None, record=None, yw=None):
         import numpy as np
         # Generic allocations and objects.
         ftype = dict(order="F", dtype="float32")
@@ -195,6 +195,7 @@ class Details(dict):
             m_state_vecs  = model[config.mssv-1:config.mesv].reshape(config.mds, config.mds, max(0,config.mns-1), order="F"),
             m_state_shift = model[config.msss-1:config.mess].reshape(config.mds, max(0,config.mns-1), order="F"),
             m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, max(0,config.mdo), order="F"),
+            o_embeddings  = model[config.osev-1:config.oeev].reshape(config.doe, config.noe, order="F"),
             ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
             ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
             ay_shift = model[config.aoss-1:config.aose].reshape(config.ado, order="F"),
@@ -230,6 +231,8 @@ class Details(dict):
             m_lengths = rwork[config.sml-1:config.eml].reshape(config.mds, config.num_threads, order="F"),
             a_state_temp = rwork[config.sast-1:config.east].reshape(config.na, config.ads, order="F"),
             m_state_temp = rwork[config.smst-1:config.emst].reshape(config.nms, config.mds, order="F"),
+            emb_outs = rwork[config.seos-1:config.eeos].reshape(config.noe, config.nms, order="F"),
+            emb_grads = rwork[config.seog-1:config.eeog].reshape(config.noe, config.nms, order="F"),
             # Integer work space.
             axi = lwork[config.saxi-1:config.eaxi].reshape(-1, config.na, order="F") if (config.saxi <= config.eaxi) else np.zeros((0,config.na), **ltype),
             sizes = lwork[config.ssb-1:config.esb].reshape(config.nm, order="F") if (config.ssb <= config.esb) else np.zeros(0, **ltype),
@@ -291,6 +294,8 @@ class Details(dict):
             f"  y:                {self.y.shape}\n"+\
             f"  o_emb_temp:       {self.o_emb_temp.shape}\n"+\
             f"  y_gradient:       {self.y_gradient.shape}\n"+\
+            f"  emb_outs:         {self.emb_outs.shape}\n"+\
+            f"  emb_grads:        {self.emb_grads.shape}\n"+\
             f"  axi_shift:        {self.axi_shift.shape}\n"+\
             f"  axi_rescale:      {self.axi_rescale.shape}\n"+\
             f"  xi_shift:         {self.xi_shift.shape}\n"+\
@@ -324,11 +329,11 @@ def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
         history.clear()
         history.append(time.time())
         print( " initializing for fit..", end=end, flush=flush)
-    else:
+    elif (steps_taken > details.config.min_steps_to_stability):
         # Get the average time taken to make a single call to this function.
         avg_sec_per_step = (time.time() - history[0]) / steps_taken
         # Get the best MSE that's been observed as well as the current.
-        mse_record = details.record[:steps_taken,0]
+        mse_record = details.record[details.config.min_steps_to_stability:steps_taken,0]
         current_mse = mse_record[-1]
         best_mse_index = np.argmin(mse_record)
         best_mse = mse_record[best_mse_index]
@@ -339,6 +344,67 @@ def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
         if (details.config.early_stop):
             time_remaining_sec -= steps_since * avg_sec_per_step
         print(f" {steps_taken:5d}  ({current_mse:.2e})  [{best_mse:.2e}]  -> {steps_remaining}-{steps_since}  ~{time_remaining_sec/60:.1f} min", end=end, flush=flush)
+
+
+# Track "history" so that each step can be visualized.
+def visualize_training_geometries(details=None, history=[]):
+    # If details were given, then store them and do a typical MSE and time update.
+    if details is not None:
+        details_kwargs = dict(
+            config=type(details.config)(**{k:getattr(details.config, k) for (k,t) in details.config._fields_}),
+            model=details.model.copy(),
+            rwork=details.rwork.copy(),
+            iwork=details.iwork.copy(),
+            lwork=details.lwork.copy(),
+            # Manually set the following to have zero size (they are not being kept).
+            agg_iterators_in=np.zeros(details.agg_iterators_in.shape[:-1] + (0,), dtype=details.agg_iterators_in.dtype),
+            record=np.zeros(details.record.shape[:-1] + (0,), dtype=details.record.dtype),
+            yw=np.zeros((0,) + details.yw.shape[1:], dtype=details.yw.dtype),
+        )
+        # Store a Details object snapshot into the history.
+        history.append(Details(**details_kwargs))
+        mse_and_time(details)
+    # Plot the history.
+    elif len(history) > 0:
+        import tqdm
+        from tlux.plot import Plot
+        from tlux.math import svd
+        # 
+        # Construct the projections for the "ax", "ay", "x", and "y" data based on final values.
+        _, ax_projection = svd(history[-1].ax.T)
+        _, ay_projection = svd(history[-1].ay.T)
+        _, x_projection = svd(history[-1].x.T)
+        _, y_projection = svd(history[-1].y.T)
+        _, a_emb_projection = svd(history[-1].a_embeddings.T)
+        _, m_emb_projection = svd(history[-1].m_embeddings.T)
+        _, o_emb_projection = svd(history[-1].o_embeddings.T)
+        # Function for projecting data given the projection matrix.
+        def project(row_vecs, projection_vecs, dim=2):
+            # Compute the principal components via a singular value decomposition.
+            row_vecs = row_vecs @ projection_vecs[:dim,:].T
+            # Add 0's to the end if the projection was not enough.
+            if (dim > row_vecs.shape[1]):
+                row_vecs = np.concatenate((row_vecs, np.zeros((row_vecs.shape[0], dim - row_vecs.shape[1]))), axis=1)
+            return row_vecs
+        # 
+        # First, plot the data over time.
+        p = Plot("Data")
+        for i,d in tqdm.tqdm(enumerate(history), total=len(history)):
+            if ((i % max(1, len(history) // 1000)) == 0):
+                p.add("ax", *project(d.ax.T, ax_projection).T, group="ax", frame=i)
+                p.add("ay", *project(d.ay.T, ay_projection).T, group="ay", frame=i)
+                p.add("x", *project(d.x.T, x_projection).T, group="x", frame=i)
+                p.add("y", *project(d.y.T, y_projection).T, group="y", frame=i)
+                if (a_emb_projection.size > 0):
+                    p.add("a emb", *project(d.a_embeddings.T, a_emb_projection).T, group="a emb", frame=i)
+                if (m_emb_projection.size > 0):
+                    p.add("m emb", *project(d.m_embeddings.T, m_emb_projection).T, group="m emb", frame=i)
+                if (o_emb_projection.size > 0):
+                    p.add("o emb", *project(d.o_embeddings.T, o_emb_projection).T, group="o emb", frame=i)
+        p.show(append=True)
+        # Clear history now that we have used its contents and do not need them anymore.
+        history.clear()
+
 
 # TODO: Add interactive plot option as a summary?
 # TODO: Add interactive model input/output pairs?

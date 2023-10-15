@@ -1,10 +1,12 @@
 ! TODO:
 !
-! - Implement YI support, embeddings for outputs.
-!   Make YI gradient go to zero linearly for nonmatch points from (1.0 -> EMB_UNDER_ZERO_GRAD~0.8).
-!   Make YI gradient min out at EMB_OVER_MIN_GRAD~0.0 for match points when > 1.0 output is produced.
-!   These two mitigations will smoothly (piecewise quadratically) push gradient to zero where unimportant.
+! - Track aggregate output state (either in X or Y) for model conditioning steps so that
+!   can be use to correctly normalize the values coming out of the aggregate model for
+!   componentwise zero mean and unit variance.
 ! 
+! - "Dynamic data normalization" default to 4 when batch size is smaller than all data,
+!   includes updates to zero mean, unit variance, pca-for-covariance included in the
+!   gradient calculation exactly as is done for the AY values.
 ! - Add incremental checks (and updates?) to the normalization matrices generated from a batch
 !   of data, since the normalizations determined might be "bad". Could use a very slow sliding
 !   average so that value will only update in the face of large data shifts. Could compute the
@@ -140,40 +142,40 @@ MODULE AXY
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
      REAL(KIND=RT) :: CATEGORY_GAP = 0.1_RT
      ! Optimization related parameters.
-     REAL(KIND=RT) :: MAX_STEP_FACTOR = 0.01_RT ! Maximum multiplier on gradient steps.
-     REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
      REAL(KIND=RT) :: MIN_STEP_FACTOR = 0.0005_RT ! Minimum multiplier on gradient steps.
-     REAL(KIND=RT) :: MAX_STEP_COMPONENT = SQRT(SQRT(SQRT(SQRT(HUGE(1.0_RT))))) ! Maximum value of any component of the model update step.
-     REAL(KIND=RT) :: MAX_CURV_COMPONENT = HUGE(1.0_RT) ! Maximum value of any component of the model curvature estimate (SQRT of this number appears in denominator).
+     REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
+     REAL(KIND=RT) :: MAX_STEP_FACTOR = 0.01_RT ! Maximum multiplier on gradient steps.
      REAL(KIND=RT) :: MIN_CURV_COMPONENT = EPSILON(1.0_RT) ! Minimum value of any component of the model curvature estimate (SQRT of this number appears in denominator).
+     REAL(KIND=RT) :: MAX_CURV_COMPONENT = HUGE(1.0_RT) ! Maximum value of any component of the model curvature estimate (SQRT of this number appears in denominator).
+     REAL(KIND=RT) :: MAX_STEP_COMPONENT = SQRT(SQRT(SQRT(SQRT(HUGE(1.0_RT))))) ! Maximum value of any component of the model update step.
      REAL(KIND=RT) :: FASTER_RATE = 1.001_RT ! Rate of increase of optimization factors.
      REAL(KIND=RT) :: SLOWER_RATE = 0.999_RT ! Rate of decrease of optimization factors.
      REAL(KIND=RT) :: MIN_UPDATE_RATIO = 0.5_RT ! Minimum ratio of model variables to update in any optimizaiton step.
      REAL(KIND=RT) :: UPDATE_RATIO_STEP = 0.025_RT ! The step change in ratio of parameters updated when error is decreased.
-     REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT ! Rate of exponential sliding average over gradient steps.
-     REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient variation.
+     REAL(KIND=RT) :: STEP_MEAN_CHANGE = 0.1_RT ! Rate of exponential sliding average over gradient mean estimate.
+     REAL(KIND=RT) :: STEP_CURV_CHANGE = 0.01_RT ! Rate of exponential sliding average over gradient curvature estimate.
      REAL(KIND=RT) :: STEP_AY_CHANGE = 0.01_RT ! Rate of exponential sliding average over AY (forcing mean to zero).
      REAL(KIND=RT) :: STEP_EMB_CHANGE = 0.01_RT ! Rate of exponential sliding average over embedding mean (forcing mean to zero).
      REAL(KIND=RT) :: INITIAL_CURV_ESTIMATE = 0.0_RT ! Initial estimate used for the curvature term ("magnifies" the first few steps when close to zero).
      REAL(KIND=RT) :: MSE_UPPER_LIMIT = 20.0_RT ! If an MSE greater than this value occurs, a reversion to the "best model" will happen.
-     ! REAL(KIND=RT) :: ERROR_CHECK_RATIO = 0.0_RT ! Ratio of points used only to evaluate model error (set to 0 to use same data from optimization).
+     INTEGER(KIND=INT64) :: STEPS_TAKEN = 0 ! Total number of updates already made to model variables.
      INTEGER(KIND=INT64) :: MIN_STEPS_TO_STABILITY = 1 ! Minimum number of steps before allowing model saves and curvature approximation.
      INTEGER(KIND=INT64) :: MAX_BATCH = 10000 ! Max number of points in one batch matrix multiplication.
      INTEGER(KIND=INT64) :: NUM_THREADS = 1 ! Number of parallel threads to use in fit & evaluation.
-     INTEGER(KIND=INT64) :: INTERRUPT_DELAY_SEC = 2 ! Delay between interrupts during fit.
-     INTEGER(KIND=INT64) :: STEPS_TAKEN = 0 ! Total number of updates already made to model variables.
-     INTEGER(KIND=INT64) :: CONDITION_FREQUENCY = 1 ! Frequency with which to perform model conditioning operations.
+     INTEGER(KIND=INT64) :: DATA_CONDITION_FREQUENCY = 1 ! Frequency with which to update the conditioning transformations of data (while fitting).
+     INTEGER(KIND=INT64) :: MODEL_CONDITION_FREQUENCY = 1 ! Frequency with which to perform model conditioning operations (while fitting).
      INTEGER(KIND=INT64) :: LOG_GRAD_NORM_FREQUENCY = 1 ! Frequency with which to log expensive records (model variable 2-norm step size).
      INTEGER(KIND=INT64) :: RANK_CHECK_FREQUENCY = 0 ! Frequency with which to orthogonalize internal basis functions (0 for "never").
      INTEGER(KIND=INT64) :: NUM_TO_UPDATE = HUGE(ONE) ! Number of model variables to update (initialize to large number).
-     ! LOGICAL(KIND=C_BOOL) :: RANDOMIZE_ERROR_CHECK = .TRUE. ! True if the collection of points used for error checking should be randomly selected, false to use tail.
+     INTEGER(KIND=INT64) :: INTERRUPT_DELAY_SEC = 2 ! Delay between interrupts during fit.
+     LOGICAL(KIND=C_BOOL) :: BASIS_REPLACEMENT = .FALSE. ! True if linearly dependent basis functions should be replaced during optimization rank checks.
      LOGICAL(KIND=C_BOOL) :: KEEP_BEST = .TRUE. ! True if best observed model should be greedily kept at end of optimization (by MSE if no error checking, otherwise by error check).
      LOGICAL(KIND=C_BOOL) :: EARLY_STOP = .TRUE. ! True if optimization should end when steps since best model is greater than the steps remaining.
-     LOGICAL(KIND=C_BOOL) :: BASIS_REPLACEMENT = .FALSE. ! True if linearly dependent basis functions should be replaced during optimization rank checks.
      LOGICAL(KIND=C_BOOL) :: RESHUFFLE = .TRUE. ! True if the linear random generator for optimization should be randomized after cycling over all input data.
      LOGICAL(KIND=C_BOOL) :: GRANULAR_PARALLELISM = .FALSE. ! True if parallelism should be pushed down into core operators (evaluate, model_gradient, etc.) during fit.
+     ! Aggregation controls.
      LOGICAL(KIND=C_BOOL) :: PAIRWISE_AGGREGATION = .FALSE. ! True if all pairs of aggregate inputs should be considered in evaluation.
-     LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if intermediate values (in ordered sum of aggregates) should be passed through fixed model.
+     LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if intermediate values (in sum of aggregates) should be passed through fixed model.
      LOGICAL(KIND=C_BOOL) :: ORDERED_AGGREGATION = .FALSE. ! True if the elements of the aggregate set are meaningfully ordered (only relevant for partial aggregation).
      ! Normalization and data handling during FIT_MODEL.
      LOGICAL(KIND=C_BOOL) :: AX_NORMALIZED = .FALSE. ! False if AX data needs to be normalized.
@@ -224,6 +226,8 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NMS,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMXG, EMXG ! M_GRADS(NMS,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SOET, EOET ! O_EMB_TEMP(DOE,NOE,NUM_THREADS)
+     INTEGER(KIND=INT64) :: SEOS, EEOS ! EMB_OUTS(NOE,NMS)
+     INTEGER(KIND=INT64) :: SEOG, EEOG ! EMB_GRADS(NOE,NMS)
      INTEGER(KIND=INT64) :: SYG, EYG ! Y_GRADIENT(DO,NMS)
      INTEGER(KIND=INT64) :: SAXIS, EAXIS ! AXI_SHIFT(ADE)
      INTEGER(KIND=INT64) :: SAXIR, EAXIR ! AXI_RESCALE(ADE,ADE)
@@ -683,6 +687,14 @@ CONTAINS
     CONFIG%SOET = ONE + CONFIG%RWORK_SIZE
     CONFIG%EOET = CONFIG%SOET-ONE + CONFIG%DOE * CONFIG%NOE * CONFIG%NUM_THREADS
     CONFIG%RWORK_SIZE = CONFIG%EOET
+    ! Embedding outputs holder
+    CONFIG%SEOS = ONE + CONFIG%RWORK_SIZE
+    CONFIG%EEOS = CONFIG%SEOS-ONE + CONFIG%NOE * CONFIG%NMS
+    CONFIG%RWORK_SIZE = CONFIG%EEOS
+    ! Embedding gradients holder
+    CONFIG%SEOG = ONE + CONFIG%RWORK_SIZE
+    CONFIG%EEOG = CONFIG%SEOG-ONE + CONFIG%NOE * CONFIG%NMS
+    CONFIG%RWORK_SIZE = CONFIG%EEOG
     ! Y
     CONFIG%SMYB = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMYB = CONFIG%SMYB-ONE + CONFIG%DO * CONFIG%NMS
@@ -791,16 +803,21 @@ CONTAINS
     ELSE
        SHIFT_RANGE = 1.0_RT
     END IF
-    IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
-       OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
-    ELSE
-       OUTPUT_SCALE = 0.1_RT
-    END IF
     ! Set a random seed, if one was provided (otherwise leave default).
     IF (PRESENT(SEED)) THEN
        CALL SEED_RANDOM(SEED)
     END IF
     ! Initialize the aggregator model.
+    !   If there is no model afterwards, use output scaling, otherwise use 1.
+    IF (CONFIG%MDO .LT. 0) THEN
+       IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
+          OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
+       ELSE
+          OUTPUT_SCALE = 0.1_RT
+       END IF
+    ELSE
+       OUTPUT_SCALE = 1.0_RT
+    END IF
     CALL INIT_SUBMODEL(&
          CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, &
          CONFIG%ADSO, CONFIG%ADO+1, &
@@ -815,6 +832,12 @@ CONTAINS
          MODEL(CONFIG%AECS:CONFIG%AECE), &
          RANDOM_LENGTHS=.TRUE._C_BOOL)
     ! Initialize the fixed model.
+    !   Set up the output scaling for the fixed model (won't matter if it doesn't exist).
+    IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
+       OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
+    ELSE
+       OUTPUT_SCALE = 0.1_RT
+    END IF
     CALL INIT_SUBMODEL(&
          CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
          CONFIG%MDSO, CONFIG%MDO, &
@@ -1256,7 +1279,7 @@ CONTAINS
        END IF
        ! Store the size.
        IF (SIZE(SIZES_IN) .GT. 0) THEN
-          ! Store this gendex for later.
+          ! Store this gendex for later (not able to reproduce if reinitialized).
           GENDEXES(I) = GENDEX
           ! Store the size of this element (depending on pairwise).
           RSIZES(I) = REAL(SIZES_IN(GENDEX), KIND=RT)
@@ -1319,6 +1342,7 @@ CONTAINS
        END DO
        !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS) PRIVATE(I, GENDEX, AS, J, K, L, P1, P2)
        DO I = 1, MIN(CONFIG%NM, SIZE(SIZES_IN,KIND=INT64))
+          ! Retrieve the same GENDEX used for the I'th fixed element.
           GENDEX = GENDEXES(I)
           ! Randomly initialize the iterator for this aggregate set (each time we enter).
           IF ((CONFIG%RESHUFFLE) .AND. (.NOT. CONFIG%ORDERED_AGGREGATION)) THEN
@@ -1388,6 +1412,8 @@ CONTAINS
              AS = AS + ONE
           END DO
        END DO
+       ! Done use the gendexes.
+       DEALLOCATE(GENDEXES)
        ! Set the total number of aggregate inputs that were added.
        NA = AGG_STARTS(SIZE(AGG_STARTS)) + SIZES(SIZE(SIZES)) - ONE
        ! For PARTIAL_AGGREGATION, 'I' needs to step proportional to how many
@@ -2235,7 +2261,8 @@ CONTAINS
   ! Given the model output values "Y_GRADIENT", the 'true' numeric
   ! values "Y", and the true categorical values "YI", produce the
   ! gradient at the output and store it in "Y_GRADIENT".
-  SUBROUTINE OUTPUT_GRADIENT(CONFIG, Y_GRADIENT, Y, YI, YW, O_EMB_VECS, O_EMB_GRAD, O_EMB_TEMP, SSG, DON)
+  SUBROUTINE OUTPUT_GRADIENT(CONFIG, Y_GRADIENT, Y, YI, YW, O_EMB_VECS, O_EMB_GRAD, &
+       O_EMB_TEMP, EMB_OUTS, EMB_GRADS, SSG, DON)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y_GRADIENT
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
@@ -2244,41 +2271,37 @@ CONTAINS
     REAL(KIND=RT), INTENT(IN), DIMENSION(CONFIG%DOE,CONFIG%NOE) :: O_EMB_VECS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(CONFIG%DOE,CONFIG%NOE) :: O_EMB_GRAD
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: O_EMB_TEMP
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: EMB_OUTS
+    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: EMB_GRADS
     REAL(KIND=RT), INTENT(INOUT) :: SSG
     INTEGER, INTENT(IN) :: DON
     INTEGER :: D, I, C, NT
     ! ----------------------------------------------------------------------------------------
     !                             Embedding gradient calculation
-    ! TODO: Local allocation, needs to be moved.
-    REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: EMBEDDING_OUTPUTS, EMBEDDING_GRADIENTS
-    ALLOCATE( &
-         EMBEDDING_GRADIENTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)), &
-         EMBEDDING_OUTPUTS(CONFIG%NOE, SIZE(Y,2,KIND=INT64)) &
-         )
     ! Compute the number of threads based on number of points.
     NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute embedding outputs (1:NOE,1:N) by taking the dot product
     ! of output vectors with the matrix of all output emeddings.
-    EMBEDDING_OUTPUTS(:,:) = MATMUL( & ! (NOE, N)
+    EMB_OUTS(:,:) = MATMUL( & ! (NOE, N)
          TRANSPOSE(O_EMB_VECS(:,:)), & ! TRANSPOSE((DOE, NOE))
          Y_GRADIENT(DON+ONE:,:)) ! (DOE, N)
     ! First, assume all categories are negative examples, compute those gradients.
-    WHERE (EMBEDDING_OUTPUTS(:,:) .GT. 1.0_RT - CONFIG%CATEGORY_GAP)
-       EMBEDDING_GRADIENTS(:,:) = EMBEDDING_OUTPUTS(:,:) - (1.0_RT - CONFIG%CATEGORY_GAP)
+    WHERE (EMB_OUTS(:,:) .GT. 1.0_RT - CONFIG%CATEGORY_GAP)
+       EMB_GRADS(:,:) = EMB_OUTS(:,:) - (1.0_RT - CONFIG%CATEGORY_GAP)
     ELSEWHERE
-       EMBEDDING_GRADIENTS(:,:) = 0.0_RT
+       EMB_GRADS(:,:) = 0.0_RT
     END WHERE
     ! Then for each data point, we will compute the "correct embedding" gradient at that point.
     !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, D, C) IF(NT > 1)
-    DO I = 1, SIZE(EMBEDDING_OUTPUTS,2,KIND=INT64) ! Loop over N
+    DO I = 1, SIZE(EMB_OUTS,2,KIND=INT64) ! Loop over N
        ! For each output component of YI we will compute a gradient score.
        DO D = 1, SIZE(YI,1,KIND=INT64)
           C = YI(D,I) ! No category should exist in two columns YI, so this is unique to column D.
-          IF (EMBEDDING_OUTPUTS(C,I) .LT. 1.0_RT + CONFIG%CATEGORY_GAP) THEN
-             EMBEDDING_GRADIENTS(C,I) = EMBEDDING_OUTPUTS(C,I) - (1.0_RT + CONFIG%CATEGORY_GAP)
+          IF (EMB_OUTS(C,I) .LT. 1.0_RT + CONFIG%CATEGORY_GAP) THEN
+             EMB_GRADS(C,I) = EMB_OUTS(C,I) - (1.0_RT + CONFIG%CATEGORY_GAP)
           ELSE
-             EMBEDDING_GRADIENTS(C,I) = 0.0_RT
+             EMB_GRADS(C,I) = 0.0_RT
           END IF
        END DO
     END DO
@@ -2313,27 +2336,27 @@ CONTAINS
        ! Apply weights to categorical output gradients.
        DO D = 1, CONFIG%NOE
           WHERE (YW(1,:) .GT. 0.0_RT)
-             EMBEDDING_GRADIENTS(D,:) = EMBEDDING_GRADIENTS(D,:) * YW(1,:)
+             EMB_GRADS(D,:) = EMB_GRADS(D,:) * YW(1,:)
           ELSEWHERE (YW(1,:) .LT. 0.0_RT)
              ! TODO: Check to see if this is even useful, because it is "costly".
              ! Compute a weighting function that translates [0, -inf) -> [1, 0).
-             EMBEDDING_GRADIENTS(D,:) = EMBEDDING_GRADIENTS(D,:) * (1.0_RT / (1.0_RT - YW(1,:)))
+             EMB_GRADS(D,:) = EMB_GRADS(D,:) * (1.0_RT / (1.0_RT - YW(1,:)))
           END WHERE
        END DO
     END IF
     ! ----------------------------------------------------------------------------------------
     ! TODO: Find out what the "best" multiplier is here for the output errors.
-    EMBEDDING_GRADIENTS(:,:) = EMBEDDING_GRADIENTS(:,:) * SQRT(REAL(CONFIG%DOE,RT))
+    EMB_GRADS(:,:) = EMB_GRADS(:,:) * SQRT(REAL(CONFIG%DOE,RT))
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute the gradient of the embeddings.
     O_EMB_GRAD(:,:) = MATMUL( & ! (DOE, NOE) = ...
          Y_GRADIENT(DON+ONE:,:), & ! (DOE, N)
-         TRANSPOSE(EMBEDDING_GRADIENTS(:,:))) ! TRANSPOSE((NOE, N))
+         TRANSPOSE(EMB_GRADS(:,:))) ! TRANSPOSE((NOE, N))
     ! TODO: Remove MATMUL in favor of GEMM.
     ! Compute the parts of Y_GRADIENT that come from the embeddings.
     Y_GRADIENT(DON+ONE:,:) = MATMUL( & ! (DOE, N) = ...
          O_EMB_VECS(:,:), & ! (DOE, NOE)
-         EMBEDDING_GRADIENTS(:,:)) ! (NOE, N)
+         EMB_GRADS(:,:)) ! (NOE, N)
     ! Compute the total squared gradient.
     SSG = SSG + SUM(Y_GRADIENT(:,:)**2)
   END SUBROUTINE OUTPUT_GRADIENT
@@ -2345,7 +2368,8 @@ CONTAINS
        AX, AXI, SIZES, X, XI, Y, YI, YW, &
        SUM_SQUARED_GRADIENT, MODEL_GRAD, INFO, &
        AY_GRADIENT, Y_GRADIENT, A_GRADS, M_GRADS, &
-       A_EMB_TEMP, M_EMB_TEMP, O_EMB_TEMP)
+       A_EMB_TEMP, M_EMB_TEMP, O_EMB_TEMP, &
+       EMB_OUTS, EMB_GRADS)
     TYPE(MODEL_CONFIG), INTENT(INOUT) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
@@ -2371,6 +2395,8 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: A_EMB_TEMP
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: M_EMB_TEMP
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:) :: O_EMB_TEMP
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: EMB_OUTS
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: EMB_GRADS
     INTEGER(KIND=INT64) :: L, D, NT, TN, BATCH, SS, SE, MS, ME
     ! LOCAL ALLOCATION
     INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -2397,10 +2423,10 @@ CONTAINS
        ME = BATCHM_ENDS(BATCH)
        IF (MS .GT. ME) CYCLE
        TN = OMP_GET_THREAD_NUM() + ONE
-       ! Compute the gradient out the output (handle any YI embeddings).
+       ! Compute the gradient of the output (handle any YI embeddings).
        CALL OUTPUT_GRADIENT(CONFIG, Y_GRADIENT(:,MS:ME), Y(:,MS:ME), YI(:,MS:ME), YW(:,MS:ME), &
             MODEL(CONFIG%OSEV:CONFIG%OEEV), MODEL_GRAD(CONFIG%OSEV:CONFIG%OEEV,TN), &
-            O_EMB_TEMP(:,:,TN), SSG, CONFIG%DON)
+            O_EMB_TEMP(:,:,TN), EMB_OUTS(:,MS:ME), EMB_GRADS(:,MS:ME), SSG, CONFIG%DON)
     END DO error_gradient
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SSG
     ! Adjust the batches to be defined based on inputs (aggregate sets kept together).
@@ -2899,7 +2925,7 @@ CONTAINS
          A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, &
          A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, SIZES, &
          M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, &
-         M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS, OUTPUT_EMBEDDINGS)
+         M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS, O_EMB_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER(KIND=INT32), INTENT(IN) :: NUM_THREADS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE) :: A_EMBEDDINGS_MEAN
@@ -2919,7 +2945,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
-      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%NOE) :: OUTPUT_EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%NOE) :: O_EMB_VECS
       ! Local variables.
       INTEGER(KIND=INT64) :: L, D
       REAL(KIND=RT) :: SCALAR
@@ -2927,7 +2953,7 @@ CONTAINS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
       ! 
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(L, D, SCALAR)
-      DO L = 1, CONFIG%MNS+CONFIG%ANS+CONFIG%NOE
+      DO L = 1, CONFIG%MNS+CONFIG%ANS+ONE
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN
             SCALAR = SQRT(MAXVAL(SUM(A_STATE_VECS(:,:,L)**2, 1)))
@@ -2948,11 +2974,10 @@ CONTAINS
             SCALAR = SQRT(MAXVAL(SUM(M_INPUT_VECS(:,:)**2, 1)))
             M_INPUT_VECS(:,:) = M_INPUT_VECS(:,:) / SCALAR
             M_INPUT_SHIFT(:) = M_INPUT_SHIFT(:) / SCALAR
-         ! [ANS+MNS+1, ANS+MNS+NOE] -> OUTPUT_EMBEDDINGS
+         ! [ANS+MNS+1] -> O_EMB_VECS
          ELSE
-            D = L-CONFIG%ANS-CONFIG%MNS
-            SCALAR = SQRT(SUM(OUTPUT_EMBEDDINGS(:,D)**2))
-            OUTPUT_EMBEDDINGS(:,D) = OUTPUT_EMBEDDINGS(:,D) / SCALAR
+            SCALAR = SQRT(MAXVAL(SUM(O_EMB_VECS(:,:)**2, 1)))
+            O_EMB_VECS(:,:) = O_EMB_VECS(:,:) / SCALAR
          END IF
       END DO
       ! AY_SHIFT, and componentwise variance of AY 
@@ -2961,6 +2986,8 @@ CONTAINS
       !  values (prevent divergence), but only when there is a model afterwards. 
       IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
            (SIZE(AY,1,INT64) .GT. ZERO) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
+         ! TODO: This is incorrect for partial aggregation, it's not making all of the
+         !       inputs to the fixed model have componentwise zero mean and unit variance.
          ALLOCATE(AY_SUM(1:CONFIG%ADO), AGG_STARTS(1:CONFIG%NA))
          ! Compute the index of the first element of each aggregate set.
          AGG_STARTS(1) = 1
@@ -2979,6 +3006,7 @@ CONTAINS
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
             AY_SUM(:) = -AY_SHIFT(:)
          END WHERE
+         ! Now "AY_SUM" has the componentwise average of all aggregate (mean collapsed) outputs.
          IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
             AY_SHIFT(:) = &
                  (1.0_RT - CONFIG%STEP_AY_CHANGE) * AY_SHIFT(:) &
@@ -2992,8 +3020,8 @@ CONTAINS
          DO D = 1, SIZE(SIZES,KIND=INT64)
             IF (SIZES(D) .GT. ZERO) THEN
                AY_SUM(:) = AY_SUM(:) + &
-                    SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO)**2, 1) / &
-                    (REAL(SIZES(D),RT) * REAL(SIZE(SIZES,KIND=INT64),RT))
+                    (SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO), 1) / &
+                    (REAL(SIZES(D),RT)))**2 / REAL(SIZE(SIZES,KIND=INT64),RT)
             END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
@@ -3013,21 +3041,13 @@ CONTAINS
                A_OUTPUT_VECS(:,D) = A_OUTPUT_VECS(:,D) / AY_SUM(D)
             END DO
          END IF
-         DEALLOCATE(AY_SUM)
+         DEALLOCATE(AY_SUM, AGG_STARTS)
       END IF
       ! A_EMBEDDINGS
       IF (CONFIG%ANE .GT. 0) THEN
-         SCALAR = 0.0_RT
-         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(A_EMBEDDINGS,2)
-            SCALAR = MAX(SCALAR, SUM(A_EMBEDDINGS(:,D)**2))
-         END DO
-         SCALAR = SQRT(SCALAR)
-         IF (SCALAR .GT. 0.0_RT) THEN
-            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
-         END IF
          ! Update the exponential trailing mean term and subtract it from current values.
          IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
+            ! WARNING: Local allocation.
             ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
             A_EMB_MEAN(:) = 0.0_RT
             !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
@@ -3044,18 +3064,19 @@ CONTAINS
             END DO
             DEALLOCATE(A_EMB_MEAN)
          END IF
+         ! Update the scale so the max length of any single embedding is 1.
+         SCALAR = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
+         DO D = 1, SIZE(A_EMBEDDINGS,2)
+            SCALAR = MAX(SCALAR, SUM(A_EMBEDDINGS(:,D)**2))
+         END DO
+         IF (SCALAR .GT. 0.0_RT) THEN
+            SCALAR = SQRT(SCALAR)
+            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
+         END IF
       END IF
       ! M_EMBEDDINGS
       IF (CONFIG%MNE .GT. 0) THEN
-         SCALAR = 0.0_RT
-         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(M_EMBEDDINGS,2)
-            SCALAR = MAX(SCALAR, SUM(M_EMBEDDINGS(:,D)**2))
-         END DO
-         SCALAR = SQRT(SCALAR)
-         IF (SCALAR .GT. 0.0_RT) THEN
-            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
-         END IF
          ! Update the exponential trailing mean term and subtract it from current values.
          IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
             ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
@@ -3073,6 +3094,16 @@ CONTAINS
                M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - M_EMBEDDINGS_MEAN(D)
             END DO
             DEALLOCATE(M_EMB_MEAN)
+         END IF
+         ! Update the scale so the max length of any single embedding is 1.
+         SCALAR = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
+         DO D = 1, SIZE(M_EMBEDDINGS,2)
+            SCALAR = MAX(SCALAR, SUM(M_EMBEDDINGS(:,D)**2))
+         END DO
+         SCALAR = SQRT(SCALAR)
+         IF (SCALAR .GT. 0.0_RT) THEN
+            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
          END IF
       END IF
 
@@ -3393,8 +3424,9 @@ CONTAINS
     END IF
     ! 
     ! TODO: For deciding which points to keep when doing batching:
-    !        track the trailing average error CHANGE for all points (E^.5)
+    !        track the error VALUE for each point
     !        track the trailing average error CHANGE for each point (^.5)
+    !        track the trailing average error CHANGE for all points (E^.5)
     !        keep the largest X% of (point's error) * (-error change)
     !        introduce new points with the trailing average error change
     !       
@@ -3443,7 +3475,7 @@ CONTAINS
          MODEL(CONFIG%MOMS:CONFIG%MOME), & ! Y_RESCALE(DO-DOE,DO-DOE)
          RWORK(CONFIG%SOXIS : CONFIG%EOXIS), & ! YI_SHIFT(DOE)
          RWORK(CONFIG%SOXIR : CONFIG%EOXIR), & ! YI_RESCALE(DOE,DOE)
-         ! Work space for orthogonalization (conditioning).
+         ! Work space for orthogonalization (conditioning) or gradient calculation.
          RWORK(CONFIG%SAL : CONFIG%EAL), & ! A_LENGTHS
          RWORK(CONFIG%SML : CONFIG%EML), & ! M_LENGTHS
          RWORK(CONFIG%SAST : CONFIG%EAST), & ! A_STATE_TEMP
@@ -3451,6 +3483,8 @@ CONTAINS
          RWORK(CONFIG%SAET : CONFIG%EAET), & ! A_EMB_TEMP
          RWORK(CONFIG%SMET : CONFIG%EMET), & ! M_EMB_TEMP
          RWORK(CONFIG%SOET : CONFIG%EOET), & ! O_EMB_TEMP
+         RWORK(CONFIG%SEOS : CONFIG%EEOS), & ! EMB_OUTS
+         RWORK(CONFIG%SEOG : CONFIG%EEOG), & ! EMB_GRADS
          ! Rank evaluation (when conditioning model).
          IWORK(CONFIG%SAO : CONFIG%EAO), & ! A_ORDER
          IWORK(CONFIG%SMO : CONFIG%EMO), & ! M_ORDER
@@ -3478,7 +3512,8 @@ CONTAINS
          X_SHIFT, X_RESCALE, XI_SHIFT, XI_RESCALE, &
          Y_SHIFT, Y_RESCALE, YI_SHIFT, YI_RESCALE, &
          A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, &
-         A_EMB_TEMP, M_EMB_TEMP, O_EMB_TEMP, A_ORDER, M_ORDER, UPDATE_INDICES)
+         A_EMB_TEMP, M_EMB_TEMP, O_EMB_TEMP, EMB_OUTS, &
+         EMB_GRADS, A_ORDER, M_ORDER, UPDATE_INDICES)
       ! Definition of unpacked work storage.
       INTEGER(KIND=INT64), DIMENSION(SIZE(AXI_IN,1), CONFIG%NA) :: AXI
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%NA) :: AX
@@ -3521,6 +3556,8 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%ADE, CONFIG%ANE, CONFIG%NUM_THREADS) :: A_EMB_TEMP
       REAL(KIND=RT), DIMENSION(CONFIG%MDE, CONFIG%MNE, CONFIG%NUM_THREADS) :: M_EMB_TEMP
       REAL(KIND=RT), DIMENSION(CONFIG%DOE, CONFIG%NOE, CONFIG%NUM_THREADS) :: O_EMB_TEMP
+      REAL(KIND=RT), DIMENSION(CONFIG%NOE, CONFIG%NMS) :: EMB_OUTS
+      REAL(KIND=RT), DIMENSION(CONFIG%NOE, CONFIG%NMS) :: EMB_GRADS
       INTEGER(KIND=INT32), DIMENSION(CONFIG%ADS, CONFIG%NUM_THREADS) :: A_ORDER
       INTEGER(KIND=INT32), DIMENSION(CONFIG%MDS, CONFIG%NUM_THREADS) :: M_ORDER
       INTEGER(KIND=INT64), DIMENSION(CONFIG%NUM_VARS) :: UPDATE_INDICES
@@ -3663,6 +3700,14 @@ CONTAINS
                   A_STATES(:NA,:,:) = A_GRADS(:NA,:,:)
                   M_STATES(:NM,:,:) = M_GRADS(:NM,:,:)
                   AY(:NA,:) = AY_GRADIENT(:NA,:)
+               ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
+                  IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
+                     AY(:NA,:) = AY_GRADIENT(:NA,:)
+                  END IF
+               END IF
+            ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
+               IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
+                  AY(:NA,:) = AY_GRADIENT(:NA,:)
                END IF
             END IF
             ! 
@@ -3678,7 +3723,8 @@ CONTAINS
                  Y(:,:NM), YI(:,:NM), YW(:,:NM), &
                  SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:NA,:),  &
                  Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), &
-                 A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), O_EMB_TEMP(:,:,:))
+                 A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), O_EMB_TEMP(:,:,:), &
+                 EMB_OUTS(:,:NM), EMB_GRADS(:,:NM))
             IF (INFO .NE. 0) RETURN
          ELSE
             ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3736,18 +3782,23 @@ CONTAINS
                CALL EMBED(CONFIG, MODEL, AXI(:,BSA:BEA), XI(:,BS:BE), AX(:,BSA:BEA), X(:,BS:BE))
                ! Evaluate the model, storing internal states (for gradient calculation).
                ! If we are checking rank, we need to store evaluations and gradients separately.
-               IF ((CONFIG%RANK_CHECK_FREQUENCY .GT. 0) .AND. &
-                    (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0)) THEN
-                  CALL EVALUATE(CONFIG, MODEL, AX(:,BSA:BEA), AY(BSA:BEA,:), SIZES(SS:SE), &
-                       X(:,BS:BE), Y_GRADIENT(:,BS:BE), A_STATES(BSA:BEA,:,:), M_STATES(BS:BE,:,:), INFO)
-                  ! Copy the state values into holders for the gradients.
-                  A_GRADS(BSA:BEA,:,:) = A_STATES(BSA:BEA,:,:)
-                  M_GRADS(BS:BE,:,:) = M_STATES(BS:BE,:,:)
-                  AY_GRADIENT(BSA:BEA,:) = AY(BSA:BEA,:)
-                  ! Here we can reuse the same memory from evaluation for gradient computation.
-               ELSE
-                  CALL EVALUATE(CONFIG, MODEL, AX(:,BSA:BEA), AY_GRADIENT(BSA:BEA,:), SIZES(SS:SE), &
-                       X(:,BS:BE), Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), INFO)
+               CALL EVALUATE(CONFIG, MODEL, AX(:,BSA:BEA), AY_GRADIENT(BSA:BEA,:), SIZES(SS:SE), &
+                    X(:,BS:BE), Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), INFO)
+               ! Copy the state values into holders if rank checking or condintioning will be done.
+               IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
+                  IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
+                     A_STATES(BSA:BEA,:,:) = A_GRADS(BSA:BEA,:,:)
+                     M_STATES(BS:BE,:,:) = M_GRADS(BS:BE,:,:)
+                     AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
+                  ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
+                     IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
+                        AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
+                     END IF
+                  END IF
+               ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
+                  IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
+                     AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
+                  END IF
                END IF
                IF (INFO .NE. 0) CYCLE
                ! 
@@ -3762,7 +3813,8 @@ CONTAINS
                     Y(:,BS:BE), YI(:,BS:BE), YW(:,BS:BE), &
                     SUM_SQUARED_ERROR, MODEL_GRAD(:,TN:TN), INFO, AY_GRADIENT(BSA:BEA,:),  &
                     Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), &
-                    A_EMB_TEMP(:,:,TN:TN), M_EMB_TEMP(:,:,TN:TN), O_EMB_TEMP(:,:,TN:TN))
+                    A_EMB_TEMP(:,:,TN:TN), M_EMB_TEMP(:,:,TN:TN), O_EMB_TEMP(:,:,TN:TN), &
+                    EMB_OUTS(:,BS:BE), EMB_GRADS(:,BS:BE))
                IF (INFO .NE. 0) CYCLE
             END DO
             CONFIG%NUM_THREADS = TT
@@ -3786,8 +3838,8 @@ CONTAINS
          ! Rescale internal vectors to have a maximum 2-norm of 1.
          ! Center the outputs of the aggregator model about the origin.
          ! Measure the "total rank" of all internal state representations of data.
-         IF (CONFIG%CONDITION_FREQUENCY .GT. 0) THEN
-            IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%CONDITION_FREQUENCY) .EQ. 0) THEN
+         IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
+            IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
                CALL CONDITION_MODEL(CONFIG, &
                     MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
                     AX(:,:NA), AXI(:,:NA), AY(:NA,:), AY_GRADIENT(:NA,:), SIZES(:), & ! Data.
@@ -3921,7 +3973,7 @@ CONTAINS
       ! Update the step number.
       NS = NS + 1
       ! Update the saved "best" model based on error.
-      IF (MSE .LT. BEST_MSE) THEN
+      IF ((MSE .LT. BEST_MSE) .AND. (CONFIG%STEPS_TAKEN .GE. CONFIG%MIN_STEPS_TO_STABILITY)) THEN
          NS = 0
          BEST_MSE = MSE
          IF (CONFIG%KEEP_BEST) THEN
@@ -4017,8 +4069,8 @@ CONTAINS
       !$OMP END CRITICAL
     END SUBROUTINE STEP_VARIABLES
 
-
     ! Record various statistics that are currently of interest (for research).
+    !   TODO: Remove this entirely in favor of tracking done in python.
     SUBROUTINE RECORD_STATS(MODEL_GRAD)
       REAL(KIND=RT), DIMENSION(:,:) :: MODEL_GRAD
       IF (PRESENT(RECORD)) THEN
@@ -4048,23 +4100,3 @@ CONTAINS
 
 END MODULE AXY
 
-
-
-!2023-08-20 15:38:31
-!
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%FASTER_RATE !
-         ! !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE                    !
-         ! !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%FASTER_RATE !
-         ! !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE                    !
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-!2023-08-20 15:38:33
-!
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-         ! !   CONFIG%STEP_MEAN_CHANGE = CONFIG%STEP_MEAN_CHANGE * CONFIG%SLOWER_RATE !
-         ! !   STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE                    !
-         ! !   CONFIG%STEP_CURV_CHANGE = CONFIG%STEP_CURV_CHANGE * CONFIG%SLOWER_RATE !
-         ! !   STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE                    !
-         !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

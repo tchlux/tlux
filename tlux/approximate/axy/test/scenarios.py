@@ -314,7 +314,7 @@ def gen_config_data(scenario=None, seed=0, default=SCENARIO, **scenario_kwargs):
             config=config,
         )
     # Generate the memory and references to specific data holders.
-    details = Details(config, steps, ydi=ydi, ywd=ywd)
+    details = Details(config, steps, ywd=ywd)
     # Initialize the model.
     AXY.init_model(config, details.model, seed=seed)
     # Data holders.
