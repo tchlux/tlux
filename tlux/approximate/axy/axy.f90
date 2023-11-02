@@ -108,7 +108,7 @@ MODULE AXY
      INTEGER(KIND=INT32) :: NOE     ! number of output embeddings
      ! Summary numbers that are computed.
      INTEGER(KIND=INT32) :: DON     ! dimension of output numeric values
-     INTEGER(KIND=INT32) :: DO      ! Dimension output (either MDO or ADO plus DOE). 
+     INTEGER(KIND=INT32) :: DO      ! dimension output (either MDO or ADO plus DOE). 
      ! Model descriptors.
      INTEGER(KIND=INT64) :: TOTAL_SIZE
      INTEGER(KIND=INT64) :: NUM_VARS
@@ -222,6 +222,7 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1)
      INTEGER(KIND=INT64) :: SAYG, EAYG ! AY_GRADIENT(NA,ADO+1)
+     INTEGER(KIND=INT64) :: SXG, EXG ! X_GRADIENT(MDI,NMS)
      INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NMS,MDS,MNS+1)
      INTEGER(KIND=INT64) :: SMXG, EMXG ! M_GRADS(NMS,MDS,MNS+1)
@@ -671,6 +672,10 @@ CONTAINS
     CONFIG%SMXB = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMXB = CONFIG%SMXB-ONE + CONFIG%MDI * CONFIG%NMS
     CONFIG%RWORK_SIZE = CONFIG%EMXB
+    ! X gradient
+    CONFIG%SXG = ONE + CONFIG%RWORK_SIZE
+    CONFIG%EXG = CONFIG%SXG-ONE + CONFIG%MDI * CONFIG%NMS
+    CONFIG%RWORK_SIZE = CONFIG%EXG
     ! M embedding temp holder
     CONFIG%SMET = ONE + CONFIG%RWORK_SIZE
     CONFIG%EMET = CONFIG%SMET-ONE + CONFIG%MDE * CONFIG%MNE * CONFIG%NUM_THREADS
@@ -1486,7 +1491,7 @@ CONTAINS
     IF (CONFIG%MDE .GT. 0) THEN
        CALL UNPACK_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
             MODEL(CONFIG%MSEV:CONFIG%MEEV), &
-            XI(:,:), X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:))
+            XI(:,:), X(CONFIG%MDN+ONE:CONFIG%MDN+CONFIG%MDE,:))
     END IF
     ! Record the end of the total time.
     CALL CPU_TIME(CPU_TIME_END)
@@ -2455,7 +2460,7 @@ CONTAINS
           TN = OMP_GET_THREAD_NUM() + 1
           ! Convert the computed input gradients into average gradients for each embedding.
           CALL EMBEDDING_GRADIENT(CONFIG%MDE, CONFIG%MNE, .FALSE._C_BOOL, &
-               XI(:,MS:ME), X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,MS:ME), &
+               XI(:,MS:ME), X(CONFIG%MDN+ONE:CONFIG%MDN+CONFIG%MDE,MS:ME), &
                MODEL_GRAD(CONFIG%MSEV:CONFIG%MEEV,TN), M_EMB_TEMP(:,:,TN), &
                SIZE(BATCHM_STARTS, KIND=INT64))
        END DO m_embeddings_gradient
@@ -2646,7 +2651,7 @@ CONTAINS
     END IF
     ! XI
     IF ((.NOT. CONFIG%XI_NORMALIZED) .AND. (CONFIG%MDE .GT. 0)) THEN
-       CALL RADIALIZE(X(CONFIG%MDN+1:CONFIG%MDN+CONFIG%MDE,:NM), XI_SHIFT(:), XI_RESCALE(:,:))
+       CALL RADIALIZE(X(CONFIG%MDN+ONE:CONFIG%MDN+CONFIG%MDE,:NM), XI_SHIFT(:), XI_RESCALE(:,:))
        ! Apply the shift to the source embeddings.
        !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
        DO D = 1, CONFIG%MDE
@@ -2798,9 +2803,9 @@ CONTAINS
 
   
   ! Performing conditioning related operations on this model 
-  !  (ensure that mean squared error is effectively reduced).
+  !  (ensure that mean squared error is reducible).
   SUBROUTINE CONDITION_MODEL(CONFIG, MODEL, MODEL_GRAD_MEAN, MODEL_GRAD_CURV, &
-       AX, AXI, AY, AY_GRADIENT, SIZES, X, XI, Y, Y_GRADIENT, &
+       AX, AXI, AY, AY_GRADIENT, SIZES, X, X_GRADIENT, XI, Y, Y_GRADIENT, &
        NUM_THREADS, FIT_STEP, &
        A_STATES, M_STATES, A_GRADS, M_GRADS, &
        A_LENGTHS, M_LENGTHS, A_STATE_TEMP, M_STATE_TEMP, A_ORDER, M_ORDER, &
@@ -2816,6 +2821,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY_GRADIENT
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X_GRADIENT
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:,:) :: XI
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: Y_GRADIENT
@@ -2827,7 +2833,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_LENGTHS, M_LENGTHS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_STATE_TEMP, M_STATE_TEMP
     INTEGER(KIND=INT32), INTENT(INOUT), DIMENSION(:,:) :: A_ORDER, M_ORDER
-    INTEGER(KIND=INT32) :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
+    INTEGER(KIND=INT32), INTENT(INOUT) :: TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
     REAL :: CPU_TIME_START, CPU_TIME_END
     INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
@@ -2838,6 +2844,7 @@ CONTAINS
     CALL UNIT_MAX_NORM(CONFIG, INT(NUM_THREADS), &
          MODEL(CONFIG%AECS:CONFIG%AECE), & ! A embeddings mean
          MODEL(CONFIG%ASEV:CONFIG%AEEV), & ! A embeddings
+         AX(CONFIG%ADN+ONE:,:), & ! A embedded values
          MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
          MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
          MODEL(CONFIG%ASSV:CONFIG%AESV), & ! A state vecs
@@ -2846,8 +2853,10 @@ CONTAINS
          MODEL(CONFIG%AOSS:CONFIG%AOSE), & ! AY shift
          AY(:,:), & ! AY values (to update shift)
          SIZES(:), & ! Aggregate set sizes (for AY shift computation).
+         X(CONFIG%MDN+CONFIG%MDE+ONE:CONFIG%MDN+CONFIG%MDE+CONFIG%ADO,:), & ! AY aggregated
          MODEL(CONFIG%MECS:CONFIG%MECE), & ! M embeddings mean
          MODEL(CONFIG%MSEV:CONFIG%MEEV), & ! M embeddings
+         X(CONFIG%MDN+ONE:CONFIG%MDN+CONFIG%MDE,:), & ! M embedded values
          MODEL(CONFIG%MSIV:CONFIG%MEIV), & ! M input vecs
          MODEL(CONFIG%MSIS:CONFIG%MEIS), & ! M input shift
          MODEL(CONFIG%MSSV:CONFIG%MESV), & ! M state vecs
@@ -2922,14 +2931,15 @@ CONTAINS
 
     ! Make max length vector in each weight matrix have unit length.
     SUBROUTINE UNIT_MAX_NORM(CONFIG, NUM_THREADS, &
-         A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_INPUT_VECS, A_INPUT_SHIFT, &
-         A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, SIZES, &
-         M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_INPUT_VECS, M_INPUT_SHIFT, &
+         A_EMBEDDINGS_MEAN, A_EMBEDDINGS, A_EMBEDDED_VALUES, A_INPUT_VECS, A_INPUT_SHIFT, &
+         A_STATE_VECS, A_STATE_SHIFT, A_OUTPUT_VECS, AY_SHIFT, AY, SIZES, AY_AGGREGATED, &
+         M_EMBEDDINGS_MEAN, M_EMBEDDINGS, M_EMBEDDED_VALUES, M_INPUT_VECS, M_INPUT_SHIFT, &
          M_STATE_VECS, M_STATE_SHIFT, M_OUTPUT_VECS, O_EMB_VECS)
       TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
       INTEGER(KIND=INT32), INTENT(IN) :: NUM_THREADS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE) :: A_EMBEDDINGS_MEAN
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A_EMBEDDED_VALUES
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADI, CONFIG%ADS) :: A_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS) :: A_INPUT_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADS, CONFIG%ADS, MAX(0,CONFIG%ANS-1)) :: A_STATE_VECS
@@ -2938,8 +2948,10 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADO) :: AY_SHIFT
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: AY
       INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY_AGGREGATED
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE) :: M_EMBEDDINGS_MEAN
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMBEDDINGS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: M_EMBEDDED_VALUES
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDI, CONFIG%MDS) :: M_INPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS) :: M_INPUT_SHIFT
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDS, CONFIG%MDS, MAX(0,CONFIG%MNS-1)) :: M_STATE_VECS
@@ -2998,9 +3010,7 @@ CONTAINS
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
          DO D = 1, SIZE(SIZES,KIND=INT64)
             IF (SIZES(D) .GT. ZERO) THEN
-               AY_SUM(:) = AY_SUM(:) + &
-                    SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO), 1) / &
-                    (REAL(SIZES(D),RT) * REAL(SIZE(SIZES,KIND=INT64),RT))
+               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,D) / REAL(SIZE(SIZES,KIND=INT64),RT)
             END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
@@ -3019,9 +3029,7 @@ CONTAINS
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
          DO D = 1, SIZE(SIZES,KIND=INT64)
             IF (SIZES(D) .GT. ZERO) THEN
-               AY_SUM(:) = AY_SUM(:) + &
-                    (SUM(AY(AGG_STARTS(D):AGG_STARTS(D)+SIZES(D)-ONE,:CONFIG%ADO), 1) / &
-                    (REAL(SIZES(D),RT)))**2 / REAL(SIZE(SIZES,KIND=INT64),RT)
+               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,D)**2 / REAL(SIZE(SIZES,KIND=INT64),RT)
             END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
@@ -3051,15 +3059,15 @@ CONTAINS
             ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
             A_EMB_MEAN(:) = 0.0_RT
             !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
-            DO D = 1, SIZE(A_EMBEDDINGS,2)
-               A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDINGS(:,D) / REAL(SIZE(A_EMBEDDINGS,2),RT)
+            DO D = 1, SIZE(A_EMBEDDED_VALUES,2,KIND=INT64)
+               A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDED_VALUES(:,D) / REAL(SIZE(A_EMBEDDED_VALUES,2,KIND=INT64),RT)
             END DO
             ! Update the embeddings center (and in turn the shift).
             A_EMBEDDINGS_MEAN(:) = &
                  (1.0_RT - CONFIG%STEP_EMB_CHANGE) * A_EMBEDDINGS_MEAN(:) + &
                  (         CONFIG%STEP_EMB_CHANGE) * A_EMB_MEAN(:)
             !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
-            DO D = 1, SIZE(A_EMBEDDINGS,1)
+            DO D = 1, SIZE(A_EMBEDDINGS,1,KIND=INT64)
                A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - A_EMBEDDINGS_MEAN(D)
             END DO
             DEALLOCATE(A_EMB_MEAN)
@@ -3067,7 +3075,7 @@ CONTAINS
          ! Update the scale so the max length of any single embedding is 1.
          SCALAR = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(A_EMBEDDINGS,2)
+         DO D = 1, SIZE(A_EMBEDDINGS,2,KIND=INT64)
             SCALAR = MAX(SCALAR, SUM(A_EMBEDDINGS(:,D)**2))
          END DO
          IF (SCALAR .GT. 0.0_RT) THEN
@@ -3082,15 +3090,15 @@ CONTAINS
             ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
             M_EMB_MEAN(:) = 0.0_RT
             !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:M_EMB_MEAN)
-            DO D = 1, SIZE(M_EMBEDDINGS,2)
-               M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDINGS(:,D) / REAL(SIZE(M_EMBEDDINGS,2),RT)
+            DO D = 1, SIZE(M_EMBEDDED_VALUES,2,KIND=INT64)
+               M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDED_VALUES(:,D) / REAL(SIZE(M_EMBEDDED_VALUES,2,KIND=INT64),RT)
             END DO
             ! Update the embeddings center (and in turn the shift).
             M_EMBEDDINGS_MEAN(:) = &
                  (1.0_RT - CONFIG%STEP_EMB_CHANGE) * M_EMBEDDINGS_MEAN(:) + &
                  (         CONFIG%STEP_EMB_CHANGE) * M_EMB_MEAN(:)
             !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
-            DO D = 1, SIZE(M_EMBEDDINGS,1)
+            DO D = 1, SIZE(M_EMBEDDINGS,1,KIND=INT64)
                M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - M_EMBEDDINGS_MEAN(D)
             END DO
             DEALLOCATE(M_EMB_MEAN)
@@ -3098,7 +3106,7 @@ CONTAINS
          ! Update the scale so the max length of any single embedding is 1.
          SCALAR = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(M_EMBEDDINGS,2)
+         DO D = 1, SIZE(M_EMBEDDINGS,2,KIND=INT64)
             SCALAR = MAX(SCALAR, SUM(M_EMBEDDINGS(:,D)**2))
          END DO
          SCALAR = SQRT(SCALAR)
@@ -3106,7 +3114,6 @@ CONTAINS
             M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
          END IF
       END IF
-
     END SUBROUTINE UNIT_MAX_NORM
 
     ! Check the rank of all internal states.
@@ -3457,6 +3464,7 @@ CONTAINS
          RWORK(CONFIG%SYG : CONFIG%EYG), & ! Y_GRADIENT(MDO,NMS)
          RWORK(CONFIG%SMXG : CONFIG%EMXG), & ! M_GRADS(NMS,MDS,MNS+1)
          RWORK(CONFIG%SMXS : CONFIG%EMXS), & ! M_STATES(NMS,MDS,MNS+1)
+         RWORK(CONFIG%SXG : CONFIG%EXG), & ! X_GRADIENT(MDI,NMS)
          RWORK(CONFIG%SAYG : CONFIG%EAYG), & ! AY_GRADIENT(NA,ADO+1)
          RWORK(CONFIG%SAY : CONFIG%EAY), & ! AY(NA,ADO+1)
          RWORK(CONFIG%SAXG : CONFIG%EAXG), & ! A_GRADS(NA,ADS,ANS+1)
@@ -3507,7 +3515,7 @@ CONTAINS
          A_IN_VECS, A_OUT_VECS, M_IN_VECS, M_OUT_VECS, &
          A_EMB_VECS, M_EMB_VECS, O_EMB_VECS, &
          MODEL_GRAD, MODEL_GRAD_MEAN, MODEL_GRAD_CURV, BEST_MODEL, &
-         Y_GRADIENT, M_GRADS, M_STATES, AY_GRADIENT, AY, A_GRADS, A_STATES, &
+         Y_GRADIENT, M_GRADS, M_STATES, X_GRADIENT, AY_GRADIENT, AY, A_GRADS, A_STATES, &
          AX_SHIFT, AX_RESCALE, AXI_SHIFT, AXI_RESCALE, AY_SHIFT, &
          X_SHIFT, X_RESCALE, XI_SHIFT, XI_RESCALE, &
          Y_SHIFT, Y_RESCALE, YI_SHIFT, YI_RESCALE, &
@@ -3534,6 +3542,7 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%TOTAL_SIZE) :: BEST_MODEL
       REAL(KIND=RT), DIMENSION(CONFIG%DO, CONFIG%NMS) :: Y_GRADIENT
       REAL(KIND=RT), DIMENSION(CONFIG%NMS, CONFIG%MDS, CONFIG%MNS+1) :: M_GRADS, M_STATES
+      REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%NMS) :: X_GRADIENT
       REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADO+ONE) :: AY_GRADIENT, AY
       REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADS, CONFIG%ANS+1) :: A_GRADS, A_STATES
       REAL(KIND=RT), DIMENSION(CONFIG%ADN) :: AX_SHIFT
@@ -3689,17 +3698,18 @@ CONTAINS
             ! 
             !             Evaluate the model at all points, storing states.
             ! Embed all integer inputs into real vector inputs.
-            CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI(:,:NM), AX(:,:NA), X(:,:NM))
+            CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI(:,:NM), AX(:,:NA), X_GRADIENT(:,:NM))
             ! Evaluate the model, storing internal states (for gradient calculation).
             CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY_GRADIENT(:NA,:), SIZES(:), &
-                 X(:,:NM), Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), INFO)
+                 X_GRADIENT(:,:NM), Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), INFO)
             IF (INFO .NE. 0) RETURN
             ! If we are checking rank, we need to store evaluations separately from gradients.
             IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
                IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
                   A_STATES(:NA,:,:) = A_GRADS(:NA,:,:)
-                  M_STATES(:NM,:,:) = M_GRADS(:NM,:,:)
                   AY(:NA,:) = AY_GRADIENT(:NA,:)
+                  X(:,:NM) = X_GRADIENT(:,:NM)
+                  M_STATES(:NM,:,:) = M_GRADS(:NM,:,:)
                ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
                   IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
                      AY(:NA,:) = AY_GRADIENT(:NA,:)
@@ -3708,6 +3718,7 @@ CONTAINS
             ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
                IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
                   AY(:NA,:) = AY_GRADIENT(:NA,:)
+                  X(:,:NM) = X_GRADIENT(:,:NM)
                END IF
             END IF
             ! 
@@ -3719,7 +3730,7 @@ CONTAINS
             !  Otherwise, only compute the gradients and reuse that memory space.
             SUM_SQUARED_ERROR = 0.0_RT
             CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
-                 AX(:,:NA), AXI(:,:NA), SIZES(:), X(:,:NM), XI(:,:NM), &
+                 AX(:,:NA), AXI(:,:NA), SIZES(:), X_GRADIENT(:,:NM), XI(:,:NM), &
                  Y(:,:NM), YI(:,:NM), YW(:,:NM), &
                  SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:NA,:),  &
                  Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), &
@@ -3779,17 +3790,18 @@ CONTAINS
                ! 
                !             Evaluate the model at all points, storing states.
                ! Embed all integer inputs into real vector inputs.
-               CALL EMBED(CONFIG, MODEL, AXI(:,BSA:BEA), XI(:,BS:BE), AX(:,BSA:BEA), X(:,BS:BE))
+               CALL EMBED(CONFIG, MODEL, AXI(:,BSA:BEA), XI(:,BS:BE), AX(:,BSA:BEA), X_GRADIENT(:,BS:BE))
                ! Evaluate the model, storing internal states (for gradient calculation).
                ! If we are checking rank, we need to store evaluations and gradients separately.
                CALL EVALUATE(CONFIG, MODEL, AX(:,BSA:BEA), AY_GRADIENT(BSA:BEA,:), SIZES(SS:SE), &
-                    X(:,BS:BE), Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), INFO)
+                    X_GRADIENT(:,BS:BE), Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), INFO)
                ! Copy the state values into holders if rank checking or condintioning will be done.
                IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
                   IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
                      A_STATES(BSA:BEA,:,:) = A_GRADS(BSA:BEA,:,:)
-                     M_STATES(BS:BE,:,:) = M_GRADS(BS:BE,:,:)
                      AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
+                     X(:,BS:BE) = X_GRADIENT(:,BS:BE)
+                     M_STATES(BS:BE,:,:) = M_GRADS(BS:BE,:,:)
                   ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
                      IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
                         AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
@@ -3798,6 +3810,7 @@ CONTAINS
                ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN
                   IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN
                      AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
+                     X(:,BS:BE) = X_GRADIENT(:,BS:BE)
                   END IF
                END IF
                IF (INFO .NE. 0) CYCLE
@@ -3809,7 +3822,7 @@ CONTAINS
                !  performed then store the states separate from the gradients.
                !  Otherwise, only compute the gradients and reuse that memory space.
                CALL MODEL_GRADIENT(CONFIG, MODEL(:), &
-                    AX(:,BSA:BEA), AXI(:,BSA:BEA), SIZES(SS:SE), X(:,BS:BE), XI(:,BS:BE), &
+                    AX(:,BSA:BEA), AXI(:,BSA:BEA), SIZES(SS:SE), X_GRADIENT(:,BS:BE), XI(:,BS:BE), &
                     Y(:,BS:BE), YI(:,BS:BE), YW(:,BS:BE), &
                     SUM_SQUARED_ERROR, MODEL_GRAD(:,TN:TN), INFO, AY_GRADIENT(BSA:BEA,:),  &
                     Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), &
@@ -3843,7 +3856,7 @@ CONTAINS
                CALL CONDITION_MODEL(CONFIG, &
                     MODEL(:), MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:), & ! Model and gradient.
                     AX(:,:NA), AXI(:,:NA), AY(:NA,:), AY_GRADIENT(:NA,:), SIZES(:), & ! Data.
-                    X(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
+                    X(:,:), X_GRADIENT(:,:), XI(:,:), Y(:,:), Y_GRADIENT(:,:), &
                     CONFIG%NUM_THREADS, CONFIG%STEPS_TAKEN, & ! Configuration for conditioning.
                     A_STATES(:NA,:,:), M_STATES(:,:,:), & ! State values at basis functions.
                     A_GRADS(:NA,:,:), M_GRADS(:,:,:), & ! Gradient values at basis functions.

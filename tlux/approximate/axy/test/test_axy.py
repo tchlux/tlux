@@ -5,7 +5,7 @@
 #  - Make sure the above function works in higher dimension (use PCA?).
 
 try:
-    from test_axy_module import axy as AXY
+    from tlux.approximate.axy.test.test_axy_module import axy as AXY
 except ModuleNotFoundError:
     import fmodpy
     # Get the directory for the AXY compiled source code.
@@ -27,7 +27,7 @@ import tlux.approximate.axy.axy
 tlux.approximate.axy.axy.axy = AXY
 
 # Overwrite the typical "random" library with the testing one.
-from test_random import random
+from tlux.approximate.axy.test.test_random import random
 import tlux.approximate.axy.axy_random
 tlux.approximate.axy.axy_random.random = random
 
@@ -1076,6 +1076,162 @@ def _test_normalize_data(dimension=64, show=False):
     print(" passed")
 
 
+def _test_condition_model():
+    print("CONDITION_MODEL")
+    seed = 0
+    num_scenarios = 0
+    max_scenarios = 1
+    for s in scenario_generator(randomized=True, seed=seed):
+        # Only consider "small_data" scenarios, others take too long.
+        if (not s["small_data"]): continue
+        # Increment the number of scenarios seen, break if complete.
+        num_scenarios += 1
+        if (num_scenarios > max_scenarios):
+            break
+        scenario_copy = json.loads(json.dumps(s))
+        # Materialize the scenario.
+        config, details, raw_data, data = gen_config_data(
+            seed=seed,
+            scenario=s,
+            nm=100,
+        )
+        # Extract all the arguments and call the routine.
+        model = details.model
+        model_grad = details.model_grad
+        model_grad_mean = details.model_grad_mean
+        model_grad_curv = details.model_grad_curv
+        ax = details.ax
+        axi = details.axi
+        ay = details.ay
+        ay_gradient = details.ay_gradient
+        sizes = details.sizes
+        x_gradient = details.x_gradient
+        x = details.x
+        xi = details.xi
+        y = details.y
+        yi = details.yi
+        yw = details.yw
+        y_gradient = details.y_gradient
+        num_threads = details.config.num_threads
+        fit_step = details.config.steps_taken
+        a_states = details.a_states
+        m_states = details.m_states
+        a_grads = details.a_grads
+        m_grads = details.m_grads
+        a_lengths = details.a_lengths
+        m_lengths = details.m_lengths
+        a_emb_temp = details.a_emb_temp
+        m_emb_temp = details.m_emb_temp
+        o_emb_temp = details.o_emb_temp
+        emb_outs = details.emb_outs
+        emb_grads = details.emb_grads
+        a_state_temp = details.a_state_temp
+        m_state_temp = details.m_state_temp
+        a_order = details.a_order
+        m_order = details.m_order
+        update_indices = details.update_indices
+        total_eval_rank = 0
+        total_grad_rank = 0
+        sum_squared_error = 0.0
+        info = 0
+        step_mean_remain = 1.0 - config.step_mean_change
+        step_curv_remain = 1.0 - config.step_curv_change
+        # Make the data normalized, zero mean, unit variance, and varied embeddings.
+        ax[:,:] = np.random.normal(0.0, 1.0, size=ax.shape)
+        axi[:,:] = np.random.randint(1, config.ane, size=axi.shape)
+        x[:,:] = np.random.normal(0.0, 1.0, size=x.shape)
+        xi[:,:] = np.random.randint(1, config.mne, size=xi.shape)
+        y[:,:] = np.random.normal(0.0, 1.0, size=y.shape)
+        # Make sure that all the destinations for the embeddings are zeroed out.
+        ax[:,config.adn:] = 0.0
+        x[:,config.mdn:] = 0.0
+        # Embed data and evaluate the model.
+        AXY.embed(config, model, axi, xi, ax, x)
+        AXY.evaluate(config, model, ax, ay_gradient, sizes, x_gradient, y, a_grads, m_grads, info)
+        a_states[:,:,:] = a_grads[:,:,:]
+        m_states[:,:,:] = m_grads[:,:,:]        
+        ay[:,:] = ay_gradient[:,:]
+        x[:,:] = x_gradient[:,:]
+        print("config: ", config, flush=True)
+        print()
+        print("Values before gradient calculation:")
+        print("  ax.mean(axis=1):", ax.mean(axis=1)[config.adn:], flush=True)
+        print("  ax.std(axis=1): ", ax.std(axis=1)[config.adn:], flush=True)
+        print("  x.mean(axis=1): ", x.mean(axis=1)[config.mdn:], flush=True)
+        print("  x.std(axis=1):  ", x.std(axis=1)[config.mdn:], flush=True)
+        print()
+        # Compute gradient, adjust step sizes, take model step.
+        AXY.model_gradient(config, model, ax, axi, sizes, x_gradient, xi, y, yi, yw,
+                           sum_squared_error, model_grad, info,
+                           ay_gradient, y_gradient,
+                           a_grads, m_grads, a_emb_temp, m_emb_temp, o_emb_temp,
+                           emb_outs, emb_grads)
+        # ---------------------------------------------------------------------------------
+        # AXY.adjust_rates(model, model_grad_mean, model_grad_curv)
+        # AXY.step_variables(model_grad, model_grad_mean, model_grad_curv, update_indices, num_threads)
+        # 
+        # Aggregate over computed batches and compute average gradient.
+        model_grad[:, 0] = np.mean(model_grad[:, :], axis=1)
+        # Mean.
+        model_grad_mean[:] = step_mean_remain * model_grad_mean[:] + config.step_mean_change * model_grad[:, 0]
+        # Clip the mean to be small enough to be numerically stable.
+        model_grad_mean[:] = np.where(np.abs(model_grad_mean[:]) > config.max_step_component,
+                                      np.sign(config.max_step_component, model_grad_mean[:]),
+                                      model_grad_mean[:])
+        # Curvature.
+        model_grad_curv[:] = step_curv_remain * model_grad_curv[:] + \
+                             config.step_curv_change * (model_grad_mean[:] - model_grad[:, 0])**2
+        # Clip the curvature to be large enough to be numerically stable.
+        model_grad_curv[:] = np.where(model_grad_curv[:] < config.min_curv_component,
+                                      config.min_curv_component,
+                                      model_grad_curv[:])
+        # Clip the curvature to be small enough to be numerically stable.
+        model_grad_curv[:] = np.where(np.abs(model_grad_curv[:]) > config.max_curv_component,
+                                      np.sign(config.max_curv_component, model_grad_curv[:]),
+                                      model_grad_curv[:])
+        # Set the step as the mean direction (over the past few steps).
+        model_grad[:, 0] = model_grad_mean[:]
+        # Start scaling by step magnitude by curvature once enough data is collected.
+        model_grad[:, 0] /= np.sqrt(model_grad_curv[:])
+        # Take the gradient steps (based on the computed "step" above).
+        model[:config.num_vars] -= model_grad[:, 0] * config.step_factor
+        # ---------------------------------------------------------------------------------
+        print("Values after gradient computation, before conditioning:")
+        print("  ax.mean(axis=1):", ax.mean(axis=1)[config.adn:], flush=True)
+        print("  ax.std(axis=1): ", ax.std(axis=1)[config.adn:], flush=True)
+        print("  x.mean(axis=1): ", x.mean(axis=1)[config.mdn:], flush=True)
+        print("  x.std(axis=1):  ", x.std(axis=1)[config.mdn:], flush=True)
+        print()
+        # Now trigger the conditioning operation.
+        result = AXY.condition_model(
+            config, model, model_grad_mean, model_grad_curv,
+            ax, axi, ay, ay_gradient, sizes, x, x_gradient, xi, y,
+            y_gradient, num_threads, fit_step,
+            a_states, m_states, a_grads, m_grads,
+            a_lengths, m_lengths, a_state_temp, m_state_temp,
+            a_order, m_order, total_eval_rank, total_grad_rank
+        )
+        print("result[-1]: ", result[-1], flush=True)        
+        print("result[-2]: ", result[-2], flush=True)
+        print()
+        # ---------------------------------------
+        # Embed data and evaluate the model.
+        AXY.embed(config, model, axi, xi, ax, x)
+        AXY.evaluate(config, model, ax, ay, sizes, x, y, a_grads, m_grads, info)
+        a_states[:,:,:] = a_grads[:,:,:]
+        m_states[:,:,:] = m_grads[:,:,:]        
+        ay[:,:] = ay_gradient[:,:]
+        print("Values after conditioning and re-evaluation:")
+        print("  ax.mean(axis=1):", ax.mean(axis=1)[config.adn:], flush=True)
+        print("  ax.std(axis=1): ", ax.std(axis=1)[config.adn:], flush=True)
+        print("  x.mean(axis=1): ", x.mean(axis=1)[config.mdn:], flush=True)
+        print("  x.std(axis=1):  ", x.std(axis=1)[config.mdn:], flush=True)
+        print()
+
+
+    print(" passed")
+
+
 # --------------------------------------------------------------------
 #                           FIT_MODEL
 
@@ -1136,103 +1292,9 @@ if __name__ == "__main__":
     _test_fetch_data()
     # _test_embed() # TODO: Design this test.
     _test_normalize_data()
+    # _test_condition_model() # TODO: Formalize this test to have assertions.
     _test_evaluate()
     _test_model_gradient()
     # 
     # _test_large_data_fit()
     # _test_axi()
-
-
-# 2023-08-20 15:43:01
-# 
-##############################################################################
-# # ------------------------------------------------------------------------ #
-# # num_scenarios = max_scenarios                                            #
-# # scenario = {                                                             #
-# #   'steps': 50,                                                           #
-# #   'ade': None,                                                           #
-# #   'ado': None,                                                           #
-# #   'mde': None,                                                           #
-# #   'aggregator_only': True,                                               #
-# #   'partial_aggregation': True,                                           #
-# #   'pairwise_aggregation': False,                                         #
-# #   'batch_aggregate_constrained': False,                                  #
-# #   'batch_fixed_constrained': False,                                      #
-# #   'input_aggregate_categorical': False,                                  #
-# #   'input_aggregate_numeric': True,                                       #
-# #   'input_fixed_categorical': False,                                      #
-# #   'input_fixed_numeric': False,                                          #
-# #   'model_aggregate_layered': False,                                      #
-# #   'model_fixed_layered': False,                                          #
-# #   'output_categorical': False,                                           #
-# #   'output_numeric': True,                                                #
-# #   'small_data': True,                                                    #
-# #   'small_model': True,                                                   #
-# #   'threaded': True,                                                      #
-# #   'weighted_output': True,                                               #
-# #   'weights_dimensioned': True                                            #
-# # }                                                                        #
-# # s = scenario                                                             #
-# # ------------------------------------------------------------------------ #
-##############################################################################
-
-
-# 2023-08-20 15:43:04
-# 
-########################################################################################
-# #                                                                                    #
-# # print("info: ", info, flush=True)                                                  #
-# # print("", flush=True)                                                              #
-# # print("raw_data:", flush=True)                                                     #
-# # for (k,v) in raw_data.items():                                                     #
-# #     print("", repr(k), getattr(v, "shape", getattr(v, "__len__", lambda: None)())) #
-# # print("", flush=True)                                                              #
-# # print("data:", flush=True)                                                         #
-# # for (k,v) in data.items():                                                         #
-# #     print("", repr(k), getattr(v, "shape", getattr(v, "__len__", lambda: None)())) #
-# # print("", flush=True)                                                              #
-# #                                                                                    #
-########################################################################################
-
-
-# 2023-08-20 16:07:13
-# 
-##############################################
-# # #   Special aggregator only model.       #
-# # s["aggregator_only"] = False             #
-# # #   Batching.                            #
-# # s["batch_aggregate_constrained"] = False #
-# # s["batch_fixed_constrained"] = False     #
-# # #   Aggregate input.                     #
-# # s["input_aggregate_categorical"] = False #
-# # s["input_aggregate_numeric"] = True      #
-# # #   Fixed input.                         #
-# # s["input_fixed_categorical"] = False     #
-# # s["input_fixed_numeric"] = True          #
-# # #   Layering.                            #
-# # s["model_aggregate_layered"] = False     #
-# # s["model_fixed_layered"] = False         #
-# # #   Outputs.                             #
-# # s["output_categorical"] = False          #
-# # s["output_numeric"] = True               #
-# # #   Special aggregations.                #
-# # s["pairwise_aggregation"] = False        #
-# # s["partial_aggregation"] = True          #
-# # #   Data and model size.                 #
-# # s["small_data"] = True                   #
-# # s["small_model"] = True                  #
-# # #   Threading.                           #
-# # s["threaded"] = False                    #
-# # #   Weigthed outputs.                    #
-# # s["weighted_output"] = False             #
-# # s["weights_dimensioned"] = False         #
-# # #                                        #
-# # # # Set the number of threads.           #
-# # # s["num_threads"] = 1                   #
-# # #                                        #
-# # # Set the number of data points.         #
-# # s["na_in"], s["na"] = 1, 1               #
-# # s["nm_in"], s["nm"] = 2, 2               #
-# # #                                        #
-##############################################
-

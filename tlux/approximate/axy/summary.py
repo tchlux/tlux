@@ -215,6 +215,7 @@ class Details(dict):
             ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
             ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
             x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nms, order="F"),
+            x_gradient = rwork[config.sxg-1:config.exg].reshape(config.mdi, config.nms, order="F"),
             m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
             m_states = rwork[config.smxs-1:config.emxs].reshape(config.nms, config.mds, config.mns+1, order="F"),
             m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nms, config.mds, config.mns+1, order="F"),
@@ -288,6 +289,7 @@ class Details(dict):
             f"  ay:               {self.ay.shape}\n"+\
             f"  ay_gradient:      {self.ay_gradient.shape}\n"+\
             f"  x:                {self.x.shape}\n"+\
+            f"  x_gradient:       {self.x_gradient.shape}\n"+\
             f"  m_emb_temp:       {self.m_emb_temp.shape}\n"+\
             f"  m_states:         {self.m_states.shape}\n"+\
             f"  m_grads:          {self.m_grads.shape}\n"+\
