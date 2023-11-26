@@ -261,6 +261,22 @@ MODULE AXY
      INTEGER(KIND=INT64) :: WCON, CCON ! condition
      INTEGER(KIND=INT64) :: WREC, CREC ! record
      INTEGER(KIND=INT64) :: WENC, CENC ! encode
+     ! Variables used in the fit process.
+     REAL(KIND=RT) :: FIT_MSE
+     REAL(KIND=RT) :: FIT_PREV_MSE
+     REAL(KIND=RT) :: FIT_BEST_MSE
+     REAL(KIND=RT) :: FIT_STEP_MEAN_REMAIN
+     REAL(KIND=RT) :: FIT_STEP_CURV_REMAIN
+     INTEGER(KIND=INT32) :: FIT_TOTAL_EVAL_RANK
+     INTEGER(KIND=INT32) :: FIT_TOTAL_GRAD_RANK
+     LOGICAL(KIND=C_BOOL) :: FIT_NORMALIZE
+     INTEGER(KIND=INT64) :: FIT_STEP
+     INTEGER(KIND=INT64) :: FIT_MIN_TO_UPDATE
+     INTEGER(KIND=INT64) :: FIT_LAST_INTERRUPT_TIME
+     INTEGER(KIND=INT64) :: FIT_WAIT_TIME
+     INTEGER(KIND=INT64) :: FIT_TOTAL_RANK
+     INTEGER(KIND=INT64) :: FIT_NS
+     INTEGER(KIND=INT64) :: FIT_NT
   END TYPE MODEL_CONFIG
 
   ! Function that is defined by OpenMP.
@@ -2959,7 +2975,7 @@ CONTAINS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDSO, CONFIG%MDO) :: M_OUTPUT_VECS
       REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%NOE) :: O_EMB_VECS
       ! Local variables.
-      INTEGER(KIND=INT64) :: L, D
+      INTEGER(KIND=INT64) :: L, D, N
       REAL(KIND=RT) :: SCALAR
       INTEGER(KIND=INT64), ALLOCATABLE, DIMENSION(:) :: AGG_STARTS
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AY_SUM, A_EMB_MEAN, M_EMB_MEAN
@@ -3003,14 +3019,15 @@ CONTAINS
          ALLOCATE(AY_SUM(1:CONFIG%ADO), AGG_STARTS(1:CONFIG%NA))
          ! Compute the index of the first element of each aggregate set.
          AGG_STARTS(1) = 1
-         DO D = 1, SIZE(SIZES,KIND=INT64)-ONE
-            AGG_STARTS(D+ONE) = AGG_STARTS(D) + SIZES(D)
+         DO N = 1, SIZE(SIZES,KIND=INT64)-ONE
+            AGG_STARTS(N+ONE) = AGG_STARTS(N) + SIZES(N)
          END DO
+         ! AY mean.
          AY_SUM(:) = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
-         DO D = 1, SIZE(SIZES,KIND=INT64)
-            IF (SIZES(D) .GT. ZERO) THEN
-               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,D) / REAL(SIZE(SIZES,KIND=INT64),RT)
+         DO N = 1, SIZE(SIZES,KIND=INT64)
+            IF (SIZES(N) .GT. ZERO) THEN
+               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,N) / REAL(SIZE(SIZES,KIND=INT64),RT)
             END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
@@ -3027,9 +3044,9 @@ CONTAINS
          ! AY variance.
          AY_SUM(:) = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AY_SUM)
-         DO D = 1, SIZE(SIZES,KIND=INT64)
-            IF (SIZES(D) .GT. ZERO) THEN
-               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,D)**2 / REAL(SIZE(SIZES,KIND=INT64),RT)
+         DO N = 1, SIZE(SIZES,KIND=INT64)
+            IF (SIZES(N) .GT. ZERO) THEN
+               AY_SUM(:) = AY_SUM(:) + AY_AGGREGATED(:,N)**2 / REAL(SIZE(SIZES,KIND=INT64),RT)
             END IF
          END DO
          WHERE ((.NOT. IS_FINITE(AY_SUM(:))) .OR. IS_NAN(AY_SUM(:)))
@@ -3052,67 +3069,90 @@ CONTAINS
          DEALLOCATE(AY_SUM, AGG_STARTS)
       END IF
       ! A_EMBEDDINGS
-      IF (CONFIG%ANE .GT. 0) THEN
+      IF ((CONFIG%ANE .GT. 0) .AND. (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT)) THEN
          ! Update the exponential trailing mean term and subtract it from current values.
-         IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
-            ! WARNING: Local allocation.
-            ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
-            A_EMB_MEAN(:) = 0.0_RT
-            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
-            DO D = 1, SIZE(A_EMBEDDED_VALUES,2,KIND=INT64)
-               A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDED_VALUES(:,D) / REAL(SIZE(A_EMBEDDED_VALUES,2,KIND=INT64),RT)
-            END DO
-            ! Update the embeddings center (and in turn the shift).
-            A_EMBEDDINGS_MEAN(:) = &
-                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * A_EMBEDDINGS_MEAN(:) + &
-                 (         CONFIG%STEP_EMB_CHANGE) * A_EMB_MEAN(:)
-            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
-            DO D = 1, SIZE(A_EMBEDDINGS,1,KIND=INT64)
-               A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - A_EMBEDDINGS_MEAN(D)
-            END DO
-            DEALLOCATE(A_EMB_MEAN)
-         END IF
-         ! Update the scale so the max length of any single embedding is 1.
-         SCALAR = 0.0_RT
-         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(A_EMBEDDINGS,2,KIND=INT64)
-            SCALAR = MAX(SCALAR, SUM(A_EMBEDDINGS(:,D)**2))
+         ! WARNING: Local allocation.
+         ALLOCATE(A_EMB_MEAN(1:CONFIG%ADE))
+         ! A_EMB_MEAN(:) = 0.0_RT
+         ! !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
+         ! DO N = 1, SIZE(A_EMBEDDED_VALUES,2,KIND=INT64)
+         !    A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDED_VALUES(:,N)
+         ! END DO
+         ! A_EMB_MEAN(:) = A_EMB_MEAN(:) / REAL(SIZE(A_EMBEDDED_VALUES,2,KIND=INT64), KIND=RT)
+         A_EMB_MEAN(:) = SUM(A_EMBEDDED_VALUES,2) / REAL(SIZE(A_EMBEDDED_VALUES,2,KIND=INT64), KIND=RT)
+         PRINT *, CONFIG%STEPS_TAKEN, "A_EMB_MEAN ", A_EMB_MEAN(:)
+         ! Update the embeddings center (and in turn the shift).
+         A_EMBEDDINGS_MEAN(:) = &
+              (1.0_RT - CONFIG%STEP_EMB_CHANGE) * A_EMBEDDINGS_MEAN(:) + &
+              (         CONFIG%STEP_EMB_CHANGE) * A_EMB_MEAN(:)
+         ! Compute the difference between the current mean and target mean.
+         A_EMB_MEAN(:) = A_EMBEDDINGS_MEAN(:) - A_EMB_MEAN(:)
+         PRINT *, CONFIG%STEPS_TAKEN*0, "A_EMB_MEAN ", A_EMB_MEAN(:)
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+         DO D = 1, SIZE(A_EMBEDDINGS,1,KIND=INT64)
+            A_EMBEDDINGS(D,:) = A_EMBEDDINGS(D,:) - A_EMB_MEAN(D)
          END DO
-         IF (SCALAR .GT. 0.0_RT) THEN
-            SCALAR = SQRT(SCALAR)
-            A_EMBEDDINGS(:,:) = A_EMBEDDINGS(:,:) / SCALAR
-         END IF
+         ! Update the scale so the max length of any single embedding is 1.
+         ! TODO: Add variance calculation to the embeddings, scale so variance is 1.
+         A_EMB_MEAN(:) = 0.0_RT
+         !!! ----- !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:A_EMB_MEAN)
+         D = SIZE(A_EMBEDDED_VALUES,2,KIND=INT64)
+         DO N = 1, SIZE(A_EMBEDDED_VALUES,2,KIND=INT64)
+            A_EMB_MEAN(:) = A_EMB_MEAN(:) + A_EMBEDDED_VALUES(:,N)**2 / REAL(D,RT)
+         END DO
+         WHERE ((.NOT. IS_FINITE(A_EMB_MEAN(:))) .OR. IS_NAN(A_EMB_MEAN(:)))
+            A_EMB_MEAN(:) = 1.0_RT
+         END WHERE
+         A_EMB_MEAN(:) = SQRT(MAX(A_EMB_MEAN(:), SQRT(EPSILON(0.0_RT))))
+         ! PRINT *, CONFIG%STEPS_TAKEN, "A_EMB_VAR ", A_EMB_MEAN(:)
+         A_EMB_MEAN(:) = MAX(A_EMB_MEAN(:), 0.5_RT)
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+         DO D = 1, CONFIG%ANE
+            A_EMBEDDINGS(:,D) = &
+                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * A_EMBEDDINGS(:,D) &
+                 + (CONFIG%STEP_EMB_CHANGE       ) * A_EMBEDDINGS(:,D) / A_EMB_MEAN(:)
+         END DO
+         DEALLOCATE(A_EMB_MEAN)
       END IF
       ! M_EMBEDDINGS
-      IF (CONFIG%MNE .GT. 0) THEN
+      IF ((CONFIG%MNE .GT. 0) .AND. (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT)) THEN
          ! Update the exponential trailing mean term and subtract it from current values.
-         IF (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT) THEN
-            ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
-            M_EMB_MEAN(:) = 0.0_RT
-            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:M_EMB_MEAN)
-            DO D = 1, SIZE(M_EMBEDDED_VALUES,2,KIND=INT64)
-               M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDED_VALUES(:,D) / REAL(SIZE(M_EMBEDDED_VALUES,2,KIND=INT64),RT)
-            END DO
-            ! Update the embeddings center (and in turn the shift).
-            M_EMBEDDINGS_MEAN(:) = &
-                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * M_EMBEDDINGS_MEAN(:) + &
-                 (         CONFIG%STEP_EMB_CHANGE) * M_EMB_MEAN(:)
-            !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
-            DO D = 1, SIZE(M_EMBEDDINGS,1,KIND=INT64)
-               M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - M_EMBEDDINGS_MEAN(D)
-            END DO
-            DEALLOCATE(M_EMB_MEAN)
-         END IF
-         ! Update the scale so the max length of any single embedding is 1.
-         SCALAR = 0.0_RT
-         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(MAX:SCALAR)
-         DO D = 1, SIZE(M_EMBEDDINGS,2,KIND=INT64)
-            SCALAR = MAX(SCALAR, SUM(M_EMBEDDINGS(:,D)**2))
+         ! WARNING: Local allocation.
+         ALLOCATE(M_EMB_MEAN(1:CONFIG%MDE))
+         M_EMB_MEAN(:) = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:M_EMB_MEAN)
+         DO D = 1, SIZE(M_EMBEDDED_VALUES,2,KIND=INT64)
+            M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDED_VALUES(:,D) / REAL(SIZE(M_EMBEDDED_VALUES,2,KIND=INT64),RT)
          END DO
-         SCALAR = SQRT(SCALAR)
-         IF (SCALAR .GT. 0.0_RT) THEN
-            M_EMBEDDINGS(:,:) = M_EMBEDDINGS(:,:) / SCALAR
-         END IF
+         ! Update the embeddings center (and in turn the shift).
+         M_EMBEDDINGS_MEAN(:) = &
+              (1.0_RT - CONFIG%STEP_EMB_CHANGE) * M_EMBEDDINGS_MEAN(:) + &
+              (         CONFIG%STEP_EMB_CHANGE) * M_EMB_MEAN(:)
+         ! Compute the difference between the current mean and target mean.
+         M_EMB_MEAN(:) = M_EMBEDDINGS_MEAN(:) - M_EMB_MEAN(:)
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+         DO D = 1, SIZE(M_EMBEDDINGS,1,KIND=INT64)
+            M_EMBEDDINGS(D,:) = M_EMBEDDINGS(D,:) - M_EMB_MEAN(D)
+         END DO
+         ! Update the scale so the max length of any single embedding is 1.
+         ! TODO: Add variance calculation to the embeddings, scale so variance is 1.
+         M_EMB_MEAN(:) = 0.0_RT
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:M_EMB_MEAN)
+         DO D = 1, SIZE(M_EMBEDDED_VALUES,2,KIND=INT64)
+            M_EMB_MEAN(:) = M_EMB_MEAN(:) + M_EMBEDDED_VALUES(:,D)**2 / REAL(SIZE(M_EMBEDDED_VALUES,2,KIND=INT64),RT)
+         END DO
+         WHERE ((.NOT. IS_FINITE(M_EMB_MEAN(:))) .OR. IS_NAN(M_EMB_MEAN(:)))
+            M_EMB_MEAN(:) = 1.0_RT
+         END WHERE
+         M_EMB_MEAN(:) = SQRT(MAX(M_EMB_MEAN(:), SQRT(EPSILON(0.0_RT))))
+         M_EMB_MEAN(:) = MAX(M_EMB_MEAN(:), 0.1_RT)
+         !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS)
+         DO D = 1, CONFIG%MNE
+            M_EMBEDDINGS(:,D) = &
+                 (1.0_RT - CONFIG%STEP_EMB_CHANGE) * M_EMBEDDINGS(:,D) &
+                 + (CONFIG%STEP_EMB_CHANGE       ) * M_EMBEDDINGS(:,D) / M_EMB_MEAN(:)
+         END DO
+         DEALLOCATE(M_EMB_MEAN)
       END IF
     END SUBROUTINE UNIT_MAX_NORM
 
@@ -3400,19 +3440,10 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT) :: SUM_SQUARED_ERROR
     INTEGER(KIND=INT32), INTENT(OUT) :: INFO
     ! Local variables.
-    !    "backspace" character array for printing to the same line repeatedly
-    CHARACTER(LEN=*), PARAMETER :: RESET_LINE = REPEAT(CHAR(8),31)
     !    temporary holders for overwritten CONFIG attributes
-    LOGICAL(KIND=C_BOOL), SAVE :: NORMALIZE
-    INTEGER(KIND=INT32), SAVE :: NUM_THREADS
-    !    miscellaneous (hard to concisely categorize)
-    INTEGER(KIND=INT64), SAVE :: STEP, BATCH, MIN_TO_UPDATE, CURRENT_TIME, LAST_INTERRUPT_TIME, WAIT_TIME
-    INTEGER(KIND=INT32), SAVE :: TOTAL_RANK, TOTAL_EVAL_RANK, TOTAL_GRAD_RANK
-    REAL(KIND=RT), SAVE :: MSE, PREV_MSE, BEST_MSE, STEP_MEAN_REMAIN, STEP_CURV_REMAIN
-    INTEGER(KIND=INT64), SAVE :: D, I, S, T
-    INTEGER(KIND=INT64), SAVE :: BE, BS, BT, NA, NM, NMS, NS, NT, SE, SS, TN, TT, VE, VS
-    INTEGER(KIND=INT64), SAVE :: BEA, BSA
     LOGICAL(KIND=C_BOOL) :: CONTINUING_FIT
+    !    miscellaneous (hard to concisely categorize)
+    INTEGER(KIND=INT64) :: D, I, BE, BS, BT, NA, NM, SE, SS, TN, TT, BEA, BSA, BATCH, CURRENT_TIME
     ! Batching.
     INTEGER(KIND=INT64), SAVE, DIMENSION(:), ALLOCATABLE :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -3425,9 +3456,7 @@ CONTAINS
     ! Set whether or not we are resuming a previous call.
     CONTINUING_FIT = .FALSE.
     IF (PRESENT(CONTINUING)) THEN
-       IF (CONTINUING) THEN
-          CONTINUING_FIT = .TRUE.
-       END IF
+       CONTINUING_FIT = CONTINUING
     END IF
     ! 
     ! TODO: For deciding which points to keep when doing batching:
@@ -3578,32 +3607,32 @@ CONTAINS
       ! 
       ! Store the start time of this routine (to make sure updates can
       !  be shown to the user at a reasonable frequency).
-      CALL SYSTEM_CLOCK(LAST_INTERRUPT_TIME, CLOCK_RATE, CLOCK_MAX)
+      CALL SYSTEM_CLOCK(CONFIG%FIT_LAST_INTERRUPT_TIME, CLOCK_RATE, CLOCK_MAX)
       IF (.NOT. CONTINUING_FIT) THEN
          ! Establis the amount of time to wait between print.
-         WAIT_TIME = CLOCK_RATE * CONFIG%INTERRUPT_DELAY_SEC
+         CONFIG%FIT_WAIT_TIME = CLOCK_RATE * CONFIG%INTERRUPT_DELAY_SEC
          ! Initialize the info / error code to 0.
          INFO = 0
          ! Cap the "number [of variables] to update" at the model size.
          CONFIG%NUM_TO_UPDATE = MAX(ONE, MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
          ! Set the "total rank", the number of internal state components.
-         TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
+         CONFIG%FIT_TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
          ! Compute the minimum number of model variables to update.
-         MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
+         CONFIG%FIT_MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
          ! Set the initial "number of steps taken since best" counter.
-         NS = 0
+         CONFIG%FIT_NS = 0
          ! Set the "num threads" to be the maximum achievable data parallelism.
-         NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
+         CONFIG%FIT_NT = MIN(SIZE(Y,2,KIND=INT64), CONFIG%NUM_THREADS)
          ! Initial rates of change of mean and variance values.
-         STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
-         STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
+         CONFIG%FIT_STEP_MEAN_REMAIN = 1.0_RT - CONFIG%STEP_MEAN_CHANGE
+         CONFIG%FIT_STEP_CURV_REMAIN = 1.0_RT - CONFIG%STEP_CURV_CHANGE
          ! Initial mean squared error is "max representable value".
-         PREV_MSE = HUGE(PREV_MSE)
-         BEST_MSE = HUGE(BEST_MSE)
+         CONFIG%FIT_PREV_MSE = HUGE(CONFIG%FIT_PREV_MSE)
+         CONFIG%FIT_BEST_MSE = HUGE(CONFIG%FIT_BEST_MSE)
          ! Set the initial curvature values for the model gradient.
          MODEL_GRAD_CURV(:) = CONFIG%INITIAL_CURV_ESTIMATE
          ! Disable the application of SHIFT (since data is / will be normalized).
-         NORMALIZE = CONFIG%NORMALIZE
+         CONFIG%FIT_NORMALIZE = CONFIG%NORMALIZE
          CONFIG%NORMALIZE = .FALSE.
          ! Initialize the aggregate iterators.
          !  TODO: Move this code into data fetching, shouldn't happen here.
@@ -3664,11 +3693,12 @@ CONTAINS
               A_OUT_VECS, A_STATES, AY, INFO)
          IF (INFO .NE. 0) RETURN
          ! Set the initial value of STEP.
-         STEP = 1
+         CONFIG%FIT_STEP = 1
          ! Write the status update to the command line.
          CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
-         IF (CURRENT_TIME - LAST_INTERRUPT_TIME .GT. WAIT_TIME) THEN
-            LAST_INTERRUPT_TIME = CURRENT_TIME
+         IF (CURRENT_TIME - CONFIG%FIT_LAST_INTERRUPT_TIME &
+              .GT. CONFIG%FIT_WAIT_TIME) THEN
+            CONFIG%FIT_LAST_INTERRUPT_TIME = CURRENT_TIME
             RETURN
          END IF
       END IF
@@ -3679,7 +3709,7 @@ CONTAINS
       !                    Minimizing mean squared error
       ! 
       ! Iterate, taking steps with the average gradient over all data.
-      fit_loop : DO WHILE (STEP .LE. STEPS)
+      fit_loop : DO WHILE (CONFIG%FIT_STEP .LE. STEPS)
          ! TODO: Consider wrapping the embed, evaluate, model gradient code in
          !       a higher level thread block to include parallelization over
          !       larger scopes. Will have to be done after the batch is constructed.
@@ -3705,7 +3735,7 @@ CONTAINS
             IF (INFO .NE. 0) RETURN
             ! If we are checking rank, we need to store evaluations separately from gradients.
             IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
-               IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
+               IF (MOD(CONFIG%FIT_STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
                   A_STATES(:NA,:,:) = A_GRADS(:NA,:,:)
                   AY(:NA,:) = AY_GRADIENT(:NA,:)
                   X(:,:NM) = X_GRADIENT(:,:NM)
@@ -3749,8 +3779,8 @@ CONTAINS
             TT = CONFIG%NUM_THREADS
             CONFIG%NUM_THREADS = 1
             SUM_SQUARED_ERROR = 0.0_RT
-            !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(BATCH, BS, BE, BT, SS, SE, BSA, BEA, TN) &
-            !$OMP& REDUCTION(+:SUM_SQUARED_ERROR) IF(NT > 1)
+            !$OMP PARALLEL DO NUM_THREADS(CONFIG%FIT_NT) PRIVATE(BATCH, BS, BE, BT, SS, SE, BSA, BEA, TN) &
+            !$OMP& REDUCTION(+:SUM_SQUARED_ERROR) IF(CONFIG%FIT_NT > 1)
             DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
                IF (INFO .NE. 0) CYCLE
                BS = BATCHM_STARTS(BATCH)
@@ -3797,7 +3827,7 @@ CONTAINS
                     X_GRADIENT(:,BS:BE), Y_GRADIENT(:,BS:BE), A_GRADS(BSA:BEA,:,:), M_GRADS(BS:BE,:,:), INFO)
                ! Copy the state values into holders if rank checking or condintioning will be done.
                IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN
-                  IF (MOD(STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
+                  IF (MOD(CONFIG%FIT_STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN
                      A_STATES(BSA:BEA,:,:) = A_GRADS(BSA:BEA,:,:)
                      AY(BSA:BEA,:) = AY_GRADIENT(BSA:BEA,:)
                      X(:,BS:BE) = X_GRADIENT(:,BS:BE)
@@ -3839,12 +3869,12 @@ CONTAINS
          ! 
          CALL ADJUST_RATES(BEST_MODEL, MODEL_GRAD_MEAN(:), MODEL_GRAD_CURV(:))
          IF (INFO .NE. 0) RETURN
-         IF (NS .EQ. HUGE(NS)) EXIT fit_loop
+         IF (CONFIG%FIT_NS .EQ. HUGE(CONFIG%FIT_NS)) EXIT fit_loop
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !              Modify the model variables (take step).
          ! 
-         CALL STEP_VARIABLES(MODEL_GRAD(:,1:NT), MODEL_GRAD_MEAN(:), &
-              MODEL_GRAD_CURV(:), UPDATE_INDICES(:), NT)
+         CALL STEP_VARIABLES(MODEL_GRAD(:,1:CONFIG%FIT_NT), MODEL_GRAD_MEAN(:), &
+              MODEL_GRAD_CURV(:), UPDATE_INDICES(:), CONFIG%FIT_NT)
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !  Project the model parameters back into a safely constrained region.
          ! 
@@ -3863,7 +3893,7 @@ CONTAINS
                     A_LENGTHS(:,:), M_LENGTHS(:,:), & ! Work space for orthogonalization.
                     A_STATE_TEMP(:,:), M_STATE_TEMP(:,:), & ! Work space for state values.
                     A_ORDER(:,:), M_ORDER(:,:), &
-                    TOTAL_EVAL_RANK, TOTAL_GRAD_RANK)
+                    CONFIG%FIT_TOTAL_EVAL_RANK, CONFIG%FIT_TOTAL_GRAD_RANK)
             END IF
          END IF
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3871,16 +3901,16 @@ CONTAINS
          ! step and convergence to the command line.
          CALL RECORD_STATS(MODEL_GRAD)
          ! Update the step.
-         STEP = STEP + 1
+         CONFIG%FIT_STEP = CONFIG%FIT_STEP + 1
          ! Write the status update to the command line.
          CALL SYSTEM_CLOCK(CURRENT_TIME, CLOCK_RATE, CLOCK_MAX)
-         IF (CURRENT_TIME - LAST_INTERRUPT_TIME .GT. WAIT_TIME) THEN
-            LAST_INTERRUPT_TIME = CURRENT_TIME
+         IF (CURRENT_TIME - CONFIG%FIT_LAST_INTERRUPT_TIME .GT. CONFIG%FIT_WAIT_TIME) THEN
+            CONFIG%FIT_LAST_INTERRUPT_TIME = CURRENT_TIME
             EXIT fit_loop
          END IF
       END DO fit_loop
       ! Only preform the encoding if the fit is complete.
-      IF (STEP .GT. STEPS) THEN
+      IF (CONFIG%FIT_STEP .GT. STEPS) THEN
          CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
          CALL CPU_TIME(CPU_TIME_START)
          ! 
@@ -3889,7 +3919,7 @@ CONTAINS
          ! 
          ! Restore the best model seen so far (if enough steps were taken).
          IF (CONFIG%KEEP_BEST .AND. (STEPS .GT. 0)) THEN
-            MSE      = BEST_MSE
+            CONFIG%FIT_MSE = CONFIG%FIT_BEST_MSE
             MODEL(:) = BEST_MODEL(:)
          END IF
          ! 
@@ -3933,7 +3963,7 @@ CONTAINS
          END IF
          ! 
          ! Reset configuration settings that were modified.
-         CONFIG%NORMALIZE = NORMALIZE
+         CONFIG%NORMALIZE = CONFIG%FIT_NORMALIZE
          CALL CPU_TIME(CPU_TIME_END)
          CALL SYSTEM_CLOCK(WALL_TIME_END, CLOCK_RATE, CLOCK_MAX)
          !$OMP CRITICAL
@@ -3954,19 +3984,19 @@ CONTAINS
       CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
       CALL CPU_TIME(CPU_TIME_START)
       ! Convert the sum of squared errors into the mean squared error.
-      MSE = SUM_SQUARED_ERROR / REAL(CONFIG%NMS * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
-      IF (IS_NAN(MSE) .OR. (.NOT. IS_FINITE(MSE))) THEN
+      CONFIG%FIT_MSE = SUM_SQUARED_ERROR / REAL(CONFIG%NMS * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
+      IF (IS_NAN(CONFIG%FIT_MSE) .OR. (.NOT. IS_FINITE(CONFIG%FIT_MSE))) THEN
          INFO = 30 ! Encountered NaN or Inf mean squared error during fitting, this should not happen. Are any values extremely large?
          RETURN
       END IF
       ! Adjust exponential sliding windows based on change in error.
-      IF (MSE .LE. PREV_MSE) THEN
+      IF (CONFIG%FIT_MSE .LE. CONFIG%FIT_PREV_MSE) THEN
          CONFIG%STEP_FACTOR = MIN(CONFIG%STEP_FACTOR * CONFIG%FASTER_RATE, CONFIG%MAX_STEP_FACTOR)
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_TO_UPDATE + &
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
          ! TODO: Should the mean and curvature adjustment rates be updated too?
       ! If the MSE has gotten too large, then do a reset of the model fit process from the previous best.
-      ELSE IF (MSE .GT. CONFIG%MSE_UPPER_LIMIT) THEN
+      ELSE IF (CONFIG%FIT_MSE .GT. CONFIG%MSE_UPPER_LIMIT) THEN
          CONFIG%STEP_FACTOR = CONFIG%MIN_STEP_FACTOR
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_VARS
          MODEL(:) = BEST_MODEL(:)
@@ -3980,22 +4010,23 @@ CONTAINS
          ! TODO: Should the mean and curvature adjustment rates be updated too?
       END IF
       ! Project the number of variables to update into allowable bounds.
-      CONFIG%NUM_TO_UPDATE = MIN(CONFIG%NUM_VARS, MAX(MIN_TO_UPDATE, CONFIG%NUM_TO_UPDATE))
+      CONFIG%NUM_TO_UPDATE = MIN(CONFIG%NUM_VARS, MAX(CONFIG%FIT_MIN_TO_UPDATE, CONFIG%NUM_TO_UPDATE))
       ! Store the previous error for tracking the best-so-far.
-      PREV_MSE = MSE
+      CONFIG%FIT_PREV_MSE = CONFIG%FIT_MSE
       ! Update the step number.
-      NS = NS + 1
+      CONFIG%FIT_NS = CONFIG%FIT_NS + 1
       ! Update the saved "best" model based on error.
-      IF ((MSE .LT. BEST_MSE) .AND. (CONFIG%STEPS_TAKEN .GE. CONFIG%MIN_STEPS_TO_STABILITY)) THEN
-         NS = 0
-         BEST_MSE = MSE
+      IF ((CONFIG%FIT_MSE .LT. CONFIG%FIT_BEST_MSE) .AND. &
+           (CONFIG%STEPS_TAKEN .GE. CONFIG%MIN_STEPS_TO_STABILITY)) THEN
+         CONFIG%FIT_NS = 0
+         CONFIG%FIT_BEST_MSE = CONFIG%FIT_MSE
          IF (CONFIG%KEEP_BEST) THEN
             BEST_MODEL(:) = MODEL(:)
          END IF
       ! Early stop if we don't expect to see a better solution
       !  by the time the fit operation is complete.
-      ELSE IF (CONFIG%EARLY_STOP .AND. (NS .GT. STEPS - STEP)) THEN
-         NS = HUGE(NS)
+      ELSE IF (CONFIG%EARLY_STOP .AND. (CONFIG%FIT_NS .GT. STEPS - CONFIG%FIT_STEP)) THEN
+         CONFIG%FIT_NS = HUGE(CONFIG%FIT_NS)
       END IF
       ! Record the end of the total time.
       CALL CPU_TIME(CPU_TIME_END)
@@ -4030,14 +4061,14 @@ CONTAINS
          ! Aggregate over computed batches and compute average gradient.
          MODEL_GRAD(S:E,1) = SUM(MODEL_GRAD(S:E,:),2) / REAL(NB,RT)
          ! Mean.
-         MODEL_GRAD_MEAN(S:E) = STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(S:E) &
+         MODEL_GRAD_MEAN(S:E) = CONFIG%FIT_STEP_MEAN_REMAIN * MODEL_GRAD_MEAN(S:E) &
               + CONFIG%STEP_MEAN_CHANGE * MODEL_GRAD(S:E,1)
          ! Clip the mean to be small enough to be numerically stable.
          WHERE (ABS(MODEL_GRAD_MEAN(S:E)) .GT. CONFIG%MAX_STEP_COMPONENT)
             MODEL_GRAD_MEAN(S:E) = SIGN(CONFIG%MAX_STEP_COMPONENT, MODEL_GRAD_MEAN(S:E))
          END WHERE
          ! Curvature.
-         MODEL_GRAD_CURV(S:E) = STEP_CURV_REMAIN * MODEL_GRAD_CURV(S:E) &
+         MODEL_GRAD_CURV(S:E) = CONFIG%FIT_STEP_CURV_REMAIN * MODEL_GRAD_CURV(S:E) &
               + CONFIG%STEP_CURV_CHANGE * (MODEL_GRAD_MEAN(S:E) - MODEL_GRAD(S:E,1))**2
          ! Clip the curvature to be large enough to be numerically stable.
          WHERE (MODEL_GRAD_CURV(S:E) .LT. CONFIG%MIN_CURV_COMPONENT)
@@ -4050,7 +4081,7 @@ CONTAINS
          ! Set the step as the mean direction (over the past few steps).
          MODEL_GRAD(S:E,1) = MODEL_GRAD_MEAN(S:E)
          ! Start scaling by step magnitude by curvature once enough data is collected.
-         IF (STEP .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
+         IF (CONFIG%FIT_STEP .GE. CONFIG%MIN_STEPS_TO_STABILITY) THEN
             MODEL_GRAD(S:E,1) = MODEL_GRAD(S:E,1) / SQRT(MODEL_GRAD_CURV(S:E))
          END IF
          IF (CONFIG%NUM_TO_UPDATE .EQ. CONFIG%NUM_VARS) THEN
@@ -4088,23 +4119,23 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(:,:) :: MODEL_GRAD
       IF (PRESENT(RECORD)) THEN
          ! Store the mean squared error at this iteration.
-         RECORD(1,STEP) = MSE
+         RECORD(1,CONFIG%FIT_STEP) = CONFIG%FIT_MSE
          ! Store the current multiplier on the step.
-         RECORD(2,STEP) = CONFIG%STEP_FACTOR
+         RECORD(2,CONFIG%FIT_STEP) = CONFIG%STEP_FACTOR
          ! Store the norm of the step that was taken (intermittently).
          IF ((CONFIG%LOG_GRAD_NORM_FREQUENCY .GT. 0) .AND. &
               (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%LOG_GRAD_NORM_FREQUENCY) .EQ. 0)) THEN
-            RECORD(3,STEP) = SQRT(MAX(EPSILON(0.0_RT), SUM(MODEL_GRAD(:,1)**2))) / SQRT(REAL(CONFIG%NUM_VARS,RT))
+            RECORD(3,CONFIG%FIT_STEP) = SQRT(MAX(EPSILON(0.0_RT), SUM(MODEL_GRAD(:,1)**2))) / SQRT(REAL(CONFIG%NUM_VARS,RT))
          ELSE
-            RECORD(3,STEP) = RECORD(3,STEP-1)
+            RECORD(3,CONFIG%FIT_STEP) = RECORD(3,CONFIG%FIT_STEP-1)
          END IF
          ! Store the percentage of variables updated in this step.
-         RECORD(4,STEP) = REAL(CONFIG%NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
-         IF (TOTAL_RANK .GT. 0) THEN
+         RECORD(4,CONFIG%FIT_STEP) = REAL(CONFIG%NUM_TO_UPDATE,RT) / REAL(CONFIG%NUM_VARS)
+         IF (CONFIG%FIT_TOTAL_RANK .GT. 0) THEN
             ! Store the evaluative utilization rate (total data rank over full rank)
-            RECORD(5,STEP) = REAL(TOTAL_EVAL_RANK,RT) / REAL(TOTAL_RANK,RT)
+            RECORD(5,CONFIG%FIT_STEP) = REAL(CONFIG%FIT_TOTAL_EVAL_RANK,RT) / REAL(CONFIG%FIT_TOTAL_RANK,RT)
             ! Store the gradient utilization rate (total gradient rank over full rank)
-            RECORD(6,STEP) = REAL(TOTAL_GRAD_RANK,RT) / REAL(TOTAL_RANK,RT)
+            RECORD(6,CONFIG%FIT_STEP) = REAL(CONFIG%FIT_TOTAL_GRAD_RANK,RT) / REAL(CONFIG%FIT_TOTAL_RANK,RT)
          END IF
       END IF
     END SUBROUTINE RECORD_STATS

@@ -349,7 +349,9 @@ def mse_and_time(details, end="\r", flush=True, history=[], **print_kwargs):
 
 
 # Track "history" so that each step can be visualized.
-def visualize_training_geometries(details=None, history=[]):
+def visualize_training_geometries(details=None, history=[], steps=200, max_points=1000):
+    # TODO: Use well spaced sample of points instead of all of them when there are a lot.
+    # 
     # If details were given, then store them and do a typical MSE and time update.
     if details is not None:
         details_kwargs = dict(
@@ -369,17 +371,26 @@ def visualize_training_geometries(details=None, history=[]):
     # Plot the history.
     elif len(history) > 0:
         import tqdm
+        import random
         from tlux.plot import Plot
         from tlux.math import svd
         # 
         # Construct the projections for the "ax", "ay", "x", and "y" data based on final values.
+        print("history[-1].ax.T.shape: ", history[-1].ax.T.shape, flush=True)
         _, ax_projection = svd(history[-1].ax.T)
-        _, ay_projection = svd(history[-1].ay.T)
+        print("history[-1].ay.shape: ", history[-1].ay.shape, flush=True)
+        _, ay_projection = svd(history[-1].ay)
+        print("history[-1].x.T.shape: ", history[-1].x.T.shape, flush=True)
         _, x_projection = svd(history[-1].x.T)
+        print("history[-1].y.T.shape: ", history[-1].y.T.shape, flush=True)
         _, y_projection = svd(history[-1].y.T)
+        print("history[-1].a_embeddings.T.shape: ", history[-1].a_embeddings.T.shape, flush=True)
         _, a_emb_projection = svd(history[-1].a_embeddings.T)
+        print("history[-1].m_embeddings.T.shape: ", history[-1].m_embeddings.T.shape, flush=True)
         _, m_emb_projection = svd(history[-1].m_embeddings.T)
+        print("history[-1].o_embeddings.T.shape: ", history[-1].o_embeddings.T.shape, flush=True)
         _, o_emb_projection = svd(history[-1].o_embeddings.T)
+        # 
         # Function for projecting data given the projection matrix.
         def project(row_vecs, projection_vecs, dim=2):
             # Compute the principal components via a singular value decomposition.
@@ -387,14 +398,29 @@ def visualize_training_geometries(details=None, history=[]):
             # Add 0's to the end if the projection was not enough.
             if (dim > row_vecs.shape[1]):
                 row_vecs = np.concatenate((row_vecs, np.zeros((row_vecs.shape[0], dim - row_vecs.shape[1]))), axis=1)
-            return row_vecs
+            if (row_vecs.shape[0] <= max_points):
+                return row_vecs
+            else:
+                return row_vecs[random.sample(range(row_vecs.shape[0]), max_points)]
         # 
-        # First, plot the data over time.
+        # Plot the data over iterations.
         p = Plot("Data")
+        frames = []
+        mean_values = {"ax":[], "x":[], "y":[]}
+        var_values = {"ax":[], "x":[], "y":[]}
         for i,d in tqdm.tqdm(enumerate(history), total=len(history)):
-            if ((i % max(1, len(history) // 1000)) == 0):
+            if ((i % max(1, len(history) // steps)) == 0):
+                # Collect data on means and variances.
+                frames.append(i)
+                mean_values["ax"].append(d.ax.mean(axis=1))
+                mean_values["x"].append(d.x.mean(axis=1))
+                mean_values["y"].append(d.y.mean(axis=1))
+                var_values["ax"].append(d.ax.var(axis=1))
+                var_values["x"].append(d.x.var(axis=1))
+                var_values["y"].append(d.y.var(axis=1))
+                # Add to raw data plot.
                 p.add("ax", *project(d.ax.T, ax_projection).T, group="ax", frame=i)
-                p.add("ay", *project(d.ay.T, ay_projection).T, group="ay", frame=i)
+                p.add("ay", *project(d.ay, ay_projection).T, group="ay", frame=i)
                 p.add("x", *project(d.x.T, x_projection).T, group="x", frame=i)
                 p.add("y", *project(d.y.T, y_projection).T, group="y", frame=i)
                 if (a_emb_projection.size > 0):
@@ -403,6 +429,16 @@ def visualize_training_geometries(details=None, history=[]):
                     p.add("m emb", *project(d.m_embeddings.T, m_emb_projection).T, group="m emb", frame=i)
                 if (o_emb_projection.size > 0):
                     p.add("o emb", *project(d.o_embeddings.T, o_emb_projection).T, group="o emb", frame=i)
+        # Plot the mean and variance values over time.
+        print("mean_values['x'][0].shape: ", mean_values['x'][0].shape, flush=True)
+        from util.stats.plotting import plot_percentiles
+        pmv = Plot("Means")
+        pvv = Plot("Variances")
+        for i, key in enumerate(("ax", "x", "y")):
+            plot_percentiles(pmv, key, frames, mean_values[key], color=i)
+            plot_percentiles(pvv, key, frames, var_values[key], color=i)
+        pmv.show(append=True)
+        pvv.show(append=True)
         p.show(append=True)
         # Clear history now that we have used its contents and do not need them anymore.
         history.clear()
