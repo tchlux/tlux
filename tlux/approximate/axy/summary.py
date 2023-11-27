@@ -19,6 +19,7 @@ class AxyModel:
         self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
         self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, order="F")
         self.ay_shift      = self.model[self.config.aoss-1:self.config.aose].reshape(self.config.ado, order="F")
+        self.ay_scale      = self.model[self.config.aoms-1:self.config.aome].reshape(self.config.ado, order="F")
         self.x_shift       = self.model[self.config.miss-1:self.config.mise].reshape(self.config.mdn, order="F")
         self.x_rescale     = self.model[self.config.mims-1:self.config.mime].reshape(self.config.mdn, self.config.mdn, order="F")
         self.m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
@@ -199,6 +200,7 @@ class Details(dict):
             ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
             ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
             ay_shift = model[config.aoss-1:config.aose].reshape(config.ado, order="F"),
+            ay_scale = model[config.aoms-1:config.aome].reshape(config.ado, order="F"),
             x_shift = model[config.miss-1:config.mise].reshape(config.mdn, order="F"),
             x_rescale = model[config.mims-1:config.mime].reshape(config.mdn, config.mdn, order="F"),
             y_shift = model[config.moss-1:config.mose].reshape(config.do-config.doe, order="F"),
@@ -209,6 +211,7 @@ class Details(dict):
             model_grad_curv = rwork[config.smgc-1:config.emgc].reshape(config.num_vars, order="F"),
             best_model = rwork[config.sbm-1:config.ebm].reshape(config.total_size, order="F"),
             ax = rwork[config.saxb-1:config.eaxb].reshape(config.adi, config.na, order="F"),
+            ax_gradient = rwork[config.sag-1:config.eag].reshape(config.adi, config.na, order="F"),
             a_emb_temp = rwork[config.saet-1:config.eaet].reshape(config.ade, config.ane, config.num_threads, order="F"),
             a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, order="F"),
             a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
@@ -274,6 +277,7 @@ class Details(dict):
             f"  ax_shift:         {self.ax_shift.shape}\n"+\
             f"  ax_rescale:       {self.ax_rescale.shape}\n"+\
             f"  ay_shift:         {self.ay_shift.shape}\n"+\
+            f"  ay_scale:         {self.ay_scale.shape}\n"+\
             f"  x_shift:          {getattr(self.x_shift, 'shape', None)}\n"+\
             f"  x_rescale:        {self.x_rescale.shape}\n"+\
             f"  y_shift:          {self.y_shift.shape}\n"+\
@@ -379,7 +383,10 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
         print("history[-1].ax.T.shape: ", history[-1].ax.T.shape, flush=True)
         _, ax_projection = svd(history[-1].ax.T)
         print("history[-1].ay.shape: ", history[-1].ay.shape, flush=True)
-        _, ay_projection = svd(history[-1].ay)
+        # Update the historical element AY to be shifted by the mean.
+        ay = history[-1].ay.copy()
+        ay[:,:-1] = (ay[:,:-1] - history[-1].ay_shift[:]) * history[-1].ay_scale[:]
+        _, ay_projection = svd(ay)
         print("history[-1].x.T.shape: ", history[-1].x.T.shape, flush=True)
         _, x_projection = svd(history[-1].x.T)
         print("history[-1].y.T.shape: ", history[-1].y.T.shape, flush=True)
@@ -420,7 +427,9 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
                 var_values["y"].append(d.y.var(axis=1))
                 # Add to raw data plot.
                 p.add("ax", *project(d.ax.T, ax_projection).T, group="ax", frame=i)
-                p.add("ay", *project(d.ay, ay_projection).T, group="ay", frame=i)
+                ay = d.ay.copy()
+                ay[:,:-1] = (ay[:,:-1] - d.ay_shift[:]) * d.ay_scale[:]
+                p.add("ay", *project(ay, ay_projection).T, group="ay", frame=i)
                 p.add("x", *project(d.x.T, x_projection).T, group="x", frame=i)
                 p.add("y", *project(d.y.T, y_projection).T, group="y", frame=i)
                 if (a_emb_projection.size > 0):

@@ -425,7 +425,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         # If there is a following model..
         if (config.mdo > 0):
             # Apply output shift.
-            ay[:,:] = (ay + m.ay_shift)
+            ay[:,:] = (ay - m.ay_shift) * m.ay_scale
             # Compute the first aggregator output embedding position.
             e = config.mdn + config.mde
             # Set the aggregator output to be a slice of X.
