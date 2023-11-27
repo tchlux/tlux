@@ -519,12 +519,12 @@ def _test_evaluate():
         evaluation["m_states"] = evaluation["m_states"][:,:,:-1]
         # Evaluate with python.
         py = py_evaluate(config, model, **eval_kwargs)
-        for key in ("a_states", "ay", "m_states", "y"):
+        for key in ("a_states", "ay", "x", "m_states", "y"):
             if (evaluation[key].size == 0): continue
             maxind = np.argmax(np.abs(evaluation[key] - py[key]))
             maxdiff = np.max(np.abs(evaluation[key] - py[key]))
             scenario_string = "{\n  " + ",\n  ".join((f"{repr(k)}: {v}" for (k,v) in scenario_copy.items())) + "\n}"
-            assert maxdiff < (2**(-13)), f"ERROR: Failed comparison between Fortran and Python implementations of AXY.evaluate for key '{key}'.\n  Max difference observed was at {maxind}, {maxdiff}.\n  fort:\n{evaluation[key]}\n  python:\n{py[key]}\n  Summary of situation:\n\n{summary}\n\nscenario = {scenario_string}"
+            assert maxdiff < (2**(-13)), f"ERROR: Failed comparison between Fortran and Python implementations of AXY.evaluate for key '{key}'.\n  Max difference observed was at {maxind}, {maxdiff}.\n  fort:\n{evaluation[key]}\n  python:\n{py[key]}\n\n  Summary of situation:\n\n{summary}\n\nscenario = {scenario_string}"
     # End of for loop.
     print(" passed")
 
@@ -995,6 +995,7 @@ def _test_normalize_data(dimension=64, show=False):
         axi_shift = np.zeros((config.ade,), dtype="float32", order="F")
         axi_rescale = np.zeros((config.ade,config.ade), dtype="float32", order="F")
         ay_shift = np.zeros((config.ado,), dtype="float32", order="F")
+        ay_scale = np.zeros((config.ado,), dtype="float32", order="F")
         x_shift = np.zeros((config.mdn,), dtype="float32", order="F")
         x_rescale = np.zeros((config.mdn,config.mdn), dtype="float32", order="F")
         xi_shift = np.zeros((config.mde,), dtype="float32", order="F")
@@ -1034,7 +1035,7 @@ def _test_normalize_data(dimension=64, show=False):
             config, model, agg_iterators,
             ax_in, x_in, y_in, yw_in,
             ax, axi, sizes, x, xi, y, yi, yw,
-            ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
+            ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift, ay_scale,
             x_shift, x_rescale, xi_shift, xi_rescale,
             y_shift, y_rescale, yi_shift, yi_rescale,
             a_emb_vecs, m_emb_vecs, o_emb_vecs,
@@ -1044,7 +1045,7 @@ def _test_normalize_data(dimension=64, show=False):
             config, model, agg_iterators,
             ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yi_in, yw_in,
             ax, axi, sizes, x, xi, y, yi, yw,
-            ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift,
+            ax_shift, ax_rescale, axi_shift, axi_rescale, ay_shift, ay_scale,
             x_shift, x_rescale, xi_shift, xi_rescale,
             y_shift, y_rescale, yi_shift, yi_rescale,
             a_emb_vecs, m_emb_vecs, o_emb_vecs,

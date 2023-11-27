@@ -424,8 +424,6 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         ay = ay[:,:config.ado] # strip off +1 for error prediction
         # If there is a following model..
         if (config.mdo > 0):
-            # Apply output shift.
-            ay[:,:] = (ay - m.ay_shift) * m.ay_scale
             # Compute the first aggregator output embedding position.
             e = config.mdn + config.mde
             # Set the aggregator output to be a slice of X.
@@ -442,8 +440,10 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
                 a_end = a_start + s
                 f_end = f_start + max(1,s)
                 for out_i, agg_i in zip(range(f_end-1, f_start-1, -1), range(a_end-1, a_start-1, -1)):
-                    num_elements = a_end - agg_i
-                    agg_out[:,out_i] = ay[agg_i:a_end,:config.ado].sum(axis=0) / num_elements
+                    agg_out[:,out_i] = ay[agg_i:a_end,:config.ado].mean(axis=0)
+                    if (config.mdo > 0):
+                        # Apply output shift and scale.
+                        agg_out[:,out_i] = (agg_out[:,out_i] - m.ay_shift) * m.ay_scale
                 # When there is no size, a zero value is assigned.
                 if (s == 0):
                     agg_out[:,f_end-1] = 0.0
@@ -456,6 +456,9 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
             for i,s in enumerate(sizes):
                 if (s > 0):
                     agg_out[:,i] = ay[a:a+s,:config.ado].sum(axis=0) / s
+                    if (config.mdo > 0):
+                        # Apply output shift and scale.
+                        agg_out[:,i] = (agg_out[:,i] - m.ay_shift) * m.ay_scale
                 else:
                     agg_out[:,i] = 0
                 a += s

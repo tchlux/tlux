@@ -78,7 +78,7 @@ def random_data(num_points, dimension, box=10, skew=lambda x: 1 * x**2 / sum(x**
     return np.asarray(data @ rotation), center, variance, rotation
 
 # Test function for visually checking the "radialize" function.
-def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=10, seed=0, precision=4):
+def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, seed=0, precision=4):
     print("radialize..", end=" ", flush=True)
     # Generate data to test with.
     np.random.seed(seed)
@@ -105,10 +105,14 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=10, seed
         xf -= shift
         # Use the provided shift and transform to repeate the radialization process.
         xrr = ((x + shift) @ transform).T
-        print("", flush=True)
-        print("i: ", i, flush=True)
-        print("  abs(x - xf).max():   ", abs(x - xf).mean(), flush=True)
-        print("  abs(xr - xrr).max(): ", abs(xr - xrr).mean(), flush=True)
+        # 
+        # print("", flush=True)
+        # print("i: ", i, flush=True)
+        # print("  abs(x - xf).max():   ", abs(x - xf).mean(), flush=True)
+        # print("  abs(xr - xrr).max(): ", abs(xr - xrr).mean(), flush=True)
+        # print("  min(inverse.norn):   ", np.linalg.norm(inverse,axis=1).min(), flush=True)
+        # print("  max(inverse.norn):   ", np.linalg.norm(inverse,axis=1).max(), flush=True)
+        # 
         # Plotting.
         if show:
             descriptor = 'radialized' if to_flatten else 'normalized'
@@ -116,9 +120,20 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=10, seed
             p.add(f"{i+1} {descriptor}", *xr, marker_size=3)
             p.add(f"{i+1} fixed", *xf.T, marker_size=3)
             p.add(f"{i+1} re {descriptor}", *xrr, marker_size=3)
-        # Validate the accuracy of the transformations.
-        assert (abs(x - xf).mean() < 10**(-precision)), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
-        assert (abs(xr - xrr).mean() < 10**(-precision)), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
+        # If the minimum norm of a vector is zero, then a component was lost due to
+        #  it being too small / close to degenerate. Those reconstructions will have
+        #  higher error standards, but are just skipped here (TODO: compute updated bound).
+        min_norm = np.linalg.norm(inverse,axis=1).min()
+        if (min_norm > 0):
+            # Validate the accuracy of the transformations.
+            assert (abs(x - xf).mean() < 10**(-precision)), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
+            assert (abs(xr - xrr).mean() < 10**(-precision)), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
+        else:
+            # Validate the accuracy of the transformations.
+            assert (abs(x - xf).mean() < 0.0002), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
+            assert (abs(xr - xrr).mean() < 0.0002), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
+
+
     # Plotting.
     if (show): p.show()
     # Finished.

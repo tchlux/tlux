@@ -1741,7 +1741,7 @@ CONTAINS
                       X(E:,FE-J) = (X(E:,FE) / REAL(J+ONE,KIND=RT) - AY_SHIFT(:)) * AY_SCALE(:)
                    END DO
                    ! Revert the running sum in the last position to just the first value.
-                   IF (SIZES(I) .GT. ONE) THEN
+                   IF (SIZES(I) .GT. ZERO) THEN
                       ! Apply zero-mean shift terms to aggregated model inputs.
                       X(E:,FE) = (AY(GE,:CONFIG%ADO) - AY_SHIFT(:)) * AY_SCALE(:)
                    END IF
@@ -3060,12 +3060,13 @@ CONTAINS
             AYX_MEAN(:) = 1.0_RT
          END WHERE
          AYX_MEAN(:) = SQRT(MAX(AYX_MEAN(:), SQRT(EPSILON(0.0_RT))))
+         AYX_MEAN(:) = AY_SCALE(:) / AYX_MEAN(:)
          IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
             AY_SCALE(:) = &
                    (1.0_RT - CONFIG%STEP_AY_CHANGE) * AY_SCALE(:) &
-                 + (CONFIG%STEP_AY_CHANGE         ) * (1.0_RT / AYX_MEAN(:))
+                 + (CONFIG%STEP_AY_CHANGE         ) * AYX_MEAN(:)
          ELSE
-            AY_SCALE(:) = (1.0_RT / AYX_MEAN(:))
+            AY_SCALE(:) = AYX_MEAN(:)
          END IF
          DEALLOCATE(AYX_MEAN)
       END IF

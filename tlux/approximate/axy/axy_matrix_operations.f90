@@ -382,7 +382,8 @@ CONTAINS
   !                     by the first (maximum) singular value.
   ! 
   !   MAXBOUND -- Optional input, TRUE to normalize by the first (maximum) singular value,
-  !               defaults to FALSE, to normalize so that the 2-norm of the data matrix is 1.
+  !               defaults to FALSE, to normalize so that the 2-norm of the data matrix is 1
+  !               while allowing singular values to be above and below one.
   ! 
   !   MAX_TO_SQUARE -- Optional, the integer maximum number of points (second component of X)
   !                    that will be considered for the routine (to bound compute for large data).

@@ -654,8 +654,8 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = True
-    use_x = False
+    use_a = False
+    use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -682,26 +682,27 @@ if __name__ == "__main__":
         steps = 1000,
         # nm = nm,
         # initial_curv_estimate = 1.0,
-        step_factor = 0.001,
-        faster_rate = 1.0,
-        slower_rate = 1.0,
+        # step_factor = 0.001,
+        # faster_rate = 1.0,
+        # slower_rate = 1.0,
         # faster_rate = 1.01,
         # slower_rate = 0.998,
         # min_update_ratio = 1.0,
         # max_step_factor = 0.005,
         # min_step_factor = 0.001,
-        num_threads = 1,
+        # num_threads = 1,
         # granular_parallelism = True,
-        step_ay_change=0.5,
+        # step_emb_change=0.01,
+        # step_ay_change=0.01,
         log_grad_norm_frequency = 1,
-        rank_check_frequency = 1,
+        # rank_check_frequency = 1,
         early_stop = False,
         # ax_normalized = True,
         # ay_normalized = True,
         # x_normalized = True,
         # y_normalized = True,
-        pairwise_aggregation = False,
-        partial_aggregation = False,
+        # pairwise_aggregation = True,
+        # partial_aggregation = True,
         # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,
@@ -928,32 +929,32 @@ if __name__ == "__main__":
         save_states=True
     )
 
-    print()
-    print("Plotting embeddings..")
-    from tlux.math import project
-    p = Plot("Data embeddings")
-    munpacked = m.unpack()
-    if (munpacked.a_embeddings.size > 0):
-        p.add("a-embs", *project(munpacked.a_embeddings.T, 3).T)
-    if (use_a):
-        p.add("ax", *project(m.states["ax"], 3).T)
-        p.add("ay", *project(m.states["ay"], 3).T)
-    if (munpacked.m_embeddings.size > 0):
-        p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
-    if (munpacked.o_embeddings.size > 0):
-        p.add("o-embs", *project(munpacked.o_embeddings.T, 3).T)
-    if (m.states["x"].size > 0):
-        p.add("x", *project(m.states["x"], 3).T)
-    if ((len(m.states["m_states"]) > 0) and (m.states["m_states"][-1].size > 0)):
-        p.add("m-last-state", *project(m.states["m_states"][-1], 3).T)
-    print()
+    # print()
+    # print("Plotting embeddings..")
+    # from tlux.math import project
+    # p = Plot("Data embeddings")
+    # munpacked = m.unpack()
+    # if (munpacked.a_embeddings.size > 0):
+    #     p.add("a-embs", *project(munpacked.a_embeddings.T, 3).T)
+    # if (use_a):
+    #     p.add("ax", *project(m.states["ax"], 3).T)
+    #     p.add("ay", *project(m.states["ay"], 3).T)
+    # if (munpacked.m_embeddings.size > 0):
+    #     p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
+    # if (munpacked.o_embeddings.size > 0):
+    #     p.add("o-embs", *project(munpacked.o_embeddings.T, 3).T)
+    # if (m.states["x"].size > 0):
+    #     p.add("x", *project(m.states["x"], 3).T)
+    # if ((len(m.states["m_states"]) > 0) and (m.states["m_states"][-1].size > 0)):
+    #     p.add("m-last-state", *project(m.states["m_states"][-1], 3).T)
+    # print()
 
 
     # Generate a visual for the training loss.
     print("Generating surface plot..")
     # Generate a visual of the loss function.
     if (len(getattr(globals().get("m",None), "record", [])) > 0):
-        p.show(append=True, show=False)
+        # p.show(append=True, show=False)
         print()
         print("Generating loss plot..")
         p = Plot("Mean squared error")
