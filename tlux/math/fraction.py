@@ -1,7 +1,9 @@
 # Fraction class that provides infinite-precision rational numbers
 # (making use of Python default arbitrarily large integers).
 
+# Import the standard library math module.
 from math import gcd
+
 class UsageError(Exception): pass
 
 # This class-operator wrapper automatially returns a `float` type if
@@ -349,5 +351,5 @@ if __name__ == "__main__":
     print()
     print("Testing Fraction..")
     _test_Fraction(display=False)
-    print("done.")
+    print(" done.")
     

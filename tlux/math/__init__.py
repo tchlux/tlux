@@ -1,18 +1,12 @@
-from tlux.math.fraction import Fraction
-from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
-from tlux.math.polynomial import fit as fit_spline
-from tlux.math.polynomial import polynomial as fit_polynomial
-
-# # Try using fmodpy to construct a Fortran wrapper over the `fmath.f90` library.
-# try:
-#     from .fmath import orthgonolize, svd
-# except ImportError:
-#     pass
 
 
 # If anything above fails, fall back to Python implementations.
 import numpy as np
 
+from tlux.math.fraction import Fraction
+from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
+from tlux.math.polynomial import fit as fit_spline
+from tlux.math.polynomial import polynomial as fit_polynomial
 
 # Given column vectors (in a 2D numpy array), orthogonalize and return
 #  the orthonormal vectors and the lengths of the orthogonal components.
@@ -142,3 +136,29 @@ def regular_simplex(d, volume=None):
         d -= 1
         edge_length = (volume*factorial(d))**(1/d) * ((d+1) / 2**d)**(-1/(2*d))
         return points * edge_length
+
+
+# Define a custom error for passing arrays of the wrong shape to pairwise.
+class ShapeError(Exception): pass
+
+# Compute the distance between all pairs of elements in a single list,
+# or the distance of all combined pairs between two lists.
+def pairwise_distance(x1, x2=None, diag=float('inf')):
+    # Define an error for having the wrong array shape.
+    if (len(x1.shape) != 2): raise(ShapeError("Only 2D NumPy arrays are allowed."))
+    # Determine use case.
+    if (x2 is None):
+        # Compute the pairwise distances.
+        x1_sq = np.sum(x1**2, axis=1, keepdims=True)
+        d = (x1_sq + x1_sq[:,0]) - 2 * np.matmul(x1, x1.T)
+        # Protect against the errors thta will occur along the diagonal.
+        d[np.diag_indices(len(d))] = 1.0
+        d[:,:] = np.sqrt(d[:,:])
+        d[np.diag_indices(len(d))] = diag
+        return d
+    else:
+        if (len(x2.shape) != 2): raise(ShapeError("Only 2D NumPy arrays are allowed."))
+        # Compute the pairwise distance between memebers of each set.
+        x1_sq = np.sum(x1**2, axis=1, keepdims=True)
+        x2_sq = np.sum(x2**2, axis=1)
+        return np.sqrt(x1_sq + x2_sq - 2 * np.matmul(x1, x2.T))
