@@ -22,7 +22,7 @@
 # 
 #    pip install scipy
 #    pip install numpy
-#    pip install plotly==2.0.15
+#    pip install plotly>=5.18.0
 # 
 #  This package will not work with newer versions of plotly because
 #  they changed the underlying storage data types for figures.
@@ -52,11 +52,14 @@
 #       rest have edges causes all frames to look like first.
 # 
 # 
-# # Uncomment the following to execute this file in place without system path issues.
-# import os, sys
-# _this_dir = os.path.dirname(os.path.realpath(__file__))
-# while (_this_dir in sys.path):
-#     sys.path.remove(_this_dir)
+# The following to execute this file in place without system path issues.
+if __name__ == "__main__":
+    import os, sys
+    _temp_path = sys.path
+    _this_dir = os.path.dirname(os.path.realpath(__file__))
+    while (_this_dir in sys.path):
+        sys.path.remove(_this_dir)
+    sys.path = _temp_path
 # 
 # --------------------------------------------------------------------
 
@@ -296,8 +299,7 @@ class Plot:
     # be stable if called multiple times, but this code is still in
     # development stage.
     def _clean_data(self, data):
-        from scipy.spatial import Delaunay
-        from scipy.spatial.qhull import QhullError
+        from scipy.spatial import Delaunay, QhullError
         # Remove the extra color attribute stored for easy access
         # any_heatmaps = any(d.get("type","") == "heatmap" for d in data)
         for d in data:
@@ -329,7 +331,7 @@ class Plot:
                     d.pop('line','')
                     d.pop('mode','')
                     d.pop('fill','')
-                    d['opacity'] = d['marker'].pop('opacity','')
+                    d['opacity'] = d['marker'].pop('opacity',1)
                     d['marker'].pop('symbol','')
                     d['marker'].pop('size','')
                     d['marker']['color'] = d.pop('fillcolor','')
@@ -565,7 +567,7 @@ class Plot:
     # 
     #  ... <standard "add" arguments with adjusted defaults> ...
     def add_function(self, name, func=None, min_max_x=None, min_max_y=tuple(),
-                     x_vals=None, y_vals=None,
+                     x_vals=None, y_vals=None, group=None,
                      grid_lines=True, plot_points=PLOT_POINTS,
                      vectorized=False, mode=None, plot_type=None,
                      use_gradient=None, **kwargs):
@@ -627,9 +629,14 @@ class Plot:
             response = y_vals
 
         if "hoverinfo" not in kwargs: kwargs["hoverinfo"] = "name+x+y"+("+z" if self.is_3d else "")
+
+        # Add a group if it is needed to enable / disable lines.
+        if (self.is_3d and (plot_type == 'surface') and grid_lines and (group is None)):
+            group = name + " surface"
+
         # Call the standard plot function
         self.add(name, *x_vals, response, mode=mode, plot_type=plot_type,
-                 use_gradient=use_gradient, **kwargs)
+                 use_gradient=use_gradient, group=group, **kwargs)
             
         # If this is a 3D surface plot and grid_lines=True, add grid lines
         if (self.is_3d and plot_type == 'surface') and grid_lines:
@@ -637,22 +644,30 @@ class Plot:
             line_width = kwargs.get("line_width",1.0)
             line_color = kwargs.get("line_color",'rgb(0,0,0)')
             if (x_on_grid):
-                for row in range(plot_points):
-                    x = x_vals[0][row*plot_points:(row+1)*plot_points]
-                    y = x_vals[1][row*plot_points:(row+1)*plot_points]
-                    z = response[row*plot_points:(row+1)*plot_points]
-                    self.add("", x,y,z, show_in_legend=False,
-                             group=name+" (lines)", mode="lines",
-                             line_width=line_width, opacity=opacity, 
-                             color=line_color, hoverinfo="none")
-                    indices = np.arange(plot_points)*plot_points + row
-                    x = x_vals[0][indices]
-                    y = x_vals[1][indices]
-                    z = response[indices]
-                    self.add("", x,y,z, show_in_legend=False,
-                             group=name+" (lines)", mode="lines",
-                             line_width=line_width, opacity=opacity,
-                             color=line_color, hoverinfo="none")
+                # Convert all points into a numpy array for simplicity.
+                grid_points = np.asarray([*x_vals, response], dtype="float32").T
+                # Row points have "NaN" at the end of every row.
+                row_points = np.zeros((grid_points.shape[0]+plot_points-1,3), dtype="float32")
+                row_points[:,:] = float('nan')
+                for i in range(plot_points**2):
+                    row_points[i + i // plot_points,:] = grid_points[i,:]
+                # Col points have "NaN" at the end of every column.
+                col_points = np.zeros((grid_points.shape[0]+plot_points-1,3), dtype="float32")
+                col_points[:,:] = float('nan')
+                for i in range(plot_points**2):
+                    q, r = divmod(i, plot_points)
+                    col_i = q + r * plot_points
+                    col_points[i + i // plot_points,:] = grid_points[col_i,:]
+                # New grid points have all row and col points with a "NaN" gap between.
+                grid_points = np.zeros((row_points.shape[0] + 1 + col_points.shape[0], 3), dtype="float32")
+                grid_points[:row_points.shape[0],:] = row_points[:,:]
+                grid_points[row_points.shape[0]] = float('nan')
+                grid_points[-col_points.shape[0]:,:] = col_points[:,:]
+                # Now this one series creates all the grid lines with appropriate gaps.
+                self.add(name+" (lines)", *grid_points.T, show_in_legend=False,
+                         group=group, mode="lines",
+                         line_width=line_width, opacity=opacity, 
+                         color=line_color, hoverinfo="none")
             else:
                 # Create a triangulation of the points and add lines
                 #  around the simplices? That should probably not happen.
@@ -678,7 +693,7 @@ class Plot:
     #  padding     -- The amount of spacing on the min and max sides
     #                 of the histogram that is produced.
     #  histnorm    -- Standard plotly "histnorm" argument, can be
-    #                 "probability" or "count" most commonly.
+    #                 "probability" or "" most commonly.
     #  barmode     -- Standard plotly "barmode" argument. When set to
     #                 "", plotly default will be used where
     #                 multi-series histograms will be non-overlapping.
@@ -686,7 +701,7 @@ class Plot:
     #  opacity     -- See "add" function.
     def add_histogram(self, name, values, start_end=(None,None),
                       bar_spacing="x", num_bins=100, padding=0.03,
-                      opacity=0.7, histnorm='count', marker_line_width=1,
+                      opacity=0.7, histnorm='', marker_line_width=1,
                       barmode='overlay', **kwargs):
         # Check for errors in usage.
         if bar_spacing not in ("x", "y"):
@@ -800,6 +815,7 @@ class Plot:
     #  group          -- The legend-series group name. This is used
     #                    for the simultaneous hide/show of multiple
     #                    series. This will cause increased legend spacing.
+    #  group_title    -- The displayed title of the legend group.
     #  show_in_legend -- True or False for if this series should show
     #                    in the legend. Currently plotly legends do
     #                    *not* support 3D surfaces in legends.
@@ -843,7 +859,7 @@ class Plot:
     # 
     #  ... <any additional plotly data-dictionary args> ...
     def add(self, name, x_values=None, y_values=None, z_values=None,
-            mode=None, plot_type=None, group=None,
+            mode=None, plot_type=None, group=None, group_title=None,
             show_in_legend=True, shade=False, use_gradient=None,
             palette=DEFAULT_GRADIENT, text=None, color=None,
             opacity=1.0, line_color=None, line_width=None, fill=None,
@@ -998,8 +1014,10 @@ class Plot:
         self.data[-1].update(kwargs)
         # If the user is preparing for an animation, the store the
         # frame number associated with this data dictionary.
-        if type(frame) != type(None): 
+        if (frame is not None): 
             self.data[-1]["frame"] = str(frame)
+        if (group_title is not None):
+            self.data[-1]["legendgrouptitle"] = {'text': group_title},
 
 
     # Add an annotation to the plot. These will be text boxes
@@ -1122,6 +1140,7 @@ class Plot:
     # LAYOUT CONTROL:
     #  layout          -- Update to be performed to the plotly
     #                     layout-dictionary that is generated.
+    #  title_x         -- The position of the title, 0.5 -> middle.
     #  aspect_mode     -- For 3D plotting, standard plotly,
     #                      'cube' -> scale to make data fit in cube,
     #                      'data' -> maintain data aspect ratio.
@@ -1177,7 +1196,7 @@ class Plot:
     #  ... <any additional plotly.offline.plot keyword arguments> ...
     def plot(self, title=None, x_range=None, y_range=None,
              z_range=None, fixed=True, show_legend=True, layout=None,
-             aspect_mode='cube', legend=None, scene_settings=None,
+             title_x=0.5, aspect_mode='cube', legend=None, scene_settings=None,
              axis_settings=None, x_axis_settings=None, y_axis_settings=None,
              z_axis_settings=None, hovermode="closest", 
              camera_position=DEFAULT_CAMERA_POSITION, html=True,
@@ -1245,6 +1264,7 @@ class Plot:
         # Generate the layout (titles and legend)
         plot_layout = dict(
             title = title,
+            title_x = title_x,
             titlefont = title_font,
             showlegend = show_legend,
             legend = legend,
@@ -1509,33 +1529,36 @@ def create_html(fig, file_name=None, show=True, append=False,
         print("Appending plot at", end=" ")
     # Generate the plot offline 
     plotly.offline.plot(fig, filename=file_name, auto_open=False,
-                        show_link=False, **kwargs)
-    # Remove unnecessary modebar buttons and the plotly logo link
+                        show_link=False, auto_play=autoplay, **kwargs)
+    # Remove unnecessary modebar buttons and the plotly logo + link
     with open(file_name) as f:
         file_string = f.read()
     file_string = file_string.replace(
-        'displaylogo:!0', 'displaylogo:!1')
+        'c.getLogo=function(){var t=this.createGroup(),e=document.createElement("a");return e.href="https://plotly.com/",e.target="_blank",e.setAttribute("data-title",a._(this.graphInfo,"Produced with Plotly.js")+" (v"+s+")"),e.className="modebar-btn plotlyjsicon modebar-btn--logo",e.appendChild(this.createIcon(o.newplotlylogo)),t.appendChild(e),t}',
+        'c.getLogo=function(){var t=this.createGroup(),e=document.createElement("a");return e.href="",e.target="_blank",t.appendChild(e),t}',
+    )
     file_string = file_string.replace(
-        'modeBarButtonsToRemove:[]',
-        'modeBarButtonsToRemove:["sendDataToCloud", "select2d", "lasso2d"]')
+        'modeBarButtonsToRemove:{valType:"any",dflt:[]}',
+        'modeBarButtonsToRemove:{valType:"any",dflt:["sendDataToCloud", "select2d", "lasso2d"]}',
+    )
+    file_string = file_string.replace(
+        'i.notifier(i._(e,"Double-click on legend to isolate one trace"),"long")',
+        'i.notifier(i._(e,"Double-click on legend to isolate one trace"),200)',
+    )
+
     file_string += "\n\n"
-    # Prevent animated plots from auto-playing if the user wants
-    if (not autoplay):
-        file_string = re.sub("\\.then\\(function\\(\\)\\{Plotly\\.animate\\(\\'[0-9a-zA-Z-]*\\'\\)\\;\\}\\)", "", file_string)
-        # autoplay_substitution = ""
-    else:
-        print("WARNING: Cannot control transitions using autoplay.")
-        # autoplay_substitution = '.then(function(){Plotly.animate([null], {"frame": {"duration": 0, "redraw": false}, "mode": "immediate", "transition": {"duration": 0}})})'
 
     # Cause animation to loop if the user wants
     if loop:
+        import warnings
+        warnings.warn("WARNING: Looping animations is broken in the new plotly.js sadly.")
         # Add a global parameter storage at the top of the file
         file_string = file_string.replace("*/\n!","*/\nvar ap=[];\n!")
         # Name the x.animate function for internal reference and store
         # the function parameters passed into the global variable
         file_string = file_string.replace("x.animate=function(t,e,r){","x.animate=function af(t,e,r){ap=[t,e,r];")
         # Add a recursive call at the end of the conclusion of the animate function
-        file_string = file_string.replace("}else c()","}else {c();setTimeout(function(){af(ap[0],ap[1],ap[2]);},"+str(1000*loop_pause)+");}")
+        file_string = file_string.replace("}else c()","}else {c();setTimeout(function(){af(ap[0],ap[1],ap[2]);},"+str(10*loop_pause)+");}")
 
     # Remove the slider label group if necessary by adding CSS that hides it
     if not show_slider_labels:
@@ -1604,12 +1627,13 @@ def multiplot(plots, x_domains=None, y_domains=None, html=True,
         try:    specs[0][0]
         except: specs = [specs]
     else:
-        specs = [[None]*max_cols for r in range(rows)]
+        specs = [[{}]*max_cols for r in range(rows)]
         for r,row in enumerate(plots):
             for c,plot in enumerate(row):
-                if type(plot) == type(None): continue
+                if plot is None: continue
                 sample_data = plots[r][c]['data'][0]
                 specs[r][c] = {"is_3d": ('z' in sample_data)}
+
     # Generate the x and y domains if they are not provided by the user
     if x_domains == None:                
         x_domains = []
@@ -1640,36 +1664,48 @@ def multiplot(plots, x_domains=None, y_domains=None, html=True,
         flipped_y.append([start, start+plot_width])
     y_domains = [[flipped_y[r]]*cols[len(cols)-1-r] for r in range(rows)][::-1]
 
+    for r,row in enumerate(plots):
+        # Handle multiple column spans for incomplete rows.
+        c = len(row)
+        if (c < max_cols):
+            specs[r][c-1]["colspan"] = max_cols-c+1
+            for i in range(c, max_cols):
+                specs[r][c] = None
+
     # Generate the holder for the multiplot
-    fig = plotly.tools.make_subplots(rows=rows, cols=max_cols,
-                                     specs=specs,
-                                     shared_yaxes=shared_y,
-                                     shared_xaxes=shared_x)
+    from plotly.subplots import make_subplots
+    fig = make_subplots(rows=rows, cols=max_cols, specs=specs,
+                      shared_yaxes=shared_y,
+                      shared_xaxes=shared_x)
+
     # Generate the multi plot!
-    counter_2d = 0
+    counter = 0
     counter_3d = 0
     for r,row in enumerate(plots):
         for c,plot in enumerate(row):
             # Allows for empty spaces
-            if type(plot) == type(None): continue
-            count = 0
+            if (plot is None):
+                continue
             # Otherwise, continue assuming we have a figure!
             for d in plot['data']:
-                count += 1
                 # # Only add traces that are not redundant (same trace for different frames)
                 # if not any((d['name'] == f['name']) for f in fig['data']):
-                fig.append_trace(d, r+1, c+1)
+                fig.add_trace(d, row=r+1, col=c+1)
+
             # Add frames to the record for this figure
             if ('frames' in plot):
                 if ('frames' in fig):
-                    if (len(plot['frames']) != len(fig['frames'])):
-                        raise(Exception("Each subplot must have same number of frames for multiplot animation."))
-                    for i,f_src in enumerate(plot['frames']):
-                        for d in f_src['data']:
-                            # Update the x-axis and y-axis of the frame
-                            d['xaxis'] = fig['data'][-1]['xaxis']
-                            d['yaxis'] = fig['data'][-1]['yaxis']
-                            fig['frames'][i]['data'] += [d]
+                    num_plot_frames = len(plot['frames'])
+                    num_fig_frames = len(fig['frames'])
+                    if (num_plot_frames == num_fig_frames):
+                        for i,f_src in enumerate(plot['frames']):
+                            for d in f_src['data']:
+                                # Update the x-axis and y-axis of the frame
+                                d['xaxis'] = fig['data'][-1]['xaxis']
+                                d['yaxis'] = fig['data'][-1]['yaxis']
+                                fig['frames'][i]['data'] += (d,)
+                    else:
+                        fig['frames'] = plot['frames']
                 else:
                     if (r != 0) or (c != 0):
                         raise(Exception("Each subplot must have same number of frames for multiplot animation."))
@@ -1679,42 +1715,36 @@ def multiplot(plots, x_domains=None, y_domains=None, html=True,
                             d['xaxis'] = fig['data'][-1]['xaxis']
                             d['yaxis'] = fig['data'][-1]['yaxis']
 
-            # Extract the annotations for this plot
-            plot_annotations = plot['layout'].pop('annotations',[])
             # Handle 3D and 2D differently
-            if specs[r][c].get('is_3d',False):
+            sample_data = plots[r][c]['data'][0]
+            is_3d = ('z' in sample_data)
+            if is_3d:
                 counter_3d += 1
-                scene_name = 'scene' + str(counter_3d)
-                fig['layout'][scene_name].update(plot['layout']['scene'])
-                fig['layout'][scene_name]['domain']['x'] = x_domains[r][c]
-                fig['layout'][scene_name]['domain']['y'] = y_domains[r][c]
             else:
-                counter_2d += 1
-                x_name = 'xaxis'+str(counter_2d)
-                y_name = 'yaxis'+str(counter_2d)
-                # For shared axes, only add the first entry of column or row
-                # Update the domains as specified by the user
-                if (not shared_x) or (r == 0):
-                    fig['layout'][x_name].update(plot['layout'].pop('xaxis'))
-                    fig['layout'][x_name]['domain'] = x_domains[r][c]
-                if (not shared_y) or (c == 0):
-                    fig['layout'][y_name].update(plot['layout'].pop('yaxis'))
-                    fig['layout'][y_name]['domain'] = y_domains[r][c]
-                for a in plot_annotations:
-                    a['xref'] = "x" + str(counter_2d)
-                    a['yref'] = "y" + str(counter_2d)
-                    fig['layout']['annotations'] = fig['layout'].get(
-                        'annotations',[]) + [a]
-                # Ensure that no axis layouts make it into the plot that shouldn't
-                plot['layout'].pop('xaxis','')
-                plot['layout'].pop('yaxis','')
+                counter += 1
+
+            # Add the annotations for this plot (they don't get added on their own).
+            for a in plot['layout'].get('annotations', []):
+                # TODO: Annotations on figures other than the first are broken.
+                if (counter > 1):
+                    import warnings
+                    warnings.warn("WARNING: Plot annotations in a multiplot element other than the first are broken.")
+                else:
+                    a['xref'] = "x" + (str(counter) if counter > 1 else '')
+                    a['yref'] = "y" + (str(counter) if counter > 1 else '')
+                    fig['layout']['annotations'] = fig['layout']['annotations'] + (a,)
+
+            if is_3d:
+                scene_name = 'scene' + (str(counter_3d) if counter_3d > 0 else '')
+                fig['layout'][scene_name].update(plot['layout']['scene'])
+
+            # This gets all the other attributes ('sliders' for animation..)
+            for key in plot['layout']:
+                print(f"Updating key '{key}'")
+
             fig['layout'].update(plot['layout'])
-            # Return the annotations to the plot now that the figure
-            # has been updated (and is not at risk of overwriting annotations)
-            if len(plot_annotations) > 0:
-                plot['layout']['annotations'] = plot_annotations
-            # Remove the 'scene' if there is one left over
-            if specs[r][c].get('is_3d',False): fig['layout'].pop('scene','')
+
+
     # Set the height and width properties, compensate for plotly spacing aroung SVG
     if type(width) != type(None):  
         width += 139
@@ -2006,7 +2036,7 @@ if __name__ == "__main__":
     plot3.add_annotation("Histogram annotation", 0, 0.005)
 
     # Render the plots in the browser.
-    plot1.plot(show=False)
+    plot1.plot(show=False, file_name="/tmp/ab1038-plot-test")
     # Demonstrate how to put a full-screen plot beneath the first.
     plot2.plot(title="'append=True' Plotting", append=True, show=False)
     # Demonstrate allowing plotly to auto-scale when series are
@@ -2032,9 +2062,11 @@ if __name__ == "__main__":
         y = np.array(list(map(lambda v: v**(3) + f*v, x)))
         p2.add("f2", x, y, color=p2.color(1), mode='markers+lines',
                shade=False, frame=f)
+
+    # p1.plot(append=True, data_easing=True, loop=True)
     p1 = p1.plot(data_easing=True, bounce=True, html=False, loop_duration=2.5)
     p2 = p2.plot(data_easing=True, bounce=True, html=False, loop_duration=2.5)
-    multiplot([[p1, p2]], append=True)
+    multiplot([[p1, p2]], shared_y=True, append=True, file_name="/tmp/ab1038-plot-test")
 
 
     # This is an example of how to control the legend (flat, bottom).
@@ -2048,3 +2080,79 @@ if __name__ == "__main__":
     # layout_settings = dict(
     #     margin = dict(l=60, t=30, b=30),
     # )
+
+
+# 2023-12-03 21:12:32
+# 
+#######################################################################
+# # Set numpy print options so that up to 100 rows will show at once. #
+# np.set_printoptions(threshold=sys.maxsize)                          #
+# row_points[:,0] = np.arange(1,len(row_points)+1)                    #
+# print("row_points: ")                                               #
+# print(row_points, flush=True)                                       #
+# #                                                                   #
+#######################################################################
+
+
+# 2023-12-03 21:23:33
+# 
+##################################################################################################
+# # Verify that                                                                                  #
+# row_gaps = len(set(grid_points[:,0])) - 1                                                      #
+# assert (row_gaps == plot_points-1), f"Expected these to be equal: {row_gaps} == {plot_points}" #
+# col_gaps = len(set(grid_points[:,1])) - 1                                                      #
+# assert (col_gaps == plot_points-1), f"Expected these to be equal: {col_gaps} == {plot_points}" #
+# #                                                                                              #
+##################################################################################################
+
+
+# 2023-12-03 22:04:45
+# 
+################################################################################
+# #     fig['layout'][scene_name]['domain']['x'] = x_domains[r][c]             #
+# #     fig['layout'][scene_name]['domain']['y'] = y_domains[r][c]             #
+# # else:                                                                      #
+# #     counter_2d += 1                                                        #
+# #     x_name = 'xaxis'+(str(counter_2d) if counter_2d > 1 else '')           #
+# #     y_name = 'yaxis'+(str(counter_2d) if counter_2d > 1 else '')           #
+# #     # For shared axes, only add the first entry of column or row           #
+# #     # Update the domains as specified by the user                          #
+# #     if (not shared_x) or (r == 0):                                         #
+# #         if ('xaxis' in plot['layout']):                                    #
+# #             fig['layout'][x_name] = plot['layout'].pop('xaxis')            #
+# #         fig['data'][counter_2d]['xaxis'] = 'x'+str(counter_2d)             #
+# #         fig['layout'][x_name]['anchor'] = 'x'+str(counter_2d)              #
+# #         fig['layout'][x_name]['domain'] = x_domains[r][c]                  #
+# #     if (not shared_y) or (c == 0):                                         #
+# #         if ('yaxis' in plot['layout']):                                    #
+# #             fig['layout'][y_name] = plot['layout'].pop('yaxis')            #
+# #         fig['data'][counter_2d]['yaxis'] = 'y'+str(counter_2d)             #
+# #         fig['layout'][y_name]['anchor'] = 'y'+str(counter_2d)              #
+# #         fig['layout'][y_name]['domain'] = y_domains[r][c]                  #
+# #     for a in plot_annotations:                                             #
+# #         a['xref'] = "x" + str(counter_2d)                                  #
+# #         a['yref'] = "y" + str(counter_2d)                                  #
+# #         fig['layout']['annotations'] = fig['layout']['annotations'] + (a,) #
+# #     # Ensure that no axis layouts make it into the plot that shouldn't     #
+# #     if ('xaxis' in plot['layout']): plot['layout'].pop('xaxis')            #
+# #     if ('yaxis' in plot['layout']): plot['layout'].pop('yaxis')            #
+################################################################################
+
+
+# 2023-12-03 22:04:49
+# 
+######################################################################
+# # if ('updatemenus' in plot['layout']):                            #
+# #     fig['layout']['updatemenus'] = plot['layout']['updatemenus'] #
+# # if ('sliders' in plot['layout']):                                #
+# #     fig['layout']['sliders'] = plot['layout']['sliders']         #
+######################################################################
+            
+
+
+# 2023-12-03 22:04:50
+# 
+####################################################
+# # # Remove the 'scene' if there is one left over #
+# # if (not is_3d): fig['layout'].pop('scene','')  #
+####################################################
