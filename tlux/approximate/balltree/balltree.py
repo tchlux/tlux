@@ -99,6 +99,11 @@ def argselect(values, k, indices=None, divisor=None, max_size=None):
 
 # Class for constructing a ball tree.
 class BallTree:
+    # Different selection methods.
+    SELECT_FURTHEST_POINT = ball_tree.select_furthest_point
+    SELECT_NEAREST_POINT = ball_tree.select_nearest_point
+    SELECT_RANDOM_POINT = ball_tree.select_random_point
+
     # Given points and a leaf size, construct a ball tree.
     def __init__(self, points=None, transpose=True, build=True,
                  leaf_size=1, num_threads=None, max_levels=None,
@@ -118,6 +123,7 @@ class BallTree:
         self._inner = prune.inner
         self._outer = prune.outer
         self._top = prune.top
+        self._distance = prune.distance
         # Configure the OpenMP environment.
         self._balltree.configure(num_threads, max_levels)
         # Set the maximum number of bytes 
@@ -156,7 +162,7 @@ class BallTree:
                 # Assign the relevant internals for this tree.
                 self.usage = np.zeros(self.tree.shape[1], dtype='int64')
                 self.sq_sums = np.zeros(self.tree.shape[1], dtype='float32')
-                self.order = np.arange(self.tree.shape[1], dtype='int64') + 1
+                self.order = np.arange(1, self.tree.shape[1]+1, dtype='int64')
                 self.radii = np.zeros(self.tree.shape[1], dtype='float32')
                 self.medians = np.zeros(self.tree.shape[1], dtype='float32')
                 # Pack the old points and the new points into a single tree
@@ -191,10 +197,11 @@ class BallTree:
     # Restructure the ball tree so the points are in locally
     # contiguous blocks of memory (local by branch + leaf).
     def reorder(self):
+        # Update all internals of the tree structure to make ORDER into a typical range.
         self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
 
     # Build a tree out.
-    def build(self, leaf_size=None, root=None, reorder=None):
+    def build(self, leaf_size=None, root=None, reorder=None, selector=None):
         # Get the leaf size if it was not given.
         if (leaf_size is not None): self.leaf_size = leaf_size
         # Translate the root from python index to fortran index if provided.
@@ -216,11 +223,12 @@ class BallTree:
             self._balltree.build_tree(
                 self.tree, self.sq_sums,self.radii, self.medians, sq_dists,
                 self.order[:self.size], leaf_size=self.leaf_size, root=root,
+                selector=selector,
             )
             # Restructure the ball tree so the points are in locally contiguous blocks of
             # memory (local by branch + leaf), as long as allowed (by user or memory).
             if (reorder or ((reorder is None) and (self.tree.nbytes < self._balltree.max_copy_bytes))):
-                self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
+                self.reorder()
 
     # Find the "k" nearest neighbors to all points in z.
     def nearest(self, z, k=1, return_distance=True, transpose=True,
@@ -312,7 +320,7 @@ class BallTree:
 
     # Prune this tree and compact its points into the front of the
     # array, adjust '.size' and '.built' accordingly.
-    def prune(self, levels=1, full=True, build=True, method="root"):
+    def prune(self, levels=1, full=True, build=True, method="root", min_distance=0.0):
         assert(levels >= 1)
         assert(len(self) > 0)
         # Build the tree out if it is not fully built.
@@ -320,7 +328,7 @@ class BallTree:
         # Get the size of the built portion of the tree.
         size = self.built
         # Compute the indices of the inner children (50th percentile) points.
-        if (levels == 1):
+        if ((levels == 1) and (method != "distance")):
             # Use the middle child for 1 level.
             indices = np.array([1], dtype=np.int64)
         else:
@@ -338,12 +346,19 @@ class BallTree:
                     indices[0] = 1
                     indices[1] = 2
                     self._outer(size, levels, indices[2:])
-            else:
+            elif (method == "top"):
                 to_keep = min(size, 2**levels - 1)
                 # Simply grab the root of the tree.
                 indices = np.zeros(to_keep, dtype=np.int64)
                 self._top(size, levels, indices)
+            elif (method == "distance"):
+                indices = np.zeros(size, dtype=np.int64)
+                self._distance(size, min_distance, self.order[:self.size], self.radii, self.medians, indices)
             indices[:] -= 1
+        # Truncate the indices to the set that is actually filled with values.
+        first_negative = np.argmin(indices)
+        if (indices[first_negative] < 0):
+            indices = indices[:first_negative]
         # Stop this operation if the tree will remain unchanged.
         if (len(indices) == size): return
         # Adjust the recorded size and amount built of this tree.
@@ -351,7 +366,8 @@ class BallTree:
         self.built = 1
         # Keep those indices only.
         self.order[:self.size] = self.order[indices]
-        # Rebuild the tree if desired.
+        self.order[self.size:] = 0
+        # Rebuild the tree if desired, keep same root.
         if build: self.build(root=0)
 
 
@@ -389,4 +405,36 @@ if __name__ == "__main__":
     p = Plot()
     p.add("data", *(x.T), y)
     p.add_function("balltree", fy, *x_min_max, plot_points=5000, vectorized=True)
+                   # mode="markers", marker_size=5, marker_line_width=1)
+
+
+    distances, indices = tree.nearest(tree.tree[:,:tree.size], transpose=False, k=2)
+    distances = distances.T[:,1]
+    distances.sort()
+    print("distances: ", distances, flush=True)
+
+    past_tree = tree.size
+    # Pruning
+    for i in range(10):
+        print()
+        tree.prune(method="distance", min_distance=0.2, build=False)
+        tree.build(reorder=False, selector=BallTree.SELECT_RANDOM_POINT)
+        # Get the new set of points after pruning.
+        new_tree = tree.size
+        if (new_tree != past_tree):
+            # Add the visual.
+            p.add_function(f"{i+1} pruned tree", fy, *x_min_max, plot_points=5000, vectorized=True)
+                           # mode="markers", marker_size=5, marker_line_width=1)
+            past_tree = new_tree
+        # Measure pairwise distances between tree points to see how close they are to each other.
+        distances, indices = tree.nearest(tree.tree[:,:tree.size], transpose=False, k=2)
+        if (distances.shape[0] > 1):
+            distances = distances.T[:,1]
+        else:
+            distances = distances[0]
+        distances.sort()
+        print("tree.order: ", tree.order[:tree.size].shape, sorted(tree.order[:tree.size]), flush=True)
+        print("distances: ", distances.shape, [round(d,2) for d in sorted(distances)], flush=True)
+
+    # 
     p.show()

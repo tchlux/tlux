@@ -15,11 +15,15 @@ MODULE BALL_TREE
   USE FAST_SORT,   ONLY: ARGSORT
   IMPLICIT NONE
 
+  ! Number of threads to use in recursive tree construction and neighbor search.
+  INTEGER(KIND=I32) :: NUMBER_OF_THREADS
   ! Max bytes for which a doubling of memory footprint (during copy)
   !  is allowed to happen (switches to using scratch file instead).
-  INTEGER(KIND=I64) :: MAX_COPY_BYTES = 2_I64 ** 33_I64 ! 8GB
-  INTEGER(KIND=I32) :: NUMBER_OF_THREADS
-
+  INTEGER(KIND=I64) :: MAX_COPY_BYTES = 2_I64 ** 32_I64 ! 4GB
+  INTEGER(KIND=I64), PARAMETER :: SELECT_FURTHEST_POINT = 1 ! Identity of "furthest point" based root selector.
+  INTEGER(KIND=I64), PARAMETER :: SELECT_NEAREST_POINT = 2 ! Identity of "nearest point" based root selector.
+  INTEGER(KIND=I64), PARAMETER :: SELECT_RANDOM_POINT = 3 ! Identity of "random point" based root selector.
+  
   ! Function that is defined by OpenMP.
   INTERFACE
      ! Enabling nested parallelization.
@@ -76,31 +80,66 @@ CONTAINS
     END IF
   END SUBROUTINE CONFIGURE
 
+
+  ! Set the seed for the random number generator.
+  SUBROUTINE SEED_RANDOM(SEED)
+    INTEGER, INTENT(IN) :: SEED
+    INTEGER, ALLOCATABLE :: SEED_ARRAY(:)
+    INTEGER :: N
+    CALL RANDOM_SEED(SIZE = N)
+    ALLOCATE(SEED_ARRAY(N))
+    SEED_ARRAY(:) = SEED
+    CALL RANDOM_SEED(PUT=SEED_ARRAY)
+  END SUBROUTINE SEED_RANDOM
+
+
   ! Compute the square sums of a bunch of points (with parallelism).
   SUBROUTINE COMPUTE_SQUARE_SUMS(POINTS, SQ_SUMS)
     REAL(KIND=R32), INTENT(IN),  DIMENSION(:,:) :: POINTS
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: SQ_SUMS
-    INTEGER :: I
+    INTEGER(KIND=I64) :: I
     !$OMP PARALLEL DO
-    DO I = 1, SIZE(POINTS,2)
+    DO I = 1, SIZE(POINTS,2,KIND=I64)
        SQ_SUMS(I) = SUM(POINTS(:,I)**2)
     END DO
   END SUBROUTINE COMPUTE_SQUARE_SUMS
 
+
   ! Re-arrange elements of POINTS into a binary ball tree about medians.
-  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS, ORDER, ROOT, LEAF_SIZE)
+  RECURSIVE SUBROUTINE BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS, ORDER, ROOT, LEAF_SIZE, SELECTOR)
     REAL(KIND=R32), INTENT(INOUT), DIMENSION(:,:) :: POINTS
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: SQ_SUMS
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: RADII
     REAL(KIND=R32), INTENT(OUT), DIMENSION(:) :: MEDIANS
     REAL(KIND=R32), INTENT(INOUT), DIMENSION(:) :: SQ_DISTS
     INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: ORDER
-    INTEGER(KIND=I64), INTENT(IN), OPTIONAL :: ROOT, LEAF_SIZE
+    INTEGER(KIND=I64), INTENT(IN), OPTIONAL :: ROOT, LEAF_SIZE, SELECTOR
     ! Local variables
-    INTEGER(KIND=I64) :: CENTER_IDX, MID, I, J, LS
+    INTEGER(KIND=I64) :: CENTER_IDX, MID, I, J, LS, SELECTOR_METHOD
     REAL(KIND=R32) :: MAX_SQ_DIST, SQ_DIST, SHIFT
     REAL(KIND=R32), ALLOCATABLE, DIMENSION(:) :: PT
+    REAL :: RANDOM_FLOAT
     ALLOCATE(PT(1:SIZE(POINTS,1,KIND=I64)))
+    ! Set the selector method.
+    IF (PRESENT(SELECTOR)) THEN
+       IF (SELECTOR .EQ. SELECT_FURTHEST_POINT) THEN
+          SELECTOR_METHOD = SELECTOR
+       ELSE IF (SELECTOR .EQ. SELECT_NEAREST_POINT) THEN
+          SELECTOR_METHOD = SELECTOR
+       ELSE IF (SELECTOR .EQ. SELECT_RANDOM_POINT) THEN
+          SELECTOR_METHOD = SELECTOR
+          ! CALL SEED_RANDOM(1)
+       ELSE
+          PRINT *, 'ERROR: Bad SELECTOR value', SELECTOR
+          SQ_SUMS(:) = -1.0_R32
+          RADII(:) = -1.0_R32
+          MEDIANS(:) = -1.0_R32
+          SQ_DISTS(:) = -1.0_R32
+          RETURN
+       END IF
+    ELSE
+       SELECTOR_METHOD = SELECT_FURTHEST_POINT
+    END IF
     ! Set the leaf size to 1 by default (most possible work required,
     ! but guarantees successful use with any leaf size).
     IF (PRESENT(LEAF_SIZE)) THEN ; LS = LEAF_SIZE
@@ -109,18 +148,24 @@ CONTAINS
     ! Set the index of the 'root' of the tree.
     IF (PRESENT(ROOT)) THEN ; CENTER_IDX = ROOT
     ELSE
-       ! 1) Compute distances between first point (random) and all others.
-       ! 2) Pick the furthest point (on convex hull) from first as the center node.
-       J = ORDER(1)
-       PT(:) = POINTS(:,J)
-       SQ_DISTS(1) = 0.0_R32
-       !$OMP PARALLEL DO
-       ROOT_TO_ALL : DO I = 2_I64, SIZE(ORDER,KIND=I64)
-          SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
-               2.0_R32 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
-       END DO ROOT_TO_ALL
-       CENTER_IDX = MAXLOC(SQ_DISTS(:),1)
-       ! Now CENTER_IDX is the selected center for this node in tree.
+       IF (SELECTOR_METHOD .EQ. SELECT_RANDOM_POINT) THEN
+          CALL RANDOM_NUMBER(RANDOM_FLOAT)
+          CENTER_IDX = 1_I64 + INT(RANDOM_FLOAT * SIZE(ORDER,KIND=I64))
+       ELSE ! ((SELECTOR_METHOD .EQ. SELECT_FURTHEST_POINT) .OR.
+          !    (SELECTOR_METHOD .EQ. SELECT_NEAREST_POINT)) THEN
+          ! 1) Compute distances between first point (assumed random) and all others.
+          ! 2) Pick the furthest point (on convex hull) from first as the new center node.
+          J = ORDER(1)
+          PT(:) = POINTS(:,J)
+          SQ_DISTS(1) = 0.0_R32
+          !$OMP PARALLEL DO
+          ROOT_TO_ALL : DO I = 2_I64, SIZE(ORDER,KIND=I64)
+             SQ_DISTS(I) = SQ_SUMS(J) + SQ_SUMS(ORDER(I)) - &
+                  2.0_R32 * DOT_PRODUCT(POINTS(:,ORDER(I)), PT(:))
+          END DO ROOT_TO_ALL
+          CENTER_IDX = MAXLOC(SQ_DISTS(:),1)
+          ! Now CENTER_IDX is the selected center for this node in tree.
+       END IF
     END IF
 
     ! Move the "center" to the first position.
@@ -138,13 +183,13 @@ CONTAINS
 
     ! Base case for recursion, once we have few enough points, exit.
     IF (SIZE(ORDER,KIND=I64) .LE. LS) THEN
-       SQ_DISTS(1) = MAXVAL(SQ_DISTS(:))
        RADII(ORDER(1)) = SQRT(SQ_DISTS(1))
        MEDIANS(ORDER(1)) = RADII(ORDER(1))
        IF (SIZE(ORDER,KIND=I64) .GT. 1_I64) THEN
           RADII(ORDER(2:)) = 0.0_R32
           MEDIANS(ORDER(2:)) = 0.0_R32
        END IF
+       ! SQ_DISTS(1) = MAXVAL(SQ_DISTS(:))
        RETURN
     ELSE IF (SIZE(ORDER,KIND=I64) .EQ. 2_I64) THEN
        ! If the leaf size is 1 and there are only 2 elements, store
@@ -167,24 +212,38 @@ CONTAINS
     I = MID + MAXLOC(SQ_DISTS(MID+1_I64:),1)
     ! Store the "radius" of this ball, the furthest point.
     RADII(ORDER(1)) = SQRT(SQ_DISTS(I))
-    ! Move the median point (furthest "interior") to the front (inner root).
-    CALL SWAP_I64(ORDER(2), ORDER(MID))
-    ! Move the furthest point into the spot after the median (outer root).
-    CALL SWAP_I64(ORDER(MID+1_I64), ORDER(I))
+    ! Chose the roots of the children.
+    IF (SELECTOR_METHOD .EQ. SELECT_RANDOM_POINT) THEN
+       ! Pick the inner root.
+       CALL RANDOM_NUMBER(RANDOM_FLOAT)
+       I = 1_I64 + INT(RANDOM_FLOAT * MID, KIND=I64)
+       CALL SWAP_I64(ORDER(2), ORDER(I))
+       ! Pick the outer root.
+       CALL RANDOM_NUMBER(RANDOM_FLOAT)
+       I = MID+1_I64 + INT(RANDOM_FLOAT * (SIZE(ORDER,KIND=I64)-MID), KIND=I64)
+       CALL SWAP_I64(ORDER(MID+1_I64), ORDER(I))       
+    ELSE IF (SELECTOR_METHOD .EQ. SELECT_NEAREST_POINT) THEN
+       ! Move the furthest point into the spot after the median (outer root).
+       CALL SWAP_I64(ORDER(MID+1_I64), ORDER(I))
+       ! Move the neraest interior to the front (inner root).
+       I = 1_I64 + MINLOC(SQ_DISTS(2:MID),1)
+       CALL SWAP_I64(ORDER(2), ORDER(I))
+    ELSE
+       ! Move the median point (furthest "interior") to the front (inner root).
+       CALL SWAP_I64(ORDER(2), ORDER(MID))
+       ! Move the furthest point into the spot after the median (outer root).
+       CALL SWAP_I64(ORDER(MID+1_I64), ORDER(I))
+    END IF
 
     !$OMP PARALLEL NUM_THREADS(2)
     !$OMP SECTIONS
     !$OMP SECTION
     ! Recurisively create this tree.
-    !   build a tree with the root being the furthest from this center
-    !   for the remaining "interior" points of this center node.
-    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(2_I64:MID), ORDER(2_I64:MID), 1_I64, LS)
+    CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(2_I64:MID), ORDER(2_I64:MID), 1_I64, LS, SELECTOR_METHOD)
     !$OMP SECTION
-    !   build a tree with the root being the furthest from this center
-    !   for the remaining "exterior" points of this center node.
     !   Only perform this operation if there are >0 points available.
     IF (MID < SIZE(ORDER,KIND=I64)) THEN
-       CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(MID+1_I64:), ORDER(MID+1_I64:), 1_I64, LS)
+       CALL BUILD_TREE(POINTS, SQ_SUMS, RADII, MEDIANS, SQ_DISTS(MID+1_I64:), ORDER(MID+1_I64:), 1_I64, LS, SELECTOR_METHOD)
     END IF
     !$OMP END SECTIONS
     !$OMP END PARALLEL
@@ -244,6 +303,7 @@ CONTAINS
        DISTS(:,I) = RWORK(:K,T)
     END DO
   END SUBROUTINE NEAREST
+
 
   ! Compute the K nearest elements of TREE to each point in POINTS.
   RECURSIVE SUBROUTINE PT_NEAREST(POINT, K, TREE, SQ_SUMS, RADII, MEDIANS, &
@@ -428,6 +488,7 @@ CONTAINS
     FORALL (I=1:SIZE(ORDER)) ORDER(I) = I
   END SUBROUTINE FIX_ORDER
 
+  
   ! Increment the counts for the number of times various indices are referenced.
   !   Example:
   !     usage = [0, 0, 0, 0, 0]  ! counters for ball tree over 5 points
@@ -435,7 +496,7 @@ CONTAINS
   !     CALL BINCOUNT(indices, usage)
   !     usage = [2, 1, 0, 0, 1]  ! updated counters for usage over 5 points
   SUBROUTINE BINCOUNT(INDICES, USAGE)
-    INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: INDICES ! (K, SIZE(POINTS,2))
+    INTEGER(KIND=I64), INTENT(IN), DIMENSION(:) :: INDICES
     INTEGER(KIND=I64), INTENT(INOUT), DIMENSION(:) :: USAGE
     INTEGER(KIND=I64) :: I
     DO I = 1, SIZE(INDICES, KIND=I64)
