@@ -472,6 +472,8 @@ class Plot:
                               random.choice(self.palette[:self.palette_size,2])])
                 # Add this new random color to the palette
                 self.palette = np.concatenate( (self.palette, [c]), axis=0 )
+        elif (color.startswith("#")):
+            return color
         elif type(color) == str:
             # Get the color as a list of numbers
             c = color[color.index('(')+1:color.index(')')].split(',')
@@ -2080,6 +2082,14 @@ if __name__ == "__main__":
     # layout_settings = dict(
     #     margin = dict(l=60, t=30, b=30),
     # )
+    # 
+    # How to make the x axis show as a long decimal:
+    #   x_axis_settings = {"tickformat": "%ld"}
+    # How to make the x axis show as a date format:
+    #   x_axis_settings = {"tickformat": "%Y-%m-%d %H:%M:%S", "type": "date"}
+    # How to make the hover labels have unlimited width (for long series names):
+    #   layout = {"hoverlabel_namelength": -1}
+
 
 
 # 2023-12-03 21:12:32
