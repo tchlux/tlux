@@ -46,7 +46,7 @@ def to_bytes(array):
         voidp = ctypes.c_void_p(array.ctypes.data)
         length = ctypes.c_long(len(array))
         width = ctypes.c_int(array.dtype.itemsize)
-        info = ctypes.c_char_p(array.dtype.name.encode())
+        info = ctypes.c_char_p(array.dtype.str.encode())
     else:
         # This is a structure of python objects, convert everything to strings, encode
         #  those, put bytes in an array of ctypes.c_char_p, cast that to c_void_p.
@@ -85,7 +85,9 @@ def from_bytes(array, voidp, length, width, info):
     else:
         # If the width is not -1, the data is of a fixed-width type.
         # Create a numpy array of the appropriate data type from the raw bytes.
-        voidp = (ctypes.c_void_p * length.value).from_address(voidp.value)
+        voidp = (ctypes.c_void_p * length.value * width.value).from_address(voidp.value)
+        #            4 bytes?    * num elements * element width
+        # WARNING: The above might overallocate by 4x, but tests indicate this works.
         array = np.frombuffer(voidp, dtype=info.value.decode(), count=length.value)
     return array
 
@@ -254,6 +256,12 @@ def _test_to_bytes_from_bytes():
     output = to_bytes(a)
     b = from_bytes(*output)
     assert (str(tuple(a.flatten())) == str(tuple(b))), f"\n{a}\n{b}"
+    #   Numpy array of strings.
+    a = np.asarray([['Mon', 'Tue', 'Wed'], ['Thu', 'Fri', 'Mon'], ['Tue', 'Wed', 'Thu']])
+    output = to_bytes(a)
+    b = from_bytes(*output)
+    assert (tuple(a.flatten()) == tuple(b.flatten())), f"\n{a}\n{b}"
+
 
 # Verify behavior of the 'unique' function.
 def _test_unique():
@@ -389,7 +397,7 @@ if __name__ == "__main__":
         testing = profile(testing)
 
     if (profiling): inspect_memory()
-    for i in range(5):
+    for i in range(10):
         testing()
         print(f"mem_use: {mem_use():.2f}MB", flush=True)
         if (hasattr(testing, "show_profile")): testing.show_profile()
