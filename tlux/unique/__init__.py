@@ -85,8 +85,8 @@ def from_bytes(array, voidp, length, width, info):
     else:
         # If the width is not -1, the data is of a fixed-width type.
         # Create a numpy array of the appropriate data type from the raw bytes.
-        voidp = (ctypes.c_void_p * length.value * width.value).from_address(voidp.value)
-        #            4 bytes?    * num elements * element width
+        voidp = (ctypes.c_byte * length.value * width.value).from_address(voidp.value)
+        #            1 byte    * num elements * element width
         # WARNING: The above might overallocate by 4x, but tests indicate this works.
         array = np.frombuffer(voidp, dtype=info.value.decode(), count=length.value)
     return array
