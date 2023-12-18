@@ -31,12 +31,16 @@ def orthogonalize(col_vecs, essentially_zero=2**(-26)):
 
 
 # Compute the singular values and the right singular vectors for a matrix of row vectors.
-def svd(row_vecs, steps=5, bias=1.0):
+def svd(row_vecs, steps=5, bias=1.0, nvecs=None):
     # Get the dimension of the vectors.
     dim = row_vecs.shape[1]
     # Handle zero-sized inputs by returning zero-sized outputs.
     if (row_vecs.size == 0):
         return np.zeros((0,), dtype=float), np.zeros((0,dim), dtype=float)
+    # Set the number of vectors to compute (if that wasn't provided).
+    if (nvecs is None):
+        nvecs = row_vecs.shape[1]
+    nvecs = min(row_vecs.shape[1], max(1, nvecs))
     # Initialize a holder for the singular values and the right
     #   singular vectors (the principal components).
     # Rescale the data for stability control, exit early when given only zeros.
@@ -44,7 +48,7 @@ def svd(row_vecs, steps=5, bias=1.0):
     # Handle the case of 0-variance data.
     if (multiplier <= 0):
         singular_vals = np.zeros(row_vecs.shape[1])
-        right_col_vecs = np.zeros((row_vecs.shape[1], row_vecs.shape[1]))
+        right_col_vecs = np.zeros((row_vecs.shape[1], nvecs))
         return singular_vals, right_col_vecs
     # If there are any nan values, replace them with the mean.
     elif (np.any(np.isnan(row_vecs))):
@@ -60,23 +64,33 @@ def svd(row_vecs, steps=5, bias=1.0):
     row_vecs = multiplier * row_vecs
     center = row_vecs.mean(axis=0)
     row_vecs -= center
-    covariance = np.matmul(row_vecs.T, row_vecs)
-    # Compute the initial right singular vectors.
-    right_col_vecs, lengths = orthogonalize(covariance.copy())
-    # Do the power iteration.
-    for i in range(steps):
-        right_col_vecs, lengths = orthogonalize(
-            np.matmul(covariance, right_col_vecs))
+    # Method (1) precomputes the covariance matrix and then does power iterations.
+    if (row_vecs.shape[0] >= row_vecs.shape[1]):
+        # Compute the initial right singular vectors.
+        covariance = np.matmul(row_vecs.T, row_vecs)
+        right_col_vecs, lengths = orthogonalize(covariance.copy())
+        for i in range(steps):
+            right_col_vecs, lengths = orthogonalize(np.matmul(covariance, right_col_vecs))
+    # Method (2) starts with random vectors does power iterations with the implicit covariance matrix.
+    else:
+        right_col_vecs, lengths = orthogonalize( # Add 2 for error buffer & increased convergence.
+            np.random.normal(size=(row_vecs.shape[1], min(nvecs+2, row_vecs.shape[1])))
+        )
+        for i in range(steps):
+            right_col_vecs, lengths = orthogonalize(
+                np.matmul(row_vecs.T, np.matmul(row_vecs, right_col_vecs))
+            )
     # Compute the singular values from the lengths.
     singular_vals = lengths
     singular_vals[singular_vals > 0] = np.sqrt(
         singular_vals[singular_vals > 0]) / multiplier
     # Return the singular values and the right singular vectors.
-    return singular_vals, right_col_vecs.T
+    return singular_vals[:nvecs], right_col_vecs.T[:nvecs]
 
 
 # Use the SVD routine to project data onto its first N principal components.
 def project(row_vecs, dim, **svd_kwargs):
+    svd_kwargs["nvecs"] = dim
     # Compute the principal components via a singular value decomposition.
     singular_values, projection_vecs = svd(row_vecs, **svd_kwargs)
     row_vecs = row_vecs @ projection_vecs[:dim,:].T
