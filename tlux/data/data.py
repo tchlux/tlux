@@ -79,7 +79,7 @@ def merge_on_column(d1, d2, column, d1_name="left", d2_name="right"):
     from itertools import combinations
     # Get the list of unique values that will be merged into the output.
     unique_values = sorted(set(d1[column]) | set(d2[column]))
-     # Get the list of columns that will exist from both data objects.
+    # Get the list of columns that will exist from both data objects.
     d1_column_set = set(d1.columns)
     d2_column_set = set(d2.columns)
     d1_columns = [(c,c + ("_"+d1_name if (c in d2_column_set) and (len(d1_name) > 0) else ""))
@@ -1912,7 +1912,4 @@ class Data:
                 if (len(ordered_vals) > max_display):
                     print_to_file("    ... (increase 'max_display' to see more summary statistics).")
             print_to_file()
-
-
-
 
