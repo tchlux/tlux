@@ -414,24 +414,31 @@ class Plot:
 
     # Manage plotly reverse order bug (only happens with "tonext[xy]")
     def _reorder_data(self, data):
-        start = end = None
-        # Cycle through the elements of data
-        for i,tr in enumerate(self.to_reverse):
-            if (tr and start==None):
-                start = i
-            if (not tr and start!=None):
-                end = i+1
-                # Reverse that group of plot series
-                data[start:end] = data[start:end][::-1]
-                start = end = None
-        # Reverse the final group when self.to_reverse[-1] == True
-        if (start!=None):
-            end = len(data)
-            data[start:end] = data[start:end][::-1]
-
+        # Reverse all data entries if any reversals are needed.
+        if (any(self.to_reverse)):
+            for i in range(len(data)//2):
+                data[i], data[len(data)-i-1] = data[len(data)-i-1], data[i]
+        #
+        # start = end = None
+        # # Cycle through the elements of data
+        # for i,tr in enumerate(self.to_reverse):
+        #     if (tr and start==None):
+        #         start = i
+        #     if (not tr and start!=None):
+        #         end = i+1
+        #         # Reverse that group of plot series
+        #         data[start:end] = data[start:end][::-1]
+        #         start = end = None
+        #
+        # # Reverse the final group when self.to_reverse[-1] == True
+        # if (start!=None):
+        #     end = len(data)
+        #     data[start:end] = data[start:end][::-1]
+        # 
         # self.to_reverse = [False] * len(data)
+        # 
         # Fix the fills that should be left alone
-        for d in data:
+        for i,d in enumerate(data):
             if ("toprev" in str(d.get("fill",""))): 
                 d["fill"] = d["fill"].replace("toprev","tonext")
 
@@ -473,7 +480,22 @@ class Plot:
                 # Add this new random color to the palette
                 self.palette = np.concatenate( (self.palette, [c]), axis=0 )
         elif (color.startswith("#")):
-            return color
+            if (alpha is None):
+                return color
+            else:
+                # Convert into numeric format.
+                #   Make sure the color has 6 characters.
+                given_color = color
+                color = color[1:]
+                if (len(color) == 3):
+                    color = "".join((cc for c in color for cc in (c,c)))
+                if (len(color) != 6):
+                    raise(ValueError(f"Color '{given_color}' not recognized."))
+                #   Convert hex to binary.
+                rgb = (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16),
+                       alpha if alpha is not None else 1.0)
+                print("plot.py Line 491: ", f"rgba{rgb}".replace(" ",""), flush=True)
+                return f"rgba{rgb}".replace(" ","")
         elif type(color) == str:
             # Get the color as a list of numbers
             c = color[color.index('(')+1:color.index(')')].split(',')
@@ -977,6 +999,7 @@ class Plot:
         # bug has been reported, but no one in the plotly community is
         # addressing it (or even noticing it) as a problem.
         self.to_reverse.append((type(fill) == str) and ("tonext" in fill))
+        # 
         # print("Using color:", color)
         # Now add the standard plotly "data" object to local storage
         self.data.append(dict(

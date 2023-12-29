@@ -6,11 +6,12 @@ from tlux.unique import ByteArray
 
 
 # TODO:
+#  - make a robust "rolling normalization" operation that can reliably fetch
+#    data from a large data set and maintain radialization properites in the
+#    face of embedding drift as well
 #  - create a 'plot_snapshot' method that creates a Graph of the model weights,
 #    gradient magnitudes, curvatures, projected embeddings (colored by change),
 #    and any other information that might be useful in diagnosing model components.
-#  - draft solution to very slow data preparation for high dimensional "y",
-#    either generate "well spaced" embeddings in lower dimension, or project.
 #  - make "gradient" an accessible function that calls the model gradient code
 #    and propogates an output gradient back to the inputs (+1 for all outputs).
 #  - python fallback that supports the basic evaluation of
@@ -654,8 +655,8 @@ if __name__ == "__main__":
     n = 2**7
     nm = (len(functions) * n) # // 3
     new_model = True
-    use_a = False
-    use_x = True
+    use_a = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -679,7 +680,7 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 1000,
+        steps = 2000,
         # nm = nm,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.001,
@@ -693,16 +694,16 @@ if __name__ == "__main__":
         # num_threads = 1,
         # granular_parallelism = True,
         # step_emb_change=0.01,
-        # step_ay_change=0.01,
+        step_ay_change=0.5,
         log_grad_norm_frequency = 1,
-        # rank_check_frequency = 1,
+        rank_check_frequency = 1,
         early_stop = False,
         # ax_normalized = True,
         # ay_normalized = True,
         # x_normalized = True,
         # y_normalized = True,
         # pairwise_aggregation = True,
-        # partial_aggregation = True,
+        partial_aggregation = True,
         # ordered_aggregation = False,
         # reshuffle = False,
         # keep_best = False,

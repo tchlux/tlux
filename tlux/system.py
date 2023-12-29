@@ -4,6 +4,33 @@ import threading
 import time
 import traceback
 
+
+# Save "data" in a file titled "file_name" using pickle.
+def save(data, file_name="_save.pkl"):
+    try:
+        import pickle
+        with open(file_name, "wb") as f:
+            pickle.dump(data, f)
+    except:
+        import dill as pickle
+        with open(file_name, "wb") as f:
+            pickle.dump(data, f)
+
+
+# Load data from a pickle file titled "file_name".
+def load(file_name="_save.pkl"):
+    try:
+        import pickle
+        with open(file_name, "rb") as f:
+            data = pickle.load(f)
+        return data
+    except:
+        import dill as pickle
+        with open(file_name, "rb") as f:
+            data = pickle.load(f)
+        return data
+
+
 # Class for timing operations. Initialize to start, call to check, use
 # the `start` and `stop` methods / attributes to set / observe values.
 class Timer:

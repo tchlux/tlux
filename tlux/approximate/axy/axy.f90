@@ -2584,7 +2584,7 @@ CONTAINS
     CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
          AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
          X_IN, X, XI_IN, XI, Y_IN, Y, YI_IN, YI, YW_IN, YW, NA, NM)
-    ! Encode embeddings if the are provided.
+    ! Encode embeddings if they are provided.
     IF ((CONFIG%MDE + CONFIG%ADE .GT. 0) .AND. (&
          (.NOT. CONFIG%XI_NORMALIZED) .OR. (.NOT. CONFIG%AXI_NORMALIZED))) THEN
        CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI(:,:NM), AX(:,:NA), X(:,:NM))
@@ -4116,55 +4116,3 @@ CONTAINS
   END SUBROUTINE FIT_MODEL
 
 END MODULE AXY
-
-
-
-!2023-11-26 14:15:56
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! IF (CONFIG%GRANULAR_PARALLELISM) THEN                                                   !
-!    ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -              !
-!    !                                                                                    !
-!    !             Evaluate the model at all points, storing states.                      !
-!    ! Embed all integer inputs into real vector inputs.                                  !
-!    CALL EMBED(CONFIG, MODEL, AXI(:,:NA), XI(:,:NM), AX(:,:NA), X_GRADIENT(:,:NM))       !
-!    ! Evaluate the model, storing internal states (for gradient calculation).            !
-!    CALL EVALUATE(CONFIG, MODEL, AX(:,:NA), AY_GRADIENT(:NA,:), SIZES(:), &              !
-!         X_GRADIENT(:,:NM), Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), INFO) !
-!    IF (INFO .NE. 0) RETURN                                                              !
-!    ! If we are checking rank, we need to store evaluations separately from gradients.   !
-!    IF (CONFIG%RANK_CHECK_FREQUENCY .GT. 0) THEN                                         !
-!       IF (MOD(CONFIG%FIT_STEP-1,CONFIG%RANK_CHECK_FREQUENCY) .EQ. 0) THEN               !
-!          A_STATES(:NA,:,:) = A_GRADS(:NA,:,:)                                           !
-!          AY(:NA,:) = AY_GRADIENT(:NA,:)                                                 !
-!          X(:,:NM) = X_GRADIENT(:,:NM)                                                   !
-!          M_STATES(:NM,:,:) = M_GRADS(:NM,:,:)                                           !
-!       ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN                            !
-!          IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN    !
-!             AY(:NA,:) = AY_GRADIENT(:NA,:)                                              !
-!          END IF                                                                         !
-!       END IF                                                                            !
-!    ELSE IF (CONFIG%MODEL_CONDITION_FREQUENCY .GT. 0) THEN                               !
-!       IF (MOD(CONFIG%STEPS_TAKEN-1,CONFIG%MODEL_CONDITION_FREQUENCY) .EQ. 0) THEN       !
-!          AY(:NA,:) = AY_GRADIENT(:NA,:)                                                 !
-!          X(:,:NM) = X_GRADIENT(:,:NM)                                                   !
-!       END IF                                                                            !
-!    END IF                                                                               !
-!    !                                                                                    !
-!    ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -              !
-!    !                       Compute model gradient                                       !
-!    !                                                                                    !
-!    ! Sum the gradient over all data. If a rank check will be                            !
-!    !  performed then store the states separate from the gradients.                      !
-!    !  Otherwise, only compute the gradients and reuse that memory space.                !
-!    SUM_SQUARED_ERROR = 0.0_RT                                                           !
-!    CALL MODEL_GRADIENT(CONFIG, MODEL(:), &                                              !
-!         AX(:,:NA), AXI(:,:NA), SIZES(:), X_GRADIENT(:,:NM), XI(:,:NM), &                !
-!         Y(:,:NM), YI(:,:NM), YW(:,:NM), &                                               !
-!         SUM_SQUARED_ERROR, MODEL_GRAD(:,:), INFO, AY_GRADIENT(:NA,:),  &                !
-!         Y_GRADIENT(:,:NM), A_GRADS(:NA,:,:), M_GRADS(:NM,:,:), &                        !
-!         A_EMB_TEMP(:,:,:), M_EMB_TEMP(:,:,:), O_EMB_TEMP(:,:,:), &                      !
-!         EMB_OUTS(:,:NM), EMB_GRADS(:,:NM))                                              !
-!    IF (INFO .NE. 0) RETURN                                                              !
-! ELSE                                                                                    !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
