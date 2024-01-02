@@ -154,7 +154,13 @@ CONTAINS
     ! Handle cases where I_LIMIT value could cause numerical issues.
     IF (I_LIMIT .LT. ZERO) THEN
        WRITE (0,*) 'ERROR (axy_random.f90): Invalid negative value provided for I_LIMIT to subroutine INITIALIZE_ITERATOR.'
-       CALL EXIT(1)
+       I_NEXT = ZERO
+       I_MULT = ZERO
+       I_STEP = ZERO
+       I_MOD = ZERO
+       I_ITER = ZERO
+       ! EXIT(1) ! This line forces a program exit on failures, doesn't work in shared library construction.
+       RETURN
     ELSE IF (I_LIMIT .LE. ZERO) THEN
        I_MOD = ONE
     ELSE
@@ -167,6 +173,8 @@ CONTAINS
     ! Set the iteration to zero.
     I_ITER = ZERO
     ! Unseed the random number generator if it was seeded.
+    !   TODO: This does not work or have any effect on the sytem random number generator.
+    !         Need to reevaluate whether or not this is necessary.
     IF (PRESENT(SEED)) THEN
        CALL RANDOM_SEED()
     END IF
