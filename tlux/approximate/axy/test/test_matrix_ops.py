@@ -5,20 +5,21 @@ import fmodpy
 mops = fmodpy.fimport("../axy_matrix_operations.f90", blas=True, lapack=True).matrix_operations
 
 # --------------------------------------------------------------------
-#                         ORTHOGONALIZE
+#                         ORTHONORMALIZE
 
 # Tested up to ~400 dimension, where it fails witih precision=5.
-def _test_orthogonalize(max_dimension=64, trials=100, precision=5):
-    print("orthogonalize..", end=" ", flush=True)
+def _test_orthonormalize(max_dimension=256, trials=100, precision=5):
+    print("orthonormalize..", end=" ", flush=True)
     # Test orthogonalization.
     np.set_printoptions(linewidth=1000)
-    for dimension in range(1, max_dimension+1):
+    import tqdm
+    for dimension in tqdm.tqdm(range(1, max_dimension+1)):
         for trial in range(trials):
             np.random.seed(trial)
             matrix = np.random.random(size=(dimension,dimension)).astype("float32")
             lengths = np.zeros(dimension, dtype="float32")
             ortho = matrix.copy()
-            mops.orthogonalize(ortho.T, lengths)
+            mops.orthonormalize(ortho.T, lengths)
             if (min(lengths) == 0.0): continue
             identity = np.identity(dimension).astype("float32")
             AtA = ortho.T @ ortho
@@ -30,7 +31,7 @@ def _test_orthogonalize(max_dimension=64, trials=100, precision=5):
                 f"matrix = np.asarray({matrix.tolist()}, dtype='float32')\n" \
                 f"lengths = np.zeros({dimension}, dtype='float32')\n" \
                 "ortho = matrix.copy()\n" \
-                f"mops.orthogonalize(ortho.T, lengths)\n" \
+                f"mops.orthonormalize(ortho.T, lengths)\n" \
                 f"bad_result = ortho.T @ ortho"
             AAt = ortho @ ortho.T
             assert (abs(AAt-identity).max()) < 10**(-precision), \
@@ -41,7 +42,7 @@ def _test_orthogonalize(max_dimension=64, trials=100, precision=5):
                 f"matrix = np.asarray({matrix.tolist()}, dtype='float32')\n" \
                 f"lengths = np.zeros({dimension}, dtype='float32')\n" \
                 "ortho = matrix.copy()\n" \
-                f"mops.orthogonalize(ortho.T, lengths)\n" \
+                f"mops.orthonormalize(ortho.T, lengths)\n" \
                 f"bad_result = ortho @ ortho.T"
     print("passed.", flush=True)
 
@@ -75,11 +76,12 @@ def random_data(num_points, dimension, box=10, skew=lambda x: 1 * x**2 / sum(x**
     variance = skew(np.random.random(size=(dimension,))).astype("float32")
     data = np.random.normal(center, variance, size=(num_points,dimension)).astype("float32")
     rotation = random_rotation(dimension).astype("float32")
-    return np.asarray(data @ rotation), center, variance, rotation
+    return data, center, variance, rotation
 
 # Test function for visually checking the "radialize" function.
 def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, seed=0, precision=4):
     print("radialize..", end=" ", flush=True)
+    print()
     # Generate data to test with.
     np.random.seed(seed)
     # Plotting.
@@ -90,33 +92,46 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, se
     # Trials.
     for i in range(num_trials):
         # Generate random data (that is skewed and placed off center).
-        x, shift, scale, rotation = random_data(num_points, dimension)
+        x, shifted_by, scaled_by, rotate_by = random_data(num_points, dimension)
         # Generate the radialized version.
         shift = np.zeros(dimension, dtype="float32")
         transform = np.zeros((dimension, dimension), dtype="float32", order="F")
         inverse = np.zeros((dimension, dimension), dtype="float32", order="F")
-        to_flatten = (i % 2) == 0
-        xr, shift, transform, inverse = mops.radialize(
-            x=(x.copy()).T, shift=shift, vecs=transform, inverse=inverse,
-            max_to_flatten=(0 if to_flatten else None),
+        order = np.zeros(dimension, dtype="int32")
+        to_flatten = (i % 2) == 1
+        xr, shift, transform, inverse, order = mops.radialize(
+            x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
+            max_to_flatten=(None if to_flatten else 0),
+            maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
+        # 
+            svd_steps=1,
+            svd_update=False,
         )
+        # Debugging values.
+        scale_after_rotation = np.linalg.norm((np.identity(dimension) * scaled_by) @ rotate_by, axis=0)
+        value_norm = (xr**2).mean()
+        # Single steps of SVD.
+        order.sort()
+        steps = 10
+        for s in range(steps):
+            xr, shift, transform, inverse, order = mops.radialize(
+                x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
+                max_to_flatten=(None if to_flatten else 0),
+                maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
+                svd_steps=1, # TODO: Doing more outer steps should be equivalent, but this is dominating.
+                svd_update=True,
+            )
+        # 
         # Use the inverse to "fix" the data back to its original form.
         xf = (inverse.T @ xr).T
         xf -= shift
         # Use the provided shift and transform to repeate the radialization process.
-        xrr = ((x + shift) @ transform).T
-        # 
-        # print("", flush=True)
-        # print("i: ", i, flush=True)
-        # print("  abs(x - xf).max():   ", abs(x - xf).mean(), flush=True)
-        # print("  abs(xr - xrr).max(): ", abs(xr - xrr).mean(), flush=True)
-        # print("  min(inverse.norn):   ", np.linalg.norm(inverse,axis=1).min(), flush=True)
-        # print("  max(inverse.norn):   ", np.linalg.norm(inverse,axis=1).max(), flush=True)
+        xrr = (((x@rotate_by) + shift) @ transform).T
         # 
         # Plotting.
         if show:
             descriptor = 'radialized' if to_flatten else 'normalized'
-            p.add(f"{i+1}", *x.T, marker_size=3)
+            p.add(f"{i+1}", *(x@rotate_by).T, marker_size=3)
             p.add(f"{i+1} {descriptor}", *xr, marker_size=3)
             p.add(f"{i+1} fixed", *xf.T, marker_size=3)
             p.add(f"{i+1} re {descriptor}", *xrr, marker_size=3)
@@ -126,19 +141,36 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, se
         min_norm = np.linalg.norm(inverse,axis=1).min()
         if (min_norm > 0):
             # Validate the accuracy of the transformations.
-            assert (abs(x - xf).mean() < 10**(-precision)), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
+            assert (abs((x@rotate_by) - xf).mean() < 10**(-precision)), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
             assert (abs(xr - xrr).mean() < 10**(-precision)), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
         else:
             # Validate the accuracy of the transformations.
-            assert (abs(x - xf).mean() < 0.0002), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
+            assert (abs((x@rotate_by) - xf).mean() < 0.0002), f"Error in recreated data (by applying the returned 'inverse' to normalized data) is too high."
             assert (abs(xr - xrr).mean() < 0.0002), f"Error in renormalized data (by applying 'shift' and 'vecs' to the input data) is too high."
 
-
+        # Check that the mean-zero and componentwise scaling properties are maintained.
+        shift_max_error = np.percentile(np.abs(xrr.mean(axis=1)), 0.95)
+        assert (shift_max_error < 10**(-precision)), f"Shift maximum error is too high, {shift_max_error} > 10^({-precision})."
+        to_keep = (np.linalg.norm(transform, axis=0) > 0)
+        # Depending on whether data was flattened, either look at the average deviation of points.
+        if (to_flatten):
+            print("test_matrix_ops.py Line 148: ", flush=True)
+            scale_max_error = 1-xrr[to_keep].std(axis=1)
+            scale_max_error = np.max(np.abs(scale_max_error))
+        else:
+            print("test_matrix_ops.py Line 152: ", flush=True)
+            scale_max_error = np.std(xrr[to_keep], axis=1)
+            scale_max_error = abs(1.0 - scale_max_error.mean())
+        print("scale_max_error: ", scale_max_error, flush=True)
+        assert (scale_max_error < 10**(-precision)), f"Scale maximum error is too high, {scale_max_error} > 10^({-precision})."        
+        # 
+        # INFO: Should we verify that the "correct" shift and rotation were discovered?
+        #       Or is it sufficient to check that the data meets our desired properties?
+        # 
     # Plotting.
-    if (show): p.show()
+    if (show): p.show(file_name="/tmp/test_matrix_ops_radialize.html", aspect_mode="data")
     # Finished.
     print("passed.", flush=True)
-
 
 
 # --------------------------------------------------------------------
@@ -201,6 +233,17 @@ def _test_least_squares():
 
 
 if __name__ == "__main__":
-    _test_orthogonalize()
-    _test_radialize(show=True)
+    # _test_orthonormalize(max_dimension=64, trials=100)  # Passes up to 256 in ~2 minutes.
+    _test_radialize(
+        show=True, # "show" only goes into effect when dimension <= 3
+        dimension=6,
+        num_trials=2
+    )
     # _test_least_squares()
+
+
+
+# TODO:
+# 
+# The magnitude appears to be incorrect when radializing with one SVD step.
+# 

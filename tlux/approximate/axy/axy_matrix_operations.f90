@@ -131,7 +131,7 @@ CONTAINS
 
 
   ! Orthogonalize and normalize column vectors of A with pivoting.
-  SUBROUTINE ORTHOGONALIZE(A, LENGTHS, RANK, ORDER, MULTIPLIERS)
+  SUBROUTINE ORTHONORMALIZE(A, LENGTHS, RANK, ORDER, MULTIPLIERS)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: A
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: LENGTHS ! SIZE(A,2)
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
@@ -141,7 +141,10 @@ CONTAINS
     INTEGER :: I, J, K
     IF (PRESENT(RANK)) RANK = 0
     IF (PRESENT(ORDER)) THEN
-       FORALL (I=1:SIZE(A,2)) ORDER(I) = I
+       ! If ORDER does not look like it contains all indices, then reset it.
+       IF ((MINVAL(ORDER) .NE. 1) .OR. (MAXVAL(ORDER) .NE. SIZE(LENGTHS))) THEN
+          FORALL (I=1:SIZE(A,2)) ORDER(I) = I
+       END IF
     END IF
     IF (PRESENT(MULTIPLIERS)) THEN
        MULTIPLIERS(:,:) = 0.0_RT
@@ -187,6 +190,7 @@ CONTAINS
                 A(:,I) = A(:,I) - DOT_PRODUCT(A(:,I), A(:,J)) * A(:,J)
                 A(:,I) = A(:,I) / NORM2(A(:,I))
              END DO
+             ! WARNING: Now the length of this vector might be shorter than 1.
           END IF
           ! 
           ! Proceed to remove this direction from remaining vectors, if there are others.
@@ -210,29 +214,65 @@ CONTAINS
           EXIT column_orthogonolization
        END IF
     END DO column_orthogonolization
-  END SUBROUTINE ORTHOGONALIZE
+  END SUBROUTINE ORTHONORMALIZE
 
-  ! Compute the singular values and right singular vectors for matrix A.
+  ! Compute the singular values and right singular vectors for matrix A of column vectors
+  ! via power iterations. Asssumes data is already "safe", having removed any invalid
+  ! numbers. Internally this routine scales the matrix so that the largest entry in the
+  ! Gram matrix is at most 1 (before applying BIAS). This routine also allows for an
+  ! update of given singular vectors provided or (by default) a fresh computation.
   ! 
-  ! TODO: Add an INFO flag that can be used to raise errors.
-  ! TODO: Move allocation to be allowed as input.
+  !   A(D,N) -- Real matrix of 'N' vectors in 'D' dimension.
   ! 
-  SUBROUTINE SVD(A, S, VT, RANK, STEPS, BIAS)
+  !   S(MIN(D,N)) -- Real singular values associated with the singular vectors.
+  ! 
+  !   VT(D,MIN(D,N)) -- Real singular (column) vectors of the matrix A.
+  ! 
+  !   RANK -- Optional integer output, the rank of the data matrix A.
+  ! 
+  !   STEPS -- Optional integer input, the number of power iteration steps to take,
+  !            default of 10 (which is "small", use larger numbers for improved accuracy).
+  ! 
+  !   BIAS -- Optional real multiplier applied to the Gram matrix after it is normalized.
+  !           Advised to be greater than 1.0, so that it will cause smaller singular values
+  !           to "vanish" to zero.
+  ! 
+  !   UPDATE_VT -- Optional with default FALSE, but when TRUE this routine will only apply
+  !                a power iteration (and orthogonalization) to the provided matrix.
+  ! 
+  !   ORDER(D) -- Optional integer array that, when provided, will hold the original indices
+  !               of the columns of VT *before* orthogonalization was applied upon completion.
+  ! 
+  SUBROUTINE SVD(A, S, VT, RANK, STEPS, BIAS, UPDATE_VT, ORDER)
+    ! 
+    ! TODO: Fix computation of SVD when matrix has more columns than rows. Avoid SYRK.
+    ! TODO: Add an INFO flag that can be used to raise errors.
+    ! TODO: Move allocation to be allowed as input.
+    ! 
     REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: S ! MIN(SIZE(A,1),SIZE(A,2))
-    REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
     INTEGER, INTENT(OUT), OPTIONAL :: RANK
     INTEGER, INTENT(IN), OPTIONAL :: STEPS
     REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
+    LOGICAL, INTENT(IN), OPTIONAL :: UPDATE_VT
+    INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER ! SIZE(VT,2)
     ! Local variables.
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: ATA, Q
     INTEGER :: I, J, K, NUM_STEPS
     REAL(KIND=RT) :: MULTIPLIER
+    LOGICAL :: INITIALIZE_VT
     ! Set the number of steps, the number of sequential matrix multiplications.
     IF (PRESENT(STEPS)) THEN
        NUM_STEPS = STEPS
     ELSE
        NUM_STEPS = 10
+    END IF
+    ! Set whether or not to update VT.
+    IF (PRESENT(UPDATE_VT)) THEN
+       INITIALIZE_VT = .NOT. UPDATE_VT
+    ELSE
+       INITIALIZE_VT = .TRUE.
     END IF
     ! Set "K" (the number of components).
     K = MIN(SIZE(A,1), SIZE(A,2))
@@ -245,14 +285,14 @@ CONTAINS
        VT(:,:) = 0.0_RT
        RETURN
     END IF
-    IF (PRESENT(BIAS)) MULTIPLIER = MULTIPLIER / BIAS
     MULTIPLIER = 1.0_RT / MULTIPLIER
+    IF (PRESENT(BIAS)) MULTIPLIER = MULTIPLIER * BIAS
     ! Compute ATA.
     IF (SIZE(A,1) .LE. SIZE(A,2)) THEN
        ! ATA(:,:) = MATMUL(AT(:,:), TRANSPOSE(AT(:,:)))
        CALL SYRK('U', 'N', K, SIZE(A,2), MULTIPLIER**2, A(:,:), &
             SIZE(A,1), 0.0_RT, ATA(:,:), K)
-    ELSE
+    ELSE ! TODO: This is *wrong*, just avoid the computaiton entirely.
        ! ATA(:,:) = MATMUL(TRANSPOSE(A(:,:)), A(:,:))
        CALL SYRK('U', 'T', K, SIZE(A,1), MULTIPLIER**2, A(:,:), &
             SIZE(A,1), 0.0_RT, ATA(:,:), K)
@@ -261,15 +301,18 @@ CONTAINS
     DO I = 1, K
        ATA(I+1:,I) = ATA(I,I+1:)
     END DO
-    ! Compute initial right singular vectors.
-    VT(1:SIZE(ATA,1),1:SIZE(ATA,2)) = ATA(:,:)
-    ! Fill remaining entries (if extra were provided) with zeros.
-    IF ((SIZE(VT,1) .GT. SIZE(ATA,1)) .OR. (SIZE(VT,2) .GT. SIZE(ATA,2))) THEN
-       VT(SIZE(ATA,1)+1:,:) = 0.0_RT
-       VT(1:SIZE(ATA,1),SIZE(ATA,2)+1:) = 0.0_RT
+    ! If VT needs to be initialized, then do that.
+    IF (INITIALIZE_VT) THEN
+       ! Compute initial right singular vectors.
+       VT(1:SIZE(ATA,1),1:SIZE(ATA,2)) = ATA(:,:)
+       ! Fill remaining entries (if extra were provided) with zeros.
+       IF ((SIZE(VT,1) .GT. SIZE(ATA,1)) .OR. (SIZE(VT,2) .GT. SIZE(ATA,2))) THEN
+          VT(SIZE(ATA,1)+1:,:) = 0.0_RT
+          VT(1:SIZE(ATA,1),SIZE(ATA,2)+1:) = 0.0_RT
+       END IF
     END IF
     ! Orthogonalize and reorder by magnitudes.
-    CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
+    CALL ORTHONORMALIZE(VT(:,:), S(:), RANK, ORDER=ORDER)
     ! Do power iterations.
     power_iteration : DO I = 1, NUM_STEPS
        Q(:,:) = VT(1:SIZE(Q,1),1:SIZE(Q,2))
@@ -277,7 +320,7 @@ CONTAINS
        CALL GEMM('N', 'N', K, K, K, 1.0_RT, &
             ATA(:,:), K, Q(:,:), K, 0.0_RT, &
             VT(:,:), K)
-       CALL ORTHOGONALIZE(VT(:,:), S(:), RANK)
+       CALL ORTHONORMALIZE(VT(:,:), S(:), RANK, ORDER=ORDER)
     END DO power_iteration
     ! Compute the singular values.
     WHERE (S(:) .GT. 0.0_RT)
@@ -286,78 +329,6 @@ CONTAINS
     ! Free memory.
     DEALLOCATE(ATA, Q)
   END SUBROUTINE SVD
-
-
-  ! ! Project a matrix down to MAX_SIZE first (if it is larger), then perform an SVD.
-  ! SUBROUTINE PROJECTED_SVD(A, S, VT, RANK, STEPS, BIAS, MAX_SIZE)
-  !   REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
-  !   REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: S ! MIN(SIZE(A,1),SIZE(A,2))
-  !   REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
-  !   INTEGER, INTENT(OUT), OPTIONAL :: RANK
-  !   INTEGER, INTENT(IN), OPTIONAL :: STEPS
-  !   INTEGER, INTENT(IN), OPTIONAL :: MAX_SIZE
-  !   REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
-  !   ! Local variables.
-  !   REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: A_LOCAL, PROJECTION
-  !   REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: LENGTHS
-  !   INTEGER :: I, J, K, NUM_STEPS, PRANK
-  !   REAL(KIND=RT) :: R1, R2
-  !   ! Set "K" (the number of components), the size of A that
-  !   !  will be used here (bounded for numerical stability).
-  !   IF (PRESENT(MAX_SIZE)) THEN
-  !      K = MIN(MIN(SIZE(A,1), SIZE(A,2)), MAX_SIZE)
-  !   ELSE
-  !      K = MIN(MIN(SIZE(A,1), SIZE(A,2)), 128)
-  !   END IF
-  !   ! Reduce A to a smaller form with a random orthogonal projection.
-  !   IF (K .LT. MIN(SIZE(A,1), SIZE(A,2))) THEN
-  !      ! Generate a random projection (uniform density over the sphere).
-  !      ALLOCATE( PROJECTION(1:MIN(SIZE(A,1), SIZE(A,2)), 1:K), LENGTHS(1:K) )
-  !      PROJECTION(:,:) = 0.0_RT
-  !      DO J = 1, SIZE(PROJECTION, 2)
-  !         DO I = 1, SIZE(PROJECTION, 1)
-  !            CALL RANDOM_NUMBER(R1)
-  !            CALL RANDOM_NUMBER(R2)
-  !            IF (R1 .GT. EPSILON(R1)) THEN
-  !               PROJECTION(I,J) = SQRT(-LOG(R1)) * COS(PI*R2)
-  !            END IF
-  !         END DO
-  !      END DO
-  !      ! Orthogonalize the random projection.
-  !      CALL ORTHOGONALIZE(PROJECTION(:,:), LENGTHS(:), RANK=PRANK)
-  !      ! If the projection did not have full rank, add new random vectors.
-  !      ! Try at most "K" times to create new vectors, otherwise give up.
-  !      DO NUM_STEPS = 1, K
-  !         DO J = PRANK+1, SIZE(PROJECTION, 2)
-  !            DO I = 1, SIZE(PROJECTION, 1)
-  !               CALL RANDOM_NUMBER(R1)
-  !               CALL RANDOM_NUMBER(R2)
-  !               IF (R1 .GT. EPSILON(R1)) THEN
-  !                  PROJECTION(I,J) = SQRT(-LOG(R1)) * COS(PI*R2)
-  !               END IF
-  !            END DO
-  !         END DO
-  !         CALL ORTHOGONALIZE(PROJECTION(:,:), LENGTHS(:), RANK=PRANK)
-  !         IF (PRANK .EQ. K) EXIT
-  !      END DO
-  !      ! Project the matrix down.
-  !      IF (SIZE(A,1) .LT. SIZE(A,2)) THEN
-  !         A_LOCAL = MATMUL(TRANSPOSE(A), PROJECTION)
-  !      ELSE
-  !         A_LOCAL = MATMUL(A, PROJECTION)
-  !      END IF
-  !   ELSE
-  !      A_LOCAL = A
-  !   END IF
-  !   ! Compute the SVD over A_LOCAL.
-  !   CALL SVD(A_LOCAL, S, VT, RANK, STEPS, BIAS)
-  !   ! Project VT back into the original domain.
-  !   IF (K .LT. MIN(SIZE(A,1), SIZE(A,2))) THEN
-  !      ! TODO: This doesn't handle the cases or sizes correctly.
-  !      VT(:,:) = MATMUL(VT, TRANSPOSE(PROJECTION))
-  !   END IF
-  ! END SUBROUTINE PROJECTED_SVD
-
 
 
   ! If there are at least as many data points as dimension, then
@@ -377,6 +348,9 @@ CONTAINS
   ! 
   !   INVERSE -- Optional output, the inverse of VECS.
   ! 
+  !   ORDER -- Optional integer array that, when provided, will hold the original indices
+  !            of the columns of VECS *before* orthogonalization was applied upon completion.
+  ! 
   !   MAX_TO_FLATTEN -- Optional input, the integer maximum number of components to flatten
   !                     (rescale by their singular value) while the rest simply get divided
   !                     by the first (maximum) singular value.
@@ -391,26 +365,39 @@ CONTAINS
   !   SVD_STEPS -- Optional input, the integer number of power-iterations to take when estimating
   !                the principal components of the data with the SVD of the covariance matrix.
   ! 
-  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERSE, MAXBOUND, MAX_TO_FLATTEN, MAX_TO_SQUARE, SVD_STEPS)
+  !   SVD_UPDATE -- Optional input, the logical flag that should be TRUE if an SVD update
+  !                 should be performed instead of doing one from scratch. Default is FALSE.
+  ! 
+  !   APPLY -- Optional input with default TRUE, apply the radialization to data matrix X.
+  ! 
+  SUBROUTINE RADIALIZE(X, SHIFT, VECS, INVERSE, ORDER, MAXBOUND, MAX_TO_FLATTEN, &
+       MAX_TO_SQUARE, SVD_STEPS, SVD_UPDATE, APPLY)
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: SHIFT
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VECS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:), OPTIONAL :: INVERSE
+    INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER
     LOGICAL, INTENT(IN), OPTIONAL :: MAXBOUND
-    INTEGER, INTENT(IN), OPTIONAL :: MAX_TO_FLATTEN, SVD_STEPS
+    INTEGER, INTENT(IN), OPTIONAL :: MAX_TO_FLATTEN
     INTEGER(KIND=INT64), INTENT(IN), OPTIONAL :: MAX_TO_SQUARE
+    INTEGER, INTENT(IN), OPTIONAL :: SVD_STEPS
+    LOGICAL, INTENT(IN), OPTIONAL :: SVD_UPDATE
+    LOGICAL, INTENT(IN), OPTIONAL :: APPLY
     ! Local variables.
     LOGICAL :: SCALE_BY_AVERAGE
     LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: VALIDITY_MASK
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: TEMP_VECS
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, SCALAR, MINS
+    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, MINS, SCALAR
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: X1
-    INTEGER(KIND=INT64) :: I, D, N
+    INTEGER(KIND=INT64) :: I, O, D, N
     INTEGER(KIND=INT64) :: NMAX
     INTEGER :: TO_FLATTEN
+    LOGICAL :: APPLY_TO_X
+    ! --------------------------------------------------------
     D = SIZE(X,1,KIND=INT64)
     N = SIZE(X,2,KIND=INT64)
-    ! LOCAL ALLOCATION
+    ! LOCAL ALLOCATION (D (N 5 + 16)) = (N D 5 + D 16) = (N D 4) + (N D 1) + (4 D 4)
+    !   
     ALLOCATE( &
          VALIDITY_MASK(N, D), &
          VALS(D), &
@@ -419,6 +406,7 @@ CONTAINS
          SCALAR(D), &
          X1(D, N) &
     )
+    ! --------------------------------------------------------
     ! Set the default value for "FLAT".
     IF (PRESENT(MAX_TO_FLATTEN)) THEN
        TO_FLATTEN = MAX(0, MIN(MAX_TO_FLATTEN, INT(D)))
@@ -437,17 +425,26 @@ CONTAINS
     ELSE
        NMAX = MIN(10000000_INT64, N)
     END IF
+    ! Set default "APPLY_TO_X".
+    IF (PRESENT(APPLY)) THEN
+       APPLY_TO_X = APPLY
+    ELSE
+       APPLY_TO_X = .TRUE.
+    END IF
+    ! Make a copy of X into working space.
+    X1(:,:) = X(:,:)
+    ! --------------------------------------------------------
     ! Shift the data to be be centered about the origin.
     !$OMP PARALLEL DO
     DO I = 1, D
        ! Identify the location of "bad values" (Inf and NaN).
        VALIDITY_MASK(:,I) = (&
-            IS_NAN(X(I,:)) .OR. &
-            (.NOT. IS_FINITE(X(I,:))) .OR. &
-            (ABS(X(I,:)) .GT. (HUGE(X(I,1)) / 2.0_RT)))
+            IS_NAN(X1(I,:)) .OR. &
+            (.NOT. IS_FINITE(X1(I,:))) .OR. &
+            (ABS(X1(I,:)) .GT. (HUGE(X1(I,1)) / 2.0_RT)))
        ! Set all nonnumber values to zero (so they do not affect computed shifts).
        WHERE (VALIDITY_MASK(:,I))
-          X(I,:) = 0.0_RT
+          X1(I,:) = 0.0_RT
        END WHERE
        ! Count the number of valid numbers in each component.
        RN(I) = MAX(1.0_RT, REAL(N - COUNT(VALIDITY_MASK(:,I), KIND=INT64), KIND=RT))
@@ -455,38 +452,42 @@ CONTAINS
        VALIDITY_MASK(:,I) = .NOT. VALIDITY_MASK(:,I)
        ! Compute the minimum value for this column.
        MINS(I) = 0.0_RT
-       MINS(I) = MINVAL(X(I,:), MASK=VALIDITY_MASK(:,I))
+       MINS(I) = MINVAL(X1(I,:), MASK=VALIDITY_MASK(:,I))
        ! Rescale the input components individually to be
        !  in [0,1] to prevent numerical issues with SVD.
        SCALAR(I) = 1.0_RT
-       SCALAR(I) = MAXVAL(X(I,:), MASK=VALIDITY_MASK(:,I)) - MINS(I)
+       SCALAR(I) = MAXVAL(X1(I,:), MASK=VALIDITY_MASK(:,I)) - MINS(I)
        IF (SCALAR(I) .NE. 0.0_RT) THEN
           WHERE (VALIDITY_MASK(:,I))
-             X(I,:) = (X(I,:) - MINS(I)) / SCALAR(I)
+             X1(I,:) = (X1(I,:) - MINS(I)) / SCALAR(I)
           END WHERE
        ELSE
           WHERE (VALIDITY_MASK(:,I))
-             X(I,:) = (X(I,:) - MINS(I))
+             X1(I,:) = (X1(I,:) - MINS(I))
           END WHERE
           SCALAR(I) = 1.0_RT
        END IF
        ! Shift all valid numbers by the mean.
        !   NOTE: mask was inverted above to capture VALID numbers.
-       SHIFT(I) = -SUM(X(I,:), MASK=VALIDITY_MASK(:,I)) / RN(I) 
+       SHIFT(I) = -SUM(X1(I,:), MASK=VALIDITY_MASK(:,I)) / RN(I) 
        WHERE (VALIDITY_MASK(:,I))
-          X(I,:) = X(I,:) + SHIFT(I)
+          X1(I,:) = X1(I,:) + SHIFT(I)
        END WHERE
        ! Reincorporate the [0,1] rescaling into the shift term.
        SHIFT(I) = SHIFT(I) * SCALAR(I) - MINS(I)
     END DO
+    ! --------------------------------------------------------
     ! Set the unused portion of the "VECS" matrix to the identity.
-    VECS(:,D+1:) = 0.0_RT
-    VECS(D+1:,1:D) = 0.0_RT
-    DO I = D+1, MIN(SIZE(VECS,1,KIND=INT64), SIZE(VECS,2,KIND=INT64))
-       VECS(I,I) = 1.0_RT
-    END DO
+    IF (MAXVAL(SHAPE(VECS)) .GT. D) THEN
+       VECS(:,D+1:) = 0.0_RT
+       VECS(D+1:,1:D) = 0.0_RT
+       DO I = D+1, MIN(SIZE(VECS,1,KIND=INT64), SIZE(VECS,2,KIND=INT64))
+          VECS(I,I) = 1.0_RT
+       END DO
+    END IF
     ! Find the directions along which the data is most elongated.
-    CALL SVD(X(:,:NMAX), VALS, VECS(1:D,1:D), STEPS=SVD_STEPS)
+    CALL SVD(X1(:,:NMAX), VALS, VECS(1:D,1:D), STEPS=SVD_STEPS, UPDATE_VT=SVD_UPDATE, ORDER=ORDER)
+    ! --------------------------------------------------------
     ! Update the singular values associated with each vector (based on desired flatness outcome).
     IF (TO_FLATTEN .GT. 0) THEN
        VALS(:) = VALS(:) / SQRT(RN)
@@ -504,13 +505,15 @@ CONTAINS
        DO I = 1, D
           IF (VALS(I) .GT. 0.0_RT) THEN
              INVERSE(I,1:D) = VALS(I) * VECS(1:D,I) * SCALAR(:)
-          ELSE
+          ELSE ! NOTE: Zero-valued vectors are still included in inverse at unit length.
              INVERSE(I,1:D) = VECS(1:D,I) * SCALAR(:)
           END IF
        END DO
        ! Set all elements of INVERSE that are not touched to zero.
-       INVERSE(:,D+1:) = 0.0_RT
-       INVERSE(D+1:,1:D) = 0.0_RT
+       IF (MAXVAL(SHAPE(INVERSE)) .GT. D) THEN
+          INVERSE(:,D+1:) = 0.0_RT
+          INVERSE(D+1:,1:D) = 0.0_RT
+       END IF
     END IF
     ! Normalize the values associated with the singular vectors to
     !  make the output componentwise unit mean squared magnitude.
@@ -523,15 +526,16 @@ CONTAINS
        END IF
     END DO
     ! Divide the remaining vectors by the first (largest) singular value.
-    IF (VALS(1) .GT. SQRT(EPSILON(0.0_RT))) THEN
+    IF ((TO_FLATTEN .LT. SIZE(VECS,2)) .AND. (VALS(1) .GT. SQRT(EPSILON(0.0_RT)))) THEN
        VECS(:,TO_FLATTEN+1:) = VECS(:,TO_FLATTEN+1:) / VALS(1)
     END IF
     ! Apply the scaled singular vectors to the data to normalize.
-    X1(:,:) = X(:,:) 
-    CALL GEMM('T', 'N', INT(D,INT32), SIZE(X,2), INT(D,INT32), 1.0_RT, &
-         VECS(1:D,1:D), INT(D,INT32), &
-         X1(:,:), INT(D,INT32), &
-         0.0_RT, X(:,:), INT(D,INT32))
+    IF (APPLY_TO_X) THEN
+       CALL GEMM('T', 'N', INT(D,INT32), SIZE(X,2), INT(D,INT32), 1.0_RT, &
+            VECS(1:D,1:D), INT(D,INT32), &
+            X1(:,:), INT(D,INT32), &
+            0.0_RT, X(:,:), INT(D,INT32))
+    END IF
     ! Apply the exact same transformation to the vectors
     ! that was already applied to X to normalize original
     ! component scale, because these vectors should
@@ -539,6 +543,24 @@ CONTAINS
     DO I = 1, D
        VECS(I,1:D) = VECS(I,1:D) / SCALAR(I)
     END DO
+    ! If an update was performed, reset the order of the data to its original values.
+    IF (PRESENT(SVD_UPDATE) .AND. PRESENT(ORDER)) THEN
+       IF (SVD_UPDATE) THEN
+          APPLY_TO_X = .FALSE.
+          find_out_of_order_element : DO I = 1, D
+             IF (ORDER(I) .NE. I) THEN
+                APPLY_TO_X = .TRUE.
+                EXIT find_out_of_order_element
+             END IF
+          END DO find_out_of_order_element
+          ! If 1 of the vecs is out of order, then reorder everything correctly.
+          IF (APPLY_TO_X) THEN
+             VECS(1:D,ORDER(1:D)) = VECS(1:D,1:D)
+             INVERSE(ORDER(1:D),1:D) = INVERSE(1:D,1:D)
+             ORDER(ORDER(1:D)) = ORDER(1:D)
+          END IF
+       END IF
+    END IF
     ! Deallocate local memory.
     DEALLOCATE(VALIDITY_MASK, VALS, RN, MINS, SCALAR, X1)
   END SUBROUTINE RADIALIZE
@@ -606,3 +628,77 @@ CONTAINS
 
 
 END MODULE MATRIX_OPERATIONS
+
+
+
+  ! ! Project a matrix down to MAX_SIZE first (if it is larger), then perform an SVD.
+  ! SUBROUTINE PROJECTED_SVD(A, S, VT, RANK, STEPS, BIAS, MAX_SIZE)
+  !   REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: A
+  !   REAL(KIND=RT), INTENT(OUT), DIMENSION(:) :: S ! MIN(SIZE(A,1),SIZE(A,2))
+  !   REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: VT ! MIN(SIZE(A,1),SIZE(A,2)), MIN(SIZE(A,1),SIZE(A,2))
+  !   INTEGER, INTENT(OUT), OPTIONAL :: RANK
+  !   INTEGER, INTENT(IN), OPTIONAL :: STEPS
+  !   INTEGER, INTENT(IN), OPTIONAL :: MAX_SIZE
+  !   REAL(KIND=RT), INTENT(IN), OPTIONAL :: BIAS
+  !   ! Local variables.
+  !   REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: A_LOCAL, PROJECTION
+  !   REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: LENGTHS
+  !   INTEGER :: I, J, K, NUM_STEPS, PRANK
+  !   REAL(KIND=RT) :: R1, R2
+  !   ! Set "K" (the number of components), the size of A that
+  !   !  will be used here (bounded for numerical stability).
+  !   IF (PRESENT(MAX_SIZE)) THEN
+  !      K = MIN(MIN(SIZE(A,1), SIZE(A,2)), MAX_SIZE)
+  !   ELSE
+  !      K = MIN(MIN(SIZE(A,1), SIZE(A,2)), 128)
+  !   END IF
+  !   ! Reduce A to a smaller form with a random orthogonal projection.
+  !   IF (K .LT. MIN(SIZE(A,1), SIZE(A,2))) THEN
+  !      ! Generate a random projection (uniform density over the sphere).
+  !      ALLOCATE( PROJECTION(1:MIN(SIZE(A,1), SIZE(A,2)), 1:K), LENGTHS(1:K) )
+  !      PROJECTION(:,:) = 0.0_RT
+  !      DO J = 1, SIZE(PROJECTION, 2)
+  !         DO I = 1, SIZE(PROJECTION, 1)
+  !            CALL RANDOM_NUMBER(R1)
+  !            CALL RANDOM_NUMBER(R2)
+  !            IF (R1 .GT. EPSILON(R1)) THEN
+  !               PROJECTION(I,J) = SQRT(-LOG(R1)) * COS(PI*R2)
+  !            END IF
+  !         END DO
+  !      END DO
+  !      ! Orthogonalize the random projection.
+  !      CALL ORTHONORMALIZE(PROJECTION(:,:), LENGTHS(:), RANK=PRANK)
+  !      ! If the projection did not have full rank, add new random vectors.
+  !      ! Try at most "K" times to create new vectors, otherwise give up.
+  !      DO NUM_STEPS = 1, K
+  !         DO J = PRANK+1, SIZE(PROJECTION, 2)
+  !            DO I = 1, SIZE(PROJECTION, 1)
+  !               CALL RANDOM_NUMBER(R1)
+  !               CALL RANDOM_NUMBER(R2)
+  !               IF (R1 .GT. EPSILON(R1)) THEN
+  !                  PROJECTION(I,J) = SQRT(-LOG(R1)) * COS(PI*R2)
+  !               END IF
+  !            END DO
+  !         END DO
+  !         CALL ORTHONORMALIZE(PROJECTION(:,:), LENGTHS(:), RANK=PRANK)
+  !         IF (PRANK .EQ. K) EXIT
+  !      END DO
+  !      ! Project the matrix down.
+  !      IF (SIZE(A,1) .LT. SIZE(A,2)) THEN
+  !         A_LOCAL = MATMUL(TRANSPOSE(A), PROJECTION)
+  !      ELSE
+  !         A_LOCAL = MATMUL(A, PROJECTION)
+  !      END IF
+  !   ELSE
+  !      A_LOCAL = A
+  !   END IF
+  !   ! Compute the SVD over A_LOCAL.
+  !   CALL SVD(A_LOCAL, S, VT, RANK, STEPS, BIAS)
+  !   ! Project VT back into the original domain.
+  !   IF (K .LT. MIN(SIZE(A,1), SIZE(A,2))) THEN
+  !      ! TODO: This doesn't handle the cases or sizes correctly.
+  !      VT(:,:) = MATMUL(VT, TRANSPOSE(PROJECTION))
+  !   END IF
+  ! END SUBROUTINE PROJECTED_SVD
+
+
