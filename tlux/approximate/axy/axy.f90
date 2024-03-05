@@ -73,7 +73,7 @@ MODULE AXY
   USE RANDOM, ONLY: SEED_RANDOM, RANDOM_INTEGER, RANDOM_REAL, RANDOM_UNIT_VECTORS, &
        INITIALIZE_ITERATOR, INDEX_TO_PAIR, PAIR_TO_INDEX, GET_NEXT_INDEX
   USE SORT_AND_SELECT, ONLY: ARGSORT, ARGSELECT
-  USE MATRIX_OPERATIONS, ONLY: GEMM, ORTHOGONALIZE, RADIALIZE, LEAST_SQUARES
+  USE MATRIX_OPERATIONS, ONLY: GEMM, ORTHONORMALIZE, RADIALIZE, LEAST_SQUARES
   USE PROFILER, ONLY: START_PROFILING, STOP_PROFILING
 
   IMPLICIT NONE
@@ -91,6 +91,7 @@ MODULE AXY
      INTEGER(KIND=INT32) :: ANE = 0 ! aggregator number of embeddings
      INTEGER(KIND=INT32) :: ADS = 0 ! aggregator dimension of state
      INTEGER(KIND=INT32) :: ANS = 0 ! aggregator number of states
+     INTEGER(KIND=INT32) :: ANC = 0 ! aggregator number of chords
      INTEGER(KIND=INT32) :: ADO     ! aggregator dimension of output
      INTEGER(KIND=INT32) :: ADI     ! aggregator dimension of input (internal usage only)
      INTEGER(KIND=INT32) :: ADSO    ! aggregator dimension of state output (internal usage only)
@@ -100,6 +101,7 @@ MODULE AXY
      INTEGER(KIND=INT32) :: MNE = 0 ! model number of embeddings
      INTEGER(KIND=INT32) :: MDS = 0 ! model dimension of state
      INTEGER(KIND=INT32) :: MNS = 0 ! model number of states
+     INTEGER(KIND=INT32) :: MNC = 0 ! model number of chords
      INTEGER(KIND=INT32) :: MDO     ! model dimension of output
      INTEGER(KIND=INT32) :: MDI     ! model dimension of input (internal usage only)
      INTEGER(KIND=INT32) :: MDSO    ! model dimension of state output (internal usage only)
@@ -1569,7 +1571,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
-    INTEGER(KIND=INT32), INTENT(OUT) :: INFO    
+    INTEGER(KIND=INT32), INTENT(OUT) :: INFO
     ! Local variables.
     REAL(KIND=RT), POINTER, DIMENSION(:) :: X_SHIFT, AX_SHIFT
     REAL(KIND=RT), POINTER, DIMENSION(:,:) :: X_RESCALE, AX_RESCALE
@@ -2512,6 +2514,103 @@ CONTAINS
   END SUBROUTINE MODEL_GRADIENT
 
 
+  ! Given the data for a single step of training, ensure the data has a normalized
+  !  geometry that aligns with model assumptions (linear radialization).
+  SUBROUTINE NORMALIZE_STEP(CONFIG, MODEL, RWORK, AX, SIZES, X, Y, YW)
+    TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: MODEL
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:) :: RWORK
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
+    INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: SIZES
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
+
+    CALL NORMALIZE_STEP_UNPACKED( CONFIG, AX, SIZES, X, Y, YW, &
+         MODEL(CONFIG%AISS:CONFIG%AISE), & ! AX_SHIFT(ADN)
+         MODEL(CONFIG%AIMS:CONFIG%AIME), & ! AX_RESCALE(ADN,ADN)
+         RWORK(CONFIG%SAXIS : CONFIG%EAXIS), & ! AXI_SHIFT(ADE)
+         RWORK(CONFIG%SAXIR : CONFIG%EAXIR), & ! AXI_RESCALE(ADE,ADE)
+         MODEL(CONFIG%MISS:CONFIG%MISE), & ! X_SHIFT(MDN)
+         MODEL(CONFIG%MIMS:CONFIG%MIME), & ! X_RESCALE(MDN,MDN)
+         RWORK(CONFIG%SMXIS : CONFIG%EMXIS), & ! XI_SHIFT(MDE)
+         RWORK(CONFIG%SMXIR : CONFIG%EMXIR), & ! XI_RESCALE(MDE,MDE)
+         MODEL(CONFIG%MOSS:CONFIG%MOSE), & ! Y_SHIFT(DO-DOE)
+         MODEL(CONFIG%MOMS:CONFIG%MOME), & ! Y_RESCALE(DO-DOE,DO-DOE)
+         RWORK(CONFIG%SOXIS : CONFIG%EOXIS), & ! YI_SHIFT(DOE)
+         RWORK(CONFIG%SOXIR : CONFIG%EOXIR), & ! YI_RESCALE(DOE,DOE)
+         MODEL(CONFIG%ASEV : CONFIG%AEEV), & ! A_EMB_VECS
+         MODEL(CONFIG%MSEV : CONFIG%MEEV), & ! M_EMB_VECS
+         MODEL(CONFIG%OSEV : CONFIG%OEEV)) ! O_EMB_VECS
+
+
+  CONTAINS
+    SUBROUTINE NORMALIZE_STEP_UNPACKED(&
+         CONFIG, &
+         AX, SIZES, X, Y, YW, &
+         AX_SHIFT, AX_RESCALE, AXI_SHIFT, AXI_RESCALE, &
+         X_SHIFT, X_RESCALE, XI_SHIFT, XI_RESCALE, &
+         Y_SHIFT, Y_RESCALE, YI_SHIFT, YI_RESCALE, &
+         A_EMB_VECS, M_EMB_VECS, O_EMB_VECS)
+      TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AX
+      INTEGER(KIND=INT64), INTENT(INOUT), DIMENSION(:) :: SIZES
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: X
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
+      ! The following have assumed shapes (based on slices of a flat-packed array).
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADN) :: AX_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADN, CONFIG%ADN) :: AX_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE) :: AXI_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE, CONFIG%ADE) :: AXI_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDN) :: X_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDN, CONFIG%MDN) :: X_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE) :: XI_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MDE) :: XI_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DON) :: Y_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DON, CONFIG%DON) :: Y_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE) :: YI_SHIFT
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%DOE) :: YI_RESCALE
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMB_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%MDE, CONFIG%MNE) :: M_EMB_VECS
+      REAL(KIND=RT), INTENT(INOUT), DIMENSION(CONFIG%DOE, CONFIG%NOE) :: O_EMB_VECS
+      ! 
+      ! Assume EMBED has already happened.
+      ! Decide whether or not to flatten.
+      ! Compute [0,1] rescaling.
+      ! Compute componentwise mean values and remove NAN, INF.
+      ! Update mean values towards the result.
+      ! Compute symmetric multiplication.
+      ! Multiply current vectors by covariance matrix and orthonormalize.
+      ! Update rescaling vectors towards orthonormal result.
+      ! 
+      ! PRINT *, "axy.f90 Line 2580: "
+      ! PRINT *, "SHAPE(MODEL): ", SHAPE(MODEL)
+      ! PRINT *, "SHAPE(AX): ", SHAPE(AX)
+      ! PRINT *, "SHAPE(SIZES): ", SHAPE(SIZES)
+      ! PRINT *, "SHAPE(X): ", SHAPE(X)
+      ! PRINT *, "SHAPE(Y): ", SHAPE(Y)
+      ! PRINT *, "SHAPE(YW): ", SHAPE(YW)
+      ! PRINT *, "SHAPE(AX_SHIFT): ", SHAPE(AX_SHIFT)
+      ! PRINT *, "SHAPE(AX_RESCALE): ", SHAPE(AX_RESCALE)
+      ! PRINT *, "SHAPE(AXI_SHIFT): ", SHAPE(AXI_SHIFT)
+      ! PRINT *, "SHAPE(AXI_RESCALE): ", SHAPE(AXI_RESCALE)
+      ! PRINT *, "SHAPE(X_SHIFT): ", SHAPE(X_SHIFT)
+      ! PRINT *, "SHAPE(X_RESCALE): ", SHAPE(X_RESCALE)
+      ! PRINT *, "SHAPE(XI_SHIFT): ", SHAPE(XI_SHIFT)
+      ! PRINT *, "SHAPE(XI_RESCALE): ", SHAPE(XI_RESCALE)
+      ! PRINT *, "SHAPE(Y_SHIFT): ", SHAPE(Y_SHIFT)
+      ! PRINT *, "SHAPE(Y_RESCALE): ", SHAPE(Y_RESCALE)
+      ! PRINT *, "SHAPE(YI_SHIFT): ", SHAPE(YI_SHIFT)
+      ! PRINT *, "SHAPE(YI_RESCALE): ", SHAPE(YI_RESCALE)
+      ! PRINT *, "SHAPE(A_EMB_VECS): ", SHAPE(A_EMB_VECS)
+      ! PRINT *, "SHAPE(M_EMB_VECS): ", SHAPE(M_EMB_VECS)
+      ! PRINT *, "SHAPE(O_EMB_VECS): ", SHAPE(O_EMB_VECS)
+
+    END SUBROUTINE NORMALIZE_STEP_UNPACKED
+  END SUBROUTINE NORMALIZE_STEP
+
+
   ! Make inputs and outputs radially symmetric (to make initialization
   !  more well spaced and lower the curvature of the error gradient).
   SUBROUTINE NORMALIZE_DATA(CONFIG, MODEL, AGG_ITERATORS, &
@@ -3068,6 +3167,10 @@ CONTAINS
          END IF
          DEALLOCATE(AYX_MEAN)
       END IF
+      ! 
+      ! TODO: Embedding normalization should probably fall under "input conditioning"
+      !       instead of falling under "model conditioning"
+      ! 
       ! A_EMBEDDINGS
       IF ((CONFIG%ANE .GT. 0) .AND. (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT)) THEN
          ! Update the exponential trailing mean term and subtract it from current values.
@@ -3210,11 +3313,11 @@ CONTAINS
              !       STATE_TEMP(BS:BE,J) = STATE_TEMP(BS:BE,J) * NORM2(OUTPUT_VECS(J,:))
              !    END DO
              ! END IF
-             CALL ORTHOGONALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TER, ORDER(:,BATCH))
+             CALL ORTHONORMALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TER, ORDER(:,BATCH))
              STATE_USAGE(ORDER(:TER,BATCH),BATCH) = 1
              ! Compute grad state rank.
              STATE_TEMP(BS:BE,:) = GRADS(BS:BE,:,I)
-             CALL ORTHOGONALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TGR, ORDER(:,BATCH))
+             CALL ORTHONORMALIZE(STATE_TEMP(BS:BE,:), LENGTHS(:,BATCH), TGR, ORDER(:,BATCH))
           END DO
           TOTAL_EVAL_RANK = TOTAL_EVAL_RANK + TER
           TOTAL_GRAD_RANK = TOTAL_GRAD_RANK + TGR
@@ -3727,11 +3830,15 @@ CONTAINS
          ! Pack the data into the work space for a single batch forward pass operation.
          ! If pairwise aggregation is enabled, this also computes the appropriate differences.
          ! 
+         ! TODO: This function should *NOT* modify the data if none of it needs to be updated.
+         !       That will allow for normalization to be skipped.
          CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
-              AX_IN, AX, AXI_IN, AXI, SIZES_IN, SIZES, &
-              X_IN, X, XI_IN, XI, Y_IN, Y, YI_IN, YI, YW_IN, YW, NA, NM )
-         AX_GRADIENT(:,:NA) = AX(:,:NA)
-         X_GRADIENT(:,:NM) = X(:,:NM)
+              AX_IN, AX_GRADIENT, AXI_IN, AXI, SIZES_IN, SIZES, &
+              X_IN, X_GRADIENT, XI_IN, XI, Y_IN, Y, YI_IN, YI, YW_IN, YW, NA, NM )
+         ! Write code that normalizes the batch of data and updates the normalization factors
+         !  based on the batch size and the current step. Otherwise if this is not a new batch
+         !  then does nothing.
+         CALL NORMALIZE_STEP(CONFIG, MODEL, RWORK, AX_GRADIENT(:,:NA), SIZES, X_GRADIENT(:,:NM), Y(:,:NM), YW(:,:NM))
          ! 
          ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
          !               Use broad parallelism to distribute fit work.

@@ -377,26 +377,26 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
         import tqdm
         import random
         from tlux.plot import Plot
-        from tlux.math import svd
+        from tlux.math import pca
         # 
         # Construct the projections for the "ax", "ay", "x", and "y" data based on final values.
         print("history[-1].ax.T.shape: ", history[-1].ax.T.shape, flush=True)
-        _, ax_projection = svd(history[-1].ax.T)
+        _, ax_projection = pca(history[-1].ax.T)
         print("history[-1].ay.shape: ", history[-1].ay.shape, flush=True)
         # Update the historical element AY to be shifted by the mean.
         ay = history[-1].ay.copy()
         ay[:,:-1] = (ay[:,:-1] - history[-1].ay_shift[:]) * history[-1].ay_scale[:]
-        _, ay_projection = svd(ay)
+        _, ay_projection = pca(ay)
         print("history[-1].x.T.shape: ", history[-1].x.T.shape, flush=True)
-        _, x_projection = svd(history[-1].x.T)
+        _, x_projection = pca(history[-1].x.T)
         print("history[-1].y.T.shape: ", history[-1].y.T.shape, flush=True)
-        _, y_projection = svd(history[-1].y.T)
+        _, y_projection = pca(history[-1].y.T)
         print("history[-1].a_embeddings.T.shape: ", history[-1].a_embeddings.T.shape, flush=True)
-        _, a_emb_projection = svd(history[-1].a_embeddings.T)
+        _, a_emb_projection = pca(history[-1].a_embeddings.T)
         print("history[-1].m_embeddings.T.shape: ", history[-1].m_embeddings.T.shape, flush=True)
-        _, m_emb_projection = svd(history[-1].m_embeddings.T)
+        _, m_emb_projection = pca(history[-1].m_embeddings.T)
         print("history[-1].o_embeddings.T.shape: ", history[-1].o_embeddings.T.shape, flush=True)
-        _, o_emb_projection = svd(history[-1].o_embeddings.T)
+        _, o_emb_projection = pca(history[-1].o_embeddings.T)
         # 
         # Function for projecting data given the projection matrix.
         def project(row_vecs, projection_vecs, dim=2):

@@ -478,7 +478,7 @@ class AXY:
             # Return the last state.
             return last_state
         # If there are categorical outputs, then select by taking the max magnitude output.
-        elif ((len(self.yi_map) > 0) and (not raw_scores)):
+        elif (len(self.yi_map) > 0):
             # Extract the YI embeddings matrix from the model.
             yi_embeddings = self.model[self.config.osev-1:self.config.oeev].reshape(
                 self.config.doe, self.config.noe, order='F'
@@ -489,6 +489,9 @@ class AXY:
             ynn = y.shape[1]-doe
             # Get the numerical columns first.
             _y = [y[:,i] for i in range(ynn)]
+            # If raw scores are being returned, just project and exit.
+            if (raw_scores):
+                return np.concatenate((y[:,:-doe], np.matmul(y[:,-doe:], yi_embeddings)), axis=1)
             # Project the categorical embedding outputs into a matrix with "yne" columns.
             y = np.matmul(y[:,-doe:], yi_embeddings)
             # Iterate over each categorical output column, picking the category whose embedding had the largest value.
@@ -646,7 +649,7 @@ if __name__ == "__main__":
         x, y = x[:,0], x[:,1]
         return (3*x + np.sin(8*x)/2 + np.cos(5*y))
 
-    functions = [f1] #, f2, f3]
+    functions = [f1, f2, f3]
 
     seed = 0
     np.random.seed(seed)

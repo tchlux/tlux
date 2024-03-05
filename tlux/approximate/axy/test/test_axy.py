@@ -1056,7 +1056,7 @@ def _test_normalize_data(dimension=64, show=False):
             p.add("-> y "+str(i+1), *y_in, marker_size=3)
             p.add("-> ax "+str(i+1), *ax_in, marker_size=3)
             p.show()
-        elif ():
+        elif (True):
             # TODO: Assert that the mean is near zero and the variance is near one.
             print()
             print("ax_in.shape:\n", ax_in.shape)
@@ -1068,6 +1068,7 @@ def _test_normalize_data(dimension=64, show=False):
             print("y_in.shape:\n", y_in.shape)
             print(" y_in.mean(axis=1): \n ", y_in.mean(axis=1))
             print(" y_in.std(axis=1): \n ", y_in.std(axis=1))
+            exit()
         #  - assert that the AX_IN, X_IN, and Y_IN are radialized
         #  - assert that the AY are radialized (ready for second model)
         #  - assert that the embedded AXI and XI are radialized
@@ -1228,8 +1229,6 @@ def _test_condition_model():
         print("  x.mean(axis=1): ", x.mean(axis=1)[config.mdn:], flush=True)
         print("  x.std(axis=1):  ", x.std(axis=1)[config.mdn:], flush=True)
         print()
-
-
     print(" passed")
 
 
@@ -1284,15 +1283,51 @@ def _test_large_data_fit():
     print("info: ", info)
 
 
+def _test_normalize_step():
+    print("NORMALIZE_STEP")
+    # 
+    from tlux.plot import Plot
+    p = Plot()
+    # Generate data to test with.
+    np.random.seed(0)
+    size_range = (0, 10)
+    num_points = 100
+    dimension = 3
+    nm = num_points
+    i = 0
+    # Generate random data (that is skewed and placed off center).
+    x, x_shift, x_scale, x_rotation = random_data(num_points, dimension)
+    p.add("x "+str(i+1), *x.T, marker_size=3)
+    y, y_shift, y_scale, y_rotation = random_data(num_points, dimension)
+    p.add("y "+str(i+1), *y.T, marker_size=3)
+    # Generate random AX data.
+    sizes = np.asarray(np.random.randint(*size_range, size=(num_points,)), dtype="int64", order="F")
+    num_aggregate = sizes.sum()
+    na = num_aggregate
+    ax, ax_shift, ax_scale, ax_rotation = random_data(num_aggregate, dimension)
+    p.add("ax "+str(i+1), *ax.T, marker_size=3)
+    # Set up all of the inputs to the NORMALIZE_DATA routine.
+    config, model = spawn_model(adn=dimension, mdn=dimension, mdo=dimension, num_threads=1)
+    config.pairwise_aggregation = False
+    config = AXY.new_fit_config(nm=nm, nmt=num_points, na=na, nat=num_aggregate, config=config)
+    rwork = np.ones(config.rwork_size, dtype="float32", order="F")
+    # Set YW"
+    yw = np.zeros((0,num_points), dtype="float32", order="F")
+    # Call the step normalization function.
+    AXY.normalize_step(config, model, rwork, ax.T, sizes, x.T, y.T, yw)
+    p.show(file_name="/tmp/test_normalize_step.html")
+    print(" passed")
 
 
 if __name__ == "__main__":
+    # _test_normalize_step()
+    # exit()
     _test_scenario_iteration()
     _test_init_model()
     # _test_compute_batches() # TODO: Design this test more carefully.
     _test_fetch_data()
     # _test_embed() # TODO: Design this test.
-    _test_normalize_data()
+    # _test_normalize_data() # TODO: Test with assertions above 3D.
     # _test_condition_model() # TODO: Formalize this test to have assertions.
     _test_evaluate()
     _test_model_gradient()

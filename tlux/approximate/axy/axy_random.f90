@@ -121,7 +121,7 @@ CONTAINS
              COLUMN_VECTORS(:,J) = COLUMN_VECTORS(:,J) - TEMP_VECS(ONE,J) * COLUMN_VECTORS(:,I)
           END DO
        END DO
-       ! Make the rest of the column vectors unit length.
+       ! Make the rest of the column vectors unit length (if there are more than can be orthogonalized).
        DO I = K, SIZE(COLUMN_VECTORS, TWO, KIND=INT64)
           LEN = NORM2(COLUMN_VECTORS(:,I))
           IF (LEN .GT. 0.0_REAL32) COLUMN_VECTORS(:,I) = COLUMN_VECTORS(:,I) / LEN

@@ -2,14 +2,18 @@ import numpy as np
 import fmodpy
 
 # Matrix operations module.
-mops = fmodpy.fimport("../axy_matrix_operations.f90", blas=True, lapack=True).matrix_operations
+try:
+    from axy_matrix_operations import matrix_operations as mops
+except:
+    mops = fmodpy.fimport("../axy_matrix_operations.f90", blas=True, lapack=True, omp=True).matrix_operations
+
 
 # --------------------------------------------------------------------
 #                         ORTHONORMALIZE
 
 # Tested up to ~400 dimension, where it fails witih precision=5.
 def _test_orthonormalize(max_dimension=256, trials=100, precision=5):
-    print("orthonormalize..", end=" ", flush=True)
+    print("orthonormalize..", flush=True)
     # Test orthogonalization.
     np.set_printoptions(linewidth=1000)
     import tqdm
@@ -44,7 +48,102 @@ def _test_orthonormalize(max_dimension=256, trials=100, precision=5):
                 "ortho = matrix.copy()\n" \
                 f"mops.orthonormalize(ortho.T, lengths)\n" \
                 f"bad_result = ortho @ ortho.T"
-    print("passed.", flush=True)
+    print(" passed.", flush=True)
+
+
+# --------------------------------------------------------------------
+#                                  SVD
+
+# Test the SVD function with matrices having more columns than rows.
+def _test_svd(max_dimension=16, n=100, trials=100, precision=2):
+    print("svd..", flush=True)
+    np.set_printoptions(linewidth=1000)
+    import tqdm
+
+    allowed_errors = 1
+
+    for dimension in tqdm.tqdm(range(1, max_dimension + 1)):
+        for trial in range(trials):
+            np.random.seed(trial)
+            # Create a matrix with more columns than rows
+            variances = np.random.random(size=(dimension if (trial % 2 == 0) else n,))
+            matrix = np.random.normal(
+                loc=0.0,
+                scale=variances,
+                size=((n, dimension) if (trial % 2 == 0) else (dimension, n)),
+            ).astype("float32")
+            if (dimension > 1):
+                matrix -= matrix.mean(axis=0)
+            matrix = matrix.T  # Make Fortran contiguous.
+            # Prepare output containers for singular values and vectors
+            singular_values = np.zeros(min(matrix.shape), dtype="float32", order="F")
+            VT = np.zeros((dimension if (trial % 2 == 0) else n, min(matrix.shape)), dtype="float32", order="F")
+            # Call the svd function
+            s, vt, rank, _ = mops.svd(a=matrix, s=singular_values, vt=VT, rank=True, steps=1000)
+            # Check basic truth.
+            assert (rank > 0), f"Rank is 0. Should certainly be positive for matrix with any nonzero entries.\n" \
+                f"matrix = np.asarray({matrix.tolist()}, dtype='float32')\n" \
+                "singular_values = np.zeros(min(matrix.shape), dtype='float32')\n" \
+                f"VT = np.zeros(({dimension}, min(matrix.shape)), dtype='float32')\n" \
+                "mops.svd(matrix, singular_values, VT, rank=True)\n" \
+            # Check that the singular values are nonincreasing.
+            assert (np.all(s[:-1] >= s[1:])), f"Singular values are not in nonincreasing order (they are *increasing* and shouldn't be).\n  s = {s}"
+            # Orthonormality may be degraded for higher dimension (that's okay), so only bother checking strictly for lower values.
+            if (dimension <= 16):
+                # Check if the singular vectors (columns of VT) are orthogonal
+                if (VT.shape[0] <= VT.shape[1]):
+                    VTV = VT @ VT.T
+                else:
+                    VTV = VT.T @ VT
+                # 0-out the rows and columns associated with null vectors (rank deficient cases).
+                for i in np.argsort(np.abs(np.diag(VTV) - 1))[rank:]:
+                    VTV[i,:] = 0.0
+                    VTV[:,i] = 0.0
+                # Get the "kept" indices.
+                diag_diff = np.abs(np.diag(VTV) - 1)
+                diag_diff.sort()
+                off_diag_diff = VTV - np.diag(np.diag(VTV))
+                assert ((abs(off_diag_diff).max() < 10**(-precision))
+                        and ((diag_diff[:rank]).max() < 10**(-precision))), \
+                    "Singular vectors are not orthogonal enough.\n" \
+                    f"  Dimension = {dimension}\n" \
+                    f"  Trial = {trial}\n" \
+                    f"  Rank = {rank}\n" \
+                    f"  abs(off_diag_diff).max() = {abs(off_diag_diff).max()}\n" \
+                    f"  (diag_diff[:rank]).max() = {(diag_diff[:rank]).max()}\n\n" \
+                    f"{(VTV).round(precision)}\n\n" \
+                    f"matrix = np.asarray({matrix.tolist()}, dtype='float32')\n" \
+                    "singular_values = np.zeros(min(matrix.shape), dtype='float32')\n" \
+                    f"VT = np.zeros(({dimension}, min(matrix.shape)), dtype='float32')\n" \
+                    "mops.svd(matrix, singular_values, VT, rank=True)\n" \
+                    "bad_result = VT @ VT.T"
+            # Check that numpy agrees with the computed value of VT.
+            U, S, Vh = np.linalg.svd(matrix.T, full_matrices=False)
+            # Make sure the vectors are oriented the same directions.
+            #  (this is not necessary for absolute cos similarity, but for debugging)
+            for i in range(dimension):
+                if (Vh[i,0] * vt[0,i] < 0):
+                    Vh[i,:] *= -1
+            # Compute the pairwise cosine similarities.
+            cos_similarities = np.abs(np.sum(Vh.T * vt, axis=0))
+            sim_inds = cos_similarities.argsort()
+            assert (cos_similarities[sim_inds[-rank]] > 0.95), \
+                "Computed Vt was incorrect.\n" \
+                f"  Dimension = {dimension}\n" \
+                f"  Trial = {trial}\n" \
+                f"  Rank = {rank}\n\n" \
+                f"{(vt).round(precision)}\n\n" \
+                f"{(Vh.T).round(precision)}\n\n" \
+                f"{cos_similarities}\n\n" \
+                f"matrix = np.asarray({matrix.tolist()}, dtype='float32')\n" \
+                "singular_values = np.zeros(min(matrix.shape), dtype='float32')\n" \
+                f"VT = np.zeros(({dimension}, min(matrix.shape)), dtype='float32')\n" \
+                "mops.svd(matrix, singular_values, VT, rank=True)\n" \
+                "bad_result = VT @ VT.T"
+            # Optionally, check the accuracy of singular values by reconstructing the matrix
+            # This part is left as an exercise; it involves using singular values and vectors
+            # to reconstruct the original matrix and comparing it with the input matrix.
+    print(" passed.", flush=True)
 
 
 # --------------------------------------------------------------------
@@ -80,8 +179,7 @@ def random_data(num_points, dimension, box=10, skew=lambda x: 1 * x**2 / sum(x**
 
 # Test function for visually checking the "radialize" function.
 def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, seed=0, precision=4):
-    print("radialize..", end=" ", flush=True)
-    print()
+    print("radialize..", flush=True)
     # Generate data to test with.
     np.random.seed(seed)
     # Plotting.
@@ -90,37 +188,52 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, se
         from tlux.plot import Plot
         p = Plot()
     # Trials.
-    for i in range(num_trials):
+    import tqdm
+    for i in tqdm.tqdm(range(num_trials)):
         # Generate random data (that is skewed and placed off center).
         x, shifted_by, scaled_by, rotate_by = random_data(num_points, dimension)
-        # Generate the radialized version.
-        shift = np.zeros(dimension, dtype="float32")
-        transform = np.zeros((dimension, dimension), dtype="float32", order="F")
-        inverse = np.zeros((dimension, dimension), dtype="float32", order="F")
-        order = np.zeros(dimension, dtype="int32")
         to_flatten = (i % 2) == 1
-        xr, shift, transform, inverse, order = mops.radialize(
-            x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
-            max_to_flatten=(None if to_flatten else 0),
-            maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
-        # 
-            svd_steps=1,
-            svd_update=False,
-        )
-        # Debugging values.
-        scale_after_rotation = np.linalg.norm((np.identity(dimension) * scaled_by) @ rotate_by, axis=0)
-        value_norm = (xr**2).mean()
-        # Single steps of SVD.
-        order.sort()
-        steps = 10
-        for s in range(steps):
+        iterative_computation = (i % 3) == 1
+        iterative_computation = True
+        # ************************************************************************************
+        # Generate the radialized version.
+        if (not iterative_computation):
+            # Call the RADIALIZE routine once.
+            shift = np.zeros(dimension, dtype="float32")
+            transform = np.zeros((dimension, dimension), dtype="float32", order="F")
+            inverse = np.zeros((dimension, dimension), dtype="float32", order="F")
+            order = np.zeros(dimension, dtype="int32")
             xr, shift, transform, inverse, order = mops.radialize(
                 x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
                 max_to_flatten=(None if to_flatten else 0),
                 maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
-                svd_steps=1, # TODO: Doing more outer steps should be equivalent, but this is dominating.
-                svd_update=True,
+                svd_steps=10,
+                update=False,
             )
+        else:
+            # Call the RADIALIZE routine iteratively, doing 1 SVD step each time.
+            shift = np.zeros(dimension, dtype="float32")
+            transform = np.zeros((dimension, dimension), dtype="float32", order="F")
+            inverse = np.zeros((dimension, dimension), dtype="float32", order="F")
+            order = np.zeros(dimension, dtype="int32")
+            xr, shift, transform, inverse, order = mops.radialize(
+                x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
+                max_to_flatten=(None if to_flatten else 0),
+                maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
+                svd_steps=1,
+                update=False,
+            )
+            # Single steps of SVD.
+            steps = 40
+            for s in range(steps):
+                xr, shift, transform, inverse, order = mops.radialize(
+                    x=(x @ rotate_by).T, shift=shift, vecs=transform, inverse=inverse, order=order,
+                    max_to_flatten=(None if to_flatten else 0),
+                    maxbound=(None if to_flatten else False), # Use an average bound when not flattening.
+                    svd_steps=1,
+                    update=True,
+                )
+        # ************************************************************************************
         # 
         # Use the inverse to "fix" the data back to its original form.
         xf = (inverse.T @ xr).T
@@ -154,14 +267,11 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, se
         to_keep = (np.linalg.norm(transform, axis=0) > 0)
         # Depending on whether data was flattened, either look at the average deviation of points.
         if (to_flatten):
-            print("test_matrix_ops.py Line 148: ", flush=True)
             scale_max_error = 1-xrr[to_keep].std(axis=1)
             scale_max_error = np.max(np.abs(scale_max_error))
         else:
-            print("test_matrix_ops.py Line 152: ", flush=True)
             scale_max_error = np.std(xrr[to_keep], axis=1)
             scale_max_error = abs(1.0 - scale_max_error.mean())
-        print("scale_max_error: ", scale_max_error, flush=True)
         assert (scale_max_error < 10**(-precision)), f"Scale maximum error is too high, {scale_max_error} > 10^({-precision})."        
         # 
         # INFO: Should we verify that the "correct" shift and rotation were discovered?
@@ -170,7 +280,7 @@ def _test_radialize(show=True, num_points=1000, dimension=5, num_trials=1000, se
     # Plotting.
     if (show): p.show(file_name="/tmp/test_matrix_ops_radialize.html", aspect_mode="data")
     # Finished.
-    print("passed.", flush=True)
+    print(" passed.", flush=True)
 
 
 # --------------------------------------------------------------------
@@ -207,7 +317,6 @@ def _test_least_squares():
     print(np.matmul(mo_x, upscale))
     print()
 
-
     # Generate a visiaul.
     from tlux.plot import Plot
     p = Plot()
@@ -232,18 +341,22 @@ def _test_least_squares():
     print()
 
 
+# --------------------------------------------------------------------
+
 if __name__ == "__main__":
-    # _test_orthonormalize(max_dimension=64, trials=100)  # Passes up to 256 in ~2 minutes.
+    # Passes up to 256 in ~1.3 minutes.
+    _test_orthonormalize(
+        max_dimension=128,
+        trials=100
+    ) 
+    # Passes up to 16 in ~13 seconds.
+    _test_svd()
+    # Passes up to 32 in ~5 seconds.
     _test_radialize(
         show=True, # "show" only goes into effect when dimension <= 3
-        dimension=6,
-        num_trials=2
+        dimension=32,
+        num_points=1000,
+        num_trials=100
     )
+    # TODO: Need to rework the least squares function.
     # _test_least_squares()
-
-
-
-# TODO:
-# 
-# The magnitude appears to be incorrect when radializing with one SVD step.
-# 
