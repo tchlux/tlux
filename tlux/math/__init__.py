@@ -1,5 +1,3 @@
-
-
 # If anything above fails, fall back to Python implementations.
 import numpy as np
 
@@ -7,6 +5,7 @@ from tlux.math.fraction import Fraction
 from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
 from tlux.math.polynomial import fit as fit_spline
 from tlux.math.polynomial import polynomial as fit_polynomial
+
 
 # Given column vectors (in a 2D numpy array), orthogonalize and return
 #  the orthonormal vectors and the lengths of the orthogonal components.
@@ -31,7 +30,11 @@ def orthogonalize(col_vecs, essentially_zero=2**(-26)):
 
 
 # Compute the singular values and the right singular vectors for a matrix of row vectors.
-def svd(row_vecs, steps=5, bias=1.0, nvecs=None):
+def pca(row_vecs, steps=5, bias=1.0, nvecs=None):
+    # Make sure the row vectors are a numpy array.
+    row_vecs = np.asarray(row_vecs)
+    if (len(row_vecs.shape) == 1):
+        row_vecs = row_vecs[None,:]
     # Get the dimension of the vectors.
     dim = row_vecs.shape[1]
     # Handle zero-sized inputs by returning zero-sized outputs.
@@ -71,6 +74,7 @@ def svd(row_vecs, steps=5, bias=1.0, nvecs=None):
         right_col_vecs, lengths = orthogonalize(covariance.copy())
         for i in range(steps):
             right_col_vecs, lengths = orthogonalize(np.matmul(covariance, right_col_vecs))
+    # 
     # Method (2) starts with random vectors does power iterations with the implicit covariance matrix.
     else:
         right_col_vecs, lengths = orthogonalize( # Add 2 for error buffer & increased convergence.
@@ -89,10 +93,10 @@ def svd(row_vecs, steps=5, bias=1.0, nvecs=None):
 
 
 # Use the SVD routine to project data onto its first N principal components.
-def project(row_vecs, dim, **svd_kwargs):
-    svd_kwargs["nvecs"] = dim
+def project(row_vecs, dim, **pca_kwargs):
+    pca_kwargs["nvecs"] = dim
     # Compute the principal components via a singular value decomposition.
-    singular_values, projection_vecs = svd(row_vecs, **svd_kwargs)
+    singular_values, projection_vecs = pca(row_vecs, **pca_kwargs)
     row_vecs = row_vecs @ projection_vecs[:dim,:].T
     # Add 0's to the end if the projection was not enough.
     if (dim > row_vecs.shape[1]):
@@ -176,3 +180,4 @@ def pairwise_distance(x1, x2=None, diag=float('inf')):
         x1_sq = np.sum(x1**2, axis=1, keepdims=True)
         x2_sq = np.sum(x2**2, axis=1)
         return np.sqrt(x1_sq + x2_sq - 2 * np.matmul(x1, x2.T))
+
