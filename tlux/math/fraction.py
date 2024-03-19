@@ -215,6 +215,15 @@ class Fraction:
     # Make this Fraction positive.
     def __abs__(a): return Fraction(abs(a.numerator), a.denominator, reduce=False)
 
+    # The hash of the fraction must be in reduced form.
+    def __hash__(self):
+        numerator = self.numerator
+        denominator = self.denominator
+        divisor = gcd(numerator, denominator)
+        numerator   //= divisor
+        denominator //= divisor
+        return hash((numerator, denominator))
+
     # a equals b. (special case is False for comparison with None)
     def __eq__(a, b):
         b = Fraction(b)
@@ -345,6 +354,13 @@ def _test_Fraction(display=False, print=lambda *args, **kwargs: None):
     assert(a**2 == a**2.)
     assert(a**(-2) == a**(-2.))
     assert(Fraction(2.0, -1/2) == Fraction(-4))
+
+    # Make sure that the "set()" operation can hash fractions.
+    print("hash(1):     ", hash(1))
+    print("hash(1.0):   ", hash(1.0))
+    print("hash(1 / 1): ", hash(Fraction(1)), flush=True)
+    assert(len(set((Fraction(1, 0), Fraction(0, 1), Fraction(1, 1), Fraction(1, 0), Fraction(0, 1)))) == 3)
+
 
 
 if __name__ == "__main__":

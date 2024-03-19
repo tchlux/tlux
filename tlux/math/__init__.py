@@ -7,6 +7,12 @@ from tlux.math.polynomial import fit as fit_spline
 from tlux.math.polynomial import polynomial as fit_polynomial
 
 
+# Returns True if the value is numeric (int, float) and False otherwise.
+def is_numeric(value):
+    import numbers
+    return isinstance(value, numbers.Number)
+
+
 # Given column vectors (in a 2D numpy array), orthogonalize and return
 #  the orthonormal vectors and the lengths of the orthogonal components.
 def orthogonalize(col_vecs, essentially_zero=2**(-26)):

@@ -162,15 +162,26 @@ class Spline:
     # Evaluate this Spline at a given x coordinate.
     def __call__(self, x):
         # If "x" was given as an iterable, then iterate over it.
-        try:    return [self(v) for v in x]
+        try:    return Vector((self(v) for v in x))
         except: pass
         # Get the appropriate function and compute the output value.
         return self.function_at(x)(x)
         
+    # Addition is commutative.
+    def __radd__(self, other):
+        return self.__add__(other)
+
     # Add this "Spline" object to another "Spline" object.
     def __add__(self, other):
+        import numbers
         # Check for correct usage.
-        if (type(other) != type(self)):
+        if (isinstance(other, numbers.Number)):
+            # For numbers, make a new spline that just adds that constant everywhere.
+            return Spline(self.knots, functions=[
+                self.function_at(k) + other
+                for k in self._knots[:-1]
+            ])
+        elif (type(other) != type(self)):
             raise(UsageError(f"Only '{type(self)} objects can be added to '{type(self)}' objects, but '{type(other)}' was given."))
         # Generate the new set of knots.
         knots = sorted(set(self._knots + other._knots))
@@ -194,10 +205,21 @@ class Spline:
         # Return the new added function.
         return Spline(knots, functions=functions)
 
+    # Multiplication is commutative.
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
     # Multiply this "Spline" obect by another "Spline".
     def __mul__(self, other):
+        import numbers
         # Check for correct usage.
-        if (type(other) != type(self)):
+        if (isinstance(other, numbers.Number)):
+            # For numbers, make a new spline that just adds that constant everywhere.
+            return Spline(self.knots, functions=[
+                self.function_at(k) * other
+                for k in self._knots[:-1]
+            ])
+        elif (type(other) != type(self)):
             raise(UsageError(f"Only '{type(self)} objects can be multiplied by '{type(self)}' objects, but '{type(other)}' was given."))
         # Generate the new set of knots.
         knots = sorted(set(self._knots + other._knots))
@@ -326,6 +348,34 @@ class Polynomial:
         if type(other) == NewtonPolynomial: other = Polynomial(other)
         return all(c1 == c2 for (c1, c2) in zip(self._coefficients, other._coefficients))
 
+    # Addition is commutative.
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    # Add to this polynomial.
+    def __add__(self, other):
+        import numbers
+        # Check for correct usage.
+        if (isinstance(other, numbers.Number)):
+            coefs = list(self._coefficients)
+            coefs[-1] += other
+            return Polynomial(coefs)
+        else:
+            raise(ValueError(f"Addition of 'Polynomial' with {type(other)} is not supported."))
+
+    # Multiplication is commutative.
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    # Multiply by this polynomial.
+    def __mul__(self, other):
+        import numbers
+        # Check for correct usage.
+        if (isinstance(other, numbers.Number)):
+            return Polynomial([c*other for c in self._coefficients])
+        else:
+            raise(ValueError(f"Multiplicaction of 'Polynomial' with {type(other)} is not supported."))
+
     # Negate this polynomial.
     def __neg__(self): return Polynomial([-c for c in self._coefficients])
 
@@ -364,26 +414,32 @@ class Polynomial:
 #   Notice that "s1" is never used in the computation, as it is
 #   redundant with the term "a".
 class NewtonPolynomial(Polynomial):
-    _zeros = None
-    @property
-    def zeros(self): return self._zeros
-    @zeros.setter
-    def zeros(self, zeros): self._zeros = list(zeros)
-
     # Store the coefficients and zeros for this Newton Polynomial.
     def __init__(self, coefficients, zeros):
-        self.coefficients = coefficients
-        # Strip off the 0-valued coefficients (all these will be 0'd out).
-        for i in range(len(self._coefficients)):
-            if (self._coefficients[i] != 0): break
-        else: i = len(self._coefficients)-1
-        # Store locally.
-        self._coefficients = self._coefficients[i:]
-        self._zeros = [p for (j,p) in enumerate(zeros) if j >= i]
+        self.coefficients = list(coefficients)
+        self.zeros = list(zeros)
+        self._coefficients = self.coefficients
+        self._zeros = self.zeros
 
     # Construct the polynomial that is the derivative of this
     # polynomial by converting to polynomial form and differntiating.
     def derivative(self, d=1): return Polynomial(self).derivative(d)
+
+    # Add to this newton polynomial.
+    def __add__(self, other):
+        return Polynomial(self) + other
+
+    # Addition is commutative.
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    # Multiplication is commutative.
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    # Multiply by this newton polynomial.
+    def __mul__(self, other):
+        return Polynomial(self) * other
 
     # Evaluate this Newton Polynomial (in a numerically stable way).
     def __call__(self, x):
@@ -418,15 +474,24 @@ class Vector(list):
     def __add__(self, value):
         try:              return Vector(v1 + v2 for (v1,v2) in zip(self,value))
         except TypeError: return Vector(v + value for v in self)
+    def __radd__(self, value):
+        try:              return Vector(v1 + v2 for (v1,v2) in zip(self,value))
+        except TypeError: return Vector(v + value for v in self)
     def __sub__(self, value):
         try:              return Vector(v1 - v2 for (v1,v2) in zip(self,value))
         except TypeError: return Vector(v - value for v in self)
     def __mul__(self, value):
         try:              return Vector(v1 * v2 for (v1,v2) in zip(self,value))
         except TypeError: return Vector(v * value for v in self)
+    def __rmul__(self, value):
+        try:              return Vector(v1 * v2 for (v1,v2) in zip(self,value))
+        except TypeError: return Vector(v * value for v in self)
     def __truediv__(self, value):
         try:              return Vector(v1 / v2 for (v1,v2) in zip(self,value))
         except TypeError: return Vector(v / value for v in self)
+    def __eq__(self, value):
+        try:              return Vector(v1 == v2 for (v1,v2) in zip(self,value))
+        except TypeError: return Vector(v == value for v in self)
     # Define "absolute value", "dot product" and "norm".
     def __abs__(self):  return Vector(map(abs,self))
     def dot(self, vec): return sum(v1*v2 for (v1,v2) in zip(self, vec))
@@ -474,8 +539,8 @@ def fit(x, y, continuity=0):
 # 
 # EXAMPLE:
 # polynomial([1, 2, 3], [-1, 2, -3], dx1=0)
-#   => cubic polynomial interpolating the points (0,-1), (1,2), and
-#      (2,-3) that has a first derivative of 0 at x=2.
+#   => cubic polynomial interpolating the points (1,-1), (2,2), and
+#      (3,-3) that has a first derivative of 0 at x=2.
 def polynomial(given_x, given_y, **derivs):
     # Sort the data by "x" value.
     indices = sorted(range(len(given_x)), key=lambda i: given_x[i])
@@ -572,15 +637,15 @@ def _test_Polynomial():
     assert(str(f) == "3 x^2  +  2 x  +  1")
     assert(str(f.derivative()) == "6 x  +  2")
     assert(str(f.derivative(2)) == "6")
-    assert(str(f.derivative(3)) == "")
-    assert(str(f.derivative(4)) == "")
+    assert(str(f.derivative(3)) == "0")
+    assert(str(f.derivative(4)) == "0")
     assert(f.derivative(3)(10) == 0)
     f = Polynomial(NewtonPolynomial([3,2,1],[0,0,0]))
     assert(str(f) == "3 x^2  +  2 x  +  1")
     assert(str(f.derivative()) == "6 x  +  2")
     assert(str(f.derivative(2)) == "6")
-    assert(str(f.derivative(3)) == "")
-    assert(str(f.derivative(4)) == "")
+    assert(str(f.derivative(3)) == "0")
+    assert(str(f.derivative(4)) == "0")
     assert(f.derivative(3)(5) == 0)
     f = Polynomial(NewtonPolynomial([-1,10,-16,24,32,-32], [1,1,1,-1,-1,-1]))
     assert(str(f) == "-1 x^5  +  9 x^4  +  6 x^3  +  -22 x^2  +  11 x  +  -3")
@@ -588,6 +653,10 @@ def _test_Polynomial():
     # Check that integrals work too.
     assert(str(f.derivative().derivative(-1)) == "-1.0 x^5  +  9.0 x^4  +  6.0 x^3  +  -22.0 x^2  +  11.0 x")
     assert(str(f.derivative().derivative(-1).derivative()) == "-5.0 x^4  +  36.0 x^3  +  18.0 x^2  +  -44.0 x  +  11.0")
+    # Check on addition and multiplication.
+    x = Vector(list(range(10)))
+    assert all((f(x)+1) == (f+1)(x)), f"Addition did not produce expected result:\n    f(x) = {f(x)}\n  1+f(x) = {(1+f)(x)}\n"
+    assert all((f(x)*2) == (f*2)(x)), f"Multiplication did not produce expected result:\n    f(x) = {f(x)}\n  2*f(x) = {(2*f)(x)}\n"
 
 
 # Test the Polynomial class for basic operation.
@@ -597,6 +666,10 @@ def _test_NewtonPolynomial():
     assert(str(Polynomial(f)) == "-1 x  +  1")
     f = NewtonPolynomial([-1,10,-16,24,32,-32], [1,1,1,-1,-1,-1])
     assert(str(f) == "-32 + (x + 1)(32 + (x + 1)(24 + (x + 1)(-16 + (x - 1)(10 + (x - 1)(-1)))))")
+    # Check on addition and multiplication.
+    x = Vector(list(range(10)))
+    assert all((f(x)+1) == (f+1)(x)), f"Addition did not produce expected result:\n    f(x) = {f(x)}\n  1+f(x) = {(1+f)(x)}\n"
+    assert all((f(x)*2) == (f*2)(x)), f"Multiplication did not produce expected result:\n    f(x) = {f(x)}\n  2*f(x) = {(2*f)(x)}\n"
 
 
 # Test the "polynomial" interpolation routine (uses Newton form).
@@ -642,6 +715,10 @@ def _test_Spline():
                 print(f)
                 print('-'*70)
                 raise(Exception("Failed test case."))
+    # Check on addition and multiplication.
+    x = Vector(range(2 * len(knots))) / 2
+    assert all((f(x)+1) == (f+1)(x)), f"Addition did not produce expected result:\n       x = {x}\n    f(x) = {list(map(float,f(x)))}\n  1+f(x) = {list(map(float,(1+f)(x)))}\n"
+    assert all((f(x)*2) == (f*2)(x)), f"Multiplication did not produce expected result:\n       x = {x}\n    f(x) = {f(x)}\n  2*f(x) = {(2*f)(x)}\n"
 
 
 # Test the "fit" function. (there is testing code built in, so this
@@ -688,7 +765,7 @@ if __name__ == "__main__":
     print(" Spline")
     _test_Spline()
     print(" fit")
-    _test_fit(plot=True)
+    _test_fit(plot=False)
     print("tests complete.")
 
 
