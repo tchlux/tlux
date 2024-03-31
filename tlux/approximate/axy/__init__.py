@@ -227,8 +227,7 @@ class AXY:
         # Check all shapes to validate.
         info = self.AXY.fit_check(self.config, self.model, rwork, iwork, lwork,
                                   ax.T, axi.T, sizes, x.T, xi.T, y.T, yi.T, yw_in.T,
-                                  yw.T, agg_iterators.T,
-                                  steps=steps, record=self.record.T, sum_squared_error=0.0)
+                                  yw.T, agg_iterators.T)
         # Check for a nonzero exit code.
         self._check_code(info, "fit_precheck")
         # Store the number of steps already taken.
@@ -683,7 +682,7 @@ if __name__ == "__main__":
         mds = 64,
         mns = 2,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
-        steps = 2000,
+        steps = 1000,
         # nm = nm,
         # initial_curv_estimate = 1.0,
         # step_factor = 0.001,
@@ -697,7 +696,7 @@ if __name__ == "__main__":
         # num_threads = 1,
         # granular_parallelism = True,
         # step_emb_change=0.01,
-        step_ay_change=0.5,
+        # step_ay_change=0.5,
         log_grad_norm_frequency = 1,
         rank_check_frequency = 1,
         early_stop = False,
@@ -706,16 +705,14 @@ if __name__ == "__main__":
         # x_normalized = True,
         # y_normalized = True,
         # pairwise_aggregation = True,
-        partial_aggregation = True,
+        # partial_aggregation = True,
         # ordered_aggregation = False,
         # reshuffle = False,
-        # keep_best = False,
+        # encode_scaling = True,
+        # keep_best = True,
         interrupt_delay_sec = 0, # Make the intermediate function be called at every step.
         # **ONLY_SGD
     )
-
-    # 11 second fit  granular = False
-    # 14 second fit  granular = True
 
     # Generate data bounds.
     x_min_max = [[-.1, 1.1], [-.1, 1.1]]
@@ -767,18 +764,6 @@ if __name__ == "__main__":
     # for i in range(yi.shape[0]):
     #     for j in range(yi.shape[1]):
     #         yi[i,j] = yi_values[j][yi[i,j]]
-
-    # 
-    # import json
-    # print()
-    # print(json.dumps(dict(
-    #     x=[[round(v,3) for v in row] for row in x.tolist()],
-    #     y=[[round(v,3) for v in row] for row in y.tolist()],
-    #     fx=[[0.633, 0.544]],
-    # )))
-    # print()
-    # print()
-    # exit()
 
     print()
     print("ax.shape:    ", ax.shape)
@@ -915,23 +900,23 @@ if __name__ == "__main__":
                            mode="markers", shade=True, marker_size=4)
     p.plot(show=False)
 
-    # Generate a visual for data projections.
-    loaded_output = loaded_model.predict(
-        ax=(ax.copy() if use_a else None),
-        axi=(axi if use_a else None),
-        sizes=(sizes if use_a else None),
-        x=(x.copy() if use_x else None),
-        xi=(xi if use_x else None),
-        save_states=True
-    )
-    trained_output = trained_model.predict(
-        ax=(ax.copy() if use_a else None),
-        axi=(axi if use_a else None),
-        sizes=(sizes if use_a else None),
-        x=(x.copy() if use_x else None),
-        xi=(xi if use_x else None),
-        save_states=True
-    )
+    # # Generate a visual for data projections.
+    # loaded_output = loaded_model.predict(
+    #     ax=(ax.copy() if use_a else None),
+    #     axi=(axi if use_a else None),
+    #     sizes=(sizes if use_a else None),
+    #     x=(x.copy() if use_x else None),
+    #     xi=(xi if use_x else None),
+    #     save_states=True
+    # )
+    # trained_output = trained_model.predict(
+    #     ax=(ax.copy() if use_a else None),
+    #     axi=(axi if use_a else None),
+    #     sizes=(sizes if use_a else None),
+    #     x=(x.copy() if use_x else None),
+    #     xi=(xi if use_x else None),
+    #     save_states=True
+    # )
 
     # print()
     # print("Plotting embeddings..")
@@ -965,6 +950,7 @@ if __name__ == "__main__":
         # Rescale the columns of the record for visualization.
         record = m.record
         for i in range(0, record.shape[0]+1, max(1,record.shape[0] // 100)):
+            if i != record.shape[0]: continue # HACK: Only include last frame.
             step_indices = list(range(1,i+1))
             p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
             p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
@@ -979,3 +965,20 @@ if __name__ == "__main__":
 
 
     visualize_training_geometries()
+
+
+# 2024-03-28 20:03:02
+# 
+    ##############################################################
+    # #                                                          #
+    # # import json                                              #
+    # # print()                                                  #
+    # # print(json.dumps(dict(                                   #
+    # #     x=[[round(v,3) for v in row] for row in x.tolist()], #
+    # #     y=[[round(v,3) for v in row] for row in y.tolist()], #
+    # #     fx=[[0.633, 0.544]],                                 #
+    # # )))                                                      #
+    # # print()                                                  #
+    # # print()                                                  #
+    # # exit()                                                   #
+    ##############################################################
