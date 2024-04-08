@@ -488,7 +488,7 @@ class AXY:
             ynn = y.shape[1]-doe
             # Get the numerical columns first.
             _y = [y[:,i] for i in range(ynn)]
-            # If raw scores are being returned, just project and exit.
+            # If raw scores are being returned, just project to embeddings and exit.
             if (raw_scores):
                 return np.concatenate((y[:,:-doe], np.matmul(y[:,-doe:], yi_embeddings)), axis=1)
             # Project the categorical embedding outputs into a matrix with "yne" columns.
