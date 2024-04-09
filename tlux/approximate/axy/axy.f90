@@ -156,6 +156,7 @@ MODULE AXY
      ! Function parameter.
      REAL(KIND=RT) :: DISCONTINUITY = 0.0_RT
      REAL(KIND=RT) :: CATEGORY_GAP = 0.1_RT
+     REAL(KIND=RT) :: MIN_AGG_WEIGHT = SQRT(SQRT(EPSILON(1.0_RT))) ! Minimum weight assigned to aggregate inputs (made convex).
      ! Optimization related parameters.
      REAL(KIND=RT) :: MIN_STEP_FACTOR = 0.0005_RT ! Minimum multiplier on gradient steps.
      REAL(KIND=RT) :: STEP_FACTOR = 0.001_RT ! Initial multiplier on gradient steps.
@@ -1729,7 +1730,7 @@ CONTAINS
                MODEL(CONFIG%ASOV:CONFIG%AEOV), &
                AX(:,BS:BE), AY(BS:BE,:), A_STATES(BS:BE,:,:), YTRANS=.TRUE._C_BOOL)
           ! Ensure valid AY error estimation terms (cannot be negative or zero).
-          AY(BS:BE,CONFIG%ADO+1) = MAX(SQRT(EPSILON(1.0_RT)), AY(BS:BE,CONFIG%ADO+1))
+          AY(BS:BE,CONFIG%ADO+1) = MAX(CONFIG%MIN_AGG_WEIGHT, AY(BS:BE,CONFIG%ADO+1))
        END DO aggregator_evaluation
        ! 
        ! Aggregate the output of the set model.
@@ -1747,8 +1748,8 @@ CONTAINS
                 FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
                 IF (CONFIG%PARTIAL_AGGREGATION) THEN
                    ! Assume that the fixed data has the same alignment as the aggregate data.
-                   X(E:,FE) = AY(GE,:CONFIG%ADO)
                    CW = AY(GE,CONFIG%ADO+1)
+                   X(E:,FE) = AY(GE,:CONFIG%ADO) * CW
                    ! Accumulate the running sum in the last position, updating the divisor.
                    DO J = ONE, SIZES(I)-ONE
                       X(E:,FE) = X(E:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
@@ -1788,8 +1789,8 @@ CONTAINS
                 FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
                 IF (CONFIG%PARTIAL_AGGREGATION) THEN
                    ! Assume that the fixed data has the same alignment as the aggregate data.
-                   Y(:,FE) = AY(GE,:CONFIG%ADO)
                    CW = AY(GE,CONFIG%ADO+1)
+                   Y(:,FE) = AY(GE,:CONFIG%ADO) * CW
                    ! Accumulate the running sum in the last position, updating the divisor.
                    DO J = ONE, SIZES(I)-ONE
                       Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
