@@ -18,12 +18,18 @@ def PICKLE_LOADS(o: bytes) -> Any:
 
 
 # Get the IP address of this host, otherwise return the host name.
-def get_ip():
+def get_ip(socket_type):
     try:
         # Get the fully qualified local hostname
         hostname = socket.getfqdn()
-        # Resolve the hostname to an IP address
-        ip = socket.gethostbyname(hostname)
+        if socket_type == socket.AF_INET:
+            # Resolve the hostname to an IP address
+            ip = socket.gethostbyname(hostname)
+        elif socket_type == socket.AF_INET6:
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+            ip = addr_info[0][4][0]  # Retrieves the first IPv6 address
+        else:
+            raise ValueError(f"network.NetworkQueue Unexpected socket type {repr(socket_type)}")
     except Exception as e:
         # Otherwise just use the host name.
         ip = socket.gethostname()
@@ -39,6 +45,7 @@ class NetworkQueue:
             port: Optional[int] = None,
             listen_host: Optional[str] = None,
             listen_port: Optional[int] = 0,
+            socket_type = socket.AF_INET,
             serialize: Callable[[Any],bytes] = PICKLE_DUMPS,
             deserialize: Callable[[bytes],Any] = PICKLE_LOADS,
     ):
@@ -49,6 +56,7 @@ class NetworkQueue:
         self.queues = {}
         self.arrivals = Queue()
         self.popped = []
+        self.socket_type = socket_type
         self.serialize = serialize
         self.deserialize = deserialize
 
@@ -58,8 +66,8 @@ class NetworkQueue:
 
         # If we want to listen for outside connections, then do that.
         if (listen_port is not None):
-            self.listener_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.listener_host = listen_host or get_ip()
+            self.listener_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
+            self.listener_host = listen_host or get_ip(self.socket_type)
             self.listener_socket.bind((self.listener_host, listen_port))
             self.listener_port = self.listener_socket.getsockname()[1]  # Retrieves the automatically assigned port if 0.
             self.listener_socket.listen()
@@ -71,7 +79,7 @@ class NetworkQueue:
         # Connect to the other NetworkQueue.
         if ((host is not None) and (port is not None)):
             logging.info(f"network.NetworkQueue establishing connection with {host}:{port}")
-            host_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
             host_socket.connect((host, port))
             self.clients["host"] = (
                 host_socket,
