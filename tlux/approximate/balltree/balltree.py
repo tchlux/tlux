@@ -118,6 +118,7 @@ class BallTree:
         self.order = None
         self.radii = None
         self.medians = None
+        self.inners = None
         # Assign the various pruning functions.
         self._balltree = ball_tree
         self._inner = prune.inner
@@ -154,6 +155,7 @@ class BallTree:
                 old_order = self.order[:self.size]
                 old_radii = self.radii[:self.built]
                 old_medians = self.medians[:self.built]
+                old_inners = self.inners[:self.built]
                 # Compute the new size and initialize the memory for the new tree.
                 to_allocate = max(2 * self.size, self.size + points.shape[1])
                 self.size += points.shape[1]
@@ -165,6 +167,7 @@ class BallTree:
                 self.order = np.arange(1, self.tree.shape[1]+1, dtype='int64')
                 self.radii = np.zeros(self.tree.shape[1], dtype='float32')
                 self.medians = np.zeros(self.tree.shape[1], dtype='float32')
+                self.inners = np.zeros(self.tree.shape[1], dtype='float32')
                 # Pack the old points and the new points into a single tree
                 #  while ensuring the built parts of the previous tree are still valid.
                 self.tree[:,:old_tree.shape[1]] = old_tree
@@ -174,8 +177,9 @@ class BallTree:
                 self.order[:old_order.size] = old_order
                 self.radii[:old_radii.size] = old_radii
                 self.medians[:old_medians.size] = old_medians
+                self.inners[:old_inners.size] = old_inners
                 # Delete the old tree components.
-                del old_tree, old_usage, old_sq_sums, old_order, old_radii, old_medians
+                del old_tree, old_usage, old_sq_sums, old_order, old_radii, old_medians, old_inners
         else:
             # Save the points internally as the tree.
             self.tree = np.asarray(points, order='F', dtype='float32')
@@ -185,6 +189,7 @@ class BallTree:
             self.order = np.arange(1, self.tree.shape[1]+1, dtype='int64')
             self.radii = np.zeros(self.tree.shape[1], dtype='float32')
             self.medians = np.zeros(self.tree.shape[1], dtype='float32')
+            self.inners = np.zeros(self.tree.shape[1], dtype='float32')
             # Store BallTree internals for knowing how to evaluate.
             self.built = 0
             self.size = self.tree.shape[1]
@@ -198,7 +203,8 @@ class BallTree:
     # contiguous blocks of memory (local by branch + leaf).
     def reorder(self):
         # Update all internals of the tree structure to make ORDER into a typical range.
-        self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians, self.order[:self.built])
+        self._balltree.fix_order(self.tree, self.sq_sums, self.radii, self.medians,
+                                 self.inners, self.order[:self.built])
 
     # Build a tree out.
     def build(self, leaf_size=None, root=None, reorder=None, selector=None):
@@ -217,11 +223,13 @@ class BallTree:
             #              node, or 0.0 if this point is a leaf.
             #    .medians  will be modified to have the distance to the
             #              median child node, or 0.0 if this point is a leaf.
+            #    .inners   will be modified to have the distance to the
+            #              inner child node, or 0.0 is this point is a leaf.
             #    .order    will be the list of indices (1-indexed) that
             #              determine the structure of the ball tree.
             sq_dists = np.zeros(self.size, dtype='float32')
             self._balltree.build_tree(
-                self.tree, self.sq_sums,self.radii, self.medians, sq_dists,
+                self.tree, self.sq_sums,self.radii, self.medians, self.inners, sq_dists,
                 self.order[:self.size], leaf_size=self.leaf_size, root=root,
                 selector=selector,
             )
@@ -229,6 +237,17 @@ class BallTree:
             # memory (local by branch + leaf), as long as allowed (by user or memory).
             if (reorder or ((reorder is None) and (self.tree.nbytes < self._balltree.max_copy_bytes))):
                 self.reorder()
+
+    # Find the "k" nearest neighbors to all points in z.
+    def in_radius(self, z, radius, return_distance=True, transpose=True):
+        z = np.asarray(z, dtype="float32").flatten()
+        indices = np.arange(self.tree.shape[1], dtype="int64")
+        dists = np.zeros(self.tree.shape[1], dtype="float32")
+        return self._balltree.pt_in_radius(
+            z, radius, self.tree, self.sq_sums, self.radii, self.medians,
+            self.inners, self.order[:self.built], self.leaf_size,
+            indices, dists
+        )
 
     # Find the "k" nearest neighbors to all points in z.
     def nearest(self, z, k=1, return_distance=True, transpose=True,
@@ -353,7 +372,8 @@ class BallTree:
                 self._top(size, levels, indices)
             elif (method == "distance"):
                 indices = np.zeros(size, dtype=np.int64)
-                self._distance(size, min_distance, self.order[:self.size], self.radii, self.medians, indices)
+                self._distance(size, min_distance, self.order[:self.size],
+                               self.radii, self.medians, indices)
             indices[:] -= 1
         # Truncate the indices to the set that is actually filled with values.
         first_negative = np.argmin(indices)
