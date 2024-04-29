@@ -87,7 +87,7 @@ def test_compare_against_sklearn(LARGE_TEST=False):
     from tlux.system import Timer
     t = Timer()
 
-    if LARGE_TEST: train, dim = 10000000, 20
+    if LARGE_TEST: train, dim = 1000000, 512
     else:          train, dim = 5, 2
     test = 10
     leaf_size = 1
@@ -139,10 +139,10 @@ def test_compare_against_sklearn(LARGE_TEST=False):
     print("Brute Force")
     # Convert to float64 (for regular test this does nothing, for integer...
     t.start()
-    d = np.sqrt(np.sum(x**2, axis=1) + np.sum(z[0]**2) - 2 * np.dot(x, z[0]))
+    d = np.sqrt(np.sum(x**2, axis=1, keepdims=True) + np.sum(z**2, axis=1, keepdims=True).T - 2 * np.dot(x, z.T))[:,0]
     i = np.argsort(d)
     qt = t.stop()
-    print("Query time:", qt * test)
+    print("Query time:", qt)
     i = i[:k]
     d = d[i]
     print("d: ",d)
@@ -372,12 +372,11 @@ def test_prune_distance():
 # × PRE-ADD - 2.35 2.33 2.31 2.27 2.35
 # 
 if __name__ == "__main__":
-    LARGE_TEST = False
+    LARGE_TEST = True
 
     # test_tree(LARGE_TEST=LARGE_TEST)
-    # test_compare_against_sklearn(LARGE_TEST=LARGE_TEST)
+    test_compare_against_sklearn(LARGE_TEST=LARGE_TEST)
     # test_sort(LARGE_TEST=LARGE_TEST)
     # test_prune_level()
     # test_prune_inner()
-
-    test_prune_distance()
+    # test_prune_distance()
