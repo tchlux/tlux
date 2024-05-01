@@ -40,6 +40,7 @@ if __name__ == "__main__":
     client = NetworkQueue(host=server.listener_host, port=server.listener_port, listen_port=None)
 
     # Put something into the server queue.
+    print("", flush=True)
     print("Sending from server to client..", flush=True)
     phrase = "hello world!"
     server.put(phrase)
@@ -49,6 +50,7 @@ if __name__ == "__main__":
     print()
 
     # Try sending the opposite direction.
+    print("", flush=True)
     print("Sending from client to server..", flush=True)
     phrase = "world hello!"
     client.put(phrase)
@@ -57,5 +59,16 @@ if __name__ == "__main__":
     print(result, flush=True)
     print()
 
+    # Try sending a large object.
+    LARGE_OBJECT_TEST = True
+    if LARGE_OBJECT_TEST:
+        print("", flush=True)
+        print("Sending large object from server to client..", flush=True)
+        large_object = bytearray(200 * 2**20)
+        server.put(large_object)
+        result = client.get()
+        assert (large_object == result), f"Expected phrase retrieved {len(result)} to be same as submitted {len(large_object)}."
+
+    print("", flush=True)
     print("server: ", server, flush=True)
     print("client: ", client, flush=True)

@@ -18,12 +18,18 @@ def PICKLE_LOADS(o: bytes) -> Any:
 
 
 # Get the IP address of this host, otherwise return the host name.
-def get_ip():
+def get_ip(socket_type):
     try:
         # Get the fully qualified local hostname
         hostname = socket.getfqdn()
-        # Resolve the hostname to an IP address
-        ip = socket.gethostbyname(hostname)
+        if socket_type == socket.AF_INET:
+            # Resolve the hostname to an IP address
+            ip = socket.gethostbyname(hostname)
+        elif socket_type == socket.AF_INET6:
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+            ip = addr_info[0][4][0]  # Retrieves the first IPv6 address
+        else:
+            raise ValueError(f"network.NetworkQueue Unexpected socket type {repr(socket_type)}")
     except Exception as e:
         # Otherwise just use the host name.
         ip = socket.gethostname()
@@ -39,6 +45,7 @@ class NetworkQueue:
             port: Optional[int] = None,
             listen_host: Optional[str] = None,
             listen_port: Optional[int] = 0,
+            socket_type = socket.AF_INET,
             serialize: Callable[[Any],bytes] = PICKLE_DUMPS,
             deserialize: Callable[[bytes],Any] = PICKLE_LOADS,
     ):
@@ -49,6 +56,7 @@ class NetworkQueue:
         self.queues = {}
         self.arrivals = Queue()
         self.popped = []
+        self.socket_type = socket_type
         self.serialize = serialize
         self.deserialize = deserialize
 
@@ -58,8 +66,8 @@ class NetworkQueue:
 
         # If we want to listen for outside connections, then do that.
         if (listen_port is not None):
-            self.listener_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.listener_host = listen_host or get_ip()
+            self.listener_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
+            self.listener_host = listen_host or get_ip(self.socket_type)
             self.listener_socket.bind((self.listener_host, listen_port))
             self.listener_port = self.listener_socket.getsockname()[1]  # Retrieves the automatically assigned port if 0.
             self.listener_socket.listen()
@@ -71,7 +79,7 @@ class NetworkQueue:
         # Connect to the other NetworkQueue.
         if ((host is not None) and (port is not None)):
             logging.info(f"network.NetworkQueue establishing connection with {host}:{port}")
-            host_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
             host_socket.connect((host, port))
             self.clients["host"] = (
                 host_socket,
@@ -110,27 +118,29 @@ class NetworkQueue:
         while (not self.exit_event.is_set()):
             try:
                 # First listen for an integer that specifies the size of the data.
-                data = client_socket.recv(8)
-                if (data):
-                    # Then decode that integer listen for the object that follows.
-                    obj_size: int = int.from_bytes(data, "big")
-                    data = client_socket.recv(obj_size)
-                    if (data):
-                        logging.info(f"network.NetworkQueue object sized {obj_size} incoming from client {repr(client_id)}")
-                        # Put the received data into the client's designated queue stored locally.
-                        q.put(self.deserialize(data))
-                        # Indicate the arrival of data from this client in the parent arrivals queue.
-                        self.arrivals.put(client_id)
-                        logging.info(f"network.NetworkQueue data of size {obj_size} successfully arrived from client {repr(client_id)}")
-                    else:
-                        logging.error(f"network.NetworkQueue got size {obj_size} with no data following from client {repr(client_id)}")
-                elif (data == b''):
+                size_data = client_socket.recv(8)
+                if (size_data == b''):
                     logging.info(f"NetowrkQueue received data b'' from client {repr(client_id)} indicating a closed connection.")
                     break
-                else:
-                    logging.error(f"network.NetworkQueue got data {data} that was invalid from client {repr(client_id)}")
+                # Then decode that integer listen for the object that follows.
+                obj_size = int.from_bytes(size_data, "big")
+                logging.info(f"network.NetworkQueue object sized {obj_size} incoming from client {repr(client_id)}")
+                # Now iteratively receive all chunks of data from the client.
+                data_received = b''
+                while len(data_received) < obj_size:
+                    chunk = client_socket.recv(obj_size - len(data_received))
+                    if not chunk:
+                        logging.error(f"network.NetworkQueue got size {obj_size} with incomplete data from client {repr(client_id)}, connection closed prematurely.")
+                        break
+                    data_received += chunk
+                # Put the received data into the client's designated queue stored locally.
+                q.put(self.deserialize(data_received))
+                # Indicate the arrival of data from this client in the parent arrivals queue.
+                self.arrivals.put(client_id)
+                logging.info(f"network.NetworkQueue data of size {obj_size} successfully arrived from client {repr(client_id)}")
             # Socket errors trigger an immediate break.
             except socket.error:
+                logging.error(f"network.NetworkQueue encountered socket error with client {repr(client_id)}")
                 break
             # In case of any errors, 
             except Exception as e:
@@ -146,23 +156,33 @@ class NetworkQueue:
 
     # Send an item to clients (or a specific client if provided).
     def put(self, item, client_id=None):
-        item = self.serialize(item)
-        size = len(item)
-        # If a client was provided, then send specifically to that one.
-        if (client_id in self.clients):
-            client_socket, client_thread = self.clients[client_id]
+        serialized_item = self.serialize(item)
+        total_size = len(serialized_item)
+        size_bytes = total_size.to_bytes(8, "big")
+
+        # Send data in a loop until all is sent
+        def send_all(socket, data):
+            total_sent = 0
+            while total_sent < len(data):
+                sent = socket.send(data[total_sent:])
+                if sent == 0:
+                    raise RuntimeError("Socket connection broken")
+                total_sent += sent
+
+        # Sending to a specific client or all clients
+        if client_id in self.clients:
+            client_socket, _ = self.clients[client_id]
             try:
-                client_socket.send(size.to_bytes(8, "big") + item)
+                send_all(client_socket, size_bytes + serialized_item)
             except Exception as e:
-                logging.error(f"Failed to send item to client {repr(client_id)}: {e}")
-            logging.info(f"network.NetworkQueue sent 8 + {size} bytes to {repr(client_id)}")
-        # Otherwise, iterate over all clients and send them the item.
+                logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
+            logging.info(f"network.NetworkQueue sent {8 + total_size} bytes to {repr(client_id)}")
         else:
-            for client_id, (client_socket, client_thread) in self.clients.items():
+            for client_id, (client_socket, _) in self.clients.items():
                 try:
-                    client_socket.send(size.to_bytes(8, "big") + item)
+                    send_all(client_socket, size_bytes + serialized_item)
                 except Exception as e:
-                    logging.error(f"Failed to send item to client {repr(client_id)}: {e}")
+                    logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
                 logging.info(f"network.NetworkQueue sent to {repr(client_id)}")
 
 
