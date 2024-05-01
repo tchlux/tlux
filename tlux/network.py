@@ -220,11 +220,13 @@ class NetworkQueue:
     def __str__(self):
         host = f""
         if self.host is not None:
-            host = f"host-name={repr(self.host)} host-port={repr(self.port)} "
+            host = f"host={repr(self.host)}, port={repr(self.port)}, "
         listener = f""
         if hasattr(self, "listener_port"):
-            listener = f"listen-name={repr(self.listener_host)} listen-port={self.listener_port} "
+            listener = f"listen_host={repr(self.listener_host)}, listen_port={self.listener_port}, "
         clients = f""
         if len(self.clients) > 0:
-            clients = f"client-count={len(self.clients)}"
-        return f"<NetworkQueue {listener}{host}{clients}>"
+            clients = f"client_count={len(self.clients)}, "
+        socket_type = str(repr(self.socket_type)).split(":")[0].split(".")[1]
+        socket_type = f"socket_type=socket.{socket_type}"
+        return f"NetworkQueue({(listener+host+clients+socket_type)})"
