@@ -122,19 +122,22 @@ class NetworkQueue:
                 if (size_data == b''):
                     logging.info(f"NetowrkQueue received data b'' from client {repr(client_id)} indicating a closed connection.")
                     break
+                # TODO: Have a loop to ensure "size_data" is 8 bytes long.
                 # Then decode that integer listen for the object that follows.
                 obj_size = int.from_bytes(size_data, "big")
                 logging.info(f"network.NetworkQueue object sized {obj_size} incoming from client {repr(client_id)}")
                 # Now iteratively receive all chunks of data from the client.
-                data_received = b''
-                while len(data_received) < obj_size:
-                    chunk = client_socket.recv(obj_size - len(data_received))
+                data_received = 0
+                chunks = []
+                while data_received < obj_size:
+                    chunk = client_socket.recv(obj_size - data_received)
                     if not chunk:
                         logging.error(f"network.NetworkQueue got size {obj_size} with incomplete data from client {repr(client_id)}, connection closed prematurely.")
                         break
-                    data_received += chunk
+                    chunks.append(chunk)
+                    data_received += len(chunk)
                 # Put the received data into the client's designated queue stored locally.
-                q.put(self.deserialize(data_received))
+                q.put(self.deserialize(b''.join(chunks)))
                 # Indicate the arrival of data from this client in the parent arrivals queue.
                 self.arrivals.put(client_id)
                 logging.info(f"network.NetworkQueue data of size {obj_size} successfully arrived from client {repr(client_id)}")
@@ -159,28 +162,18 @@ class NetworkQueue:
         serialized_item = self.serialize(item)
         total_size = len(serialized_item)
         size_bytes = total_size.to_bytes(8, "big")
-
-        # Send data in a loop until all is sent
-        def send_all(socket, data):
-            total_sent = 0
-            while total_sent < len(data):
-                sent = socket.send(data[total_sent:])
-                if sent == 0:
-                    raise RuntimeError("Socket connection broken")
-                total_sent += sent
-
         # Sending to a specific client or all clients
         if client_id in self.clients:
             client_socket, _ = self.clients[client_id]
             try:
-                send_all(client_socket, size_bytes + serialized_item)
+                client_socket.sendall(size_bytes + serialized_item)
             except Exception as e:
                 logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
             logging.info(f"network.NetworkQueue sent {8 + total_size} bytes to {repr(client_id)}")
         else:
             for client_id, (client_socket, _) in self.clients.items():
                 try:
-                    send_all(client_socket, size_bytes + serialized_item)
+                    client_socket.sendall(size_bytes + serialized_item)
                 except Exception as e:
                     logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
                 logging.info(f"network.NetworkQueue sent to {repr(client_id)}")
