@@ -70,7 +70,8 @@ def smart_mmul_pairwise(min_sim=1.0 - r, max_dim=2**35):
     # Iterate until all pairs have been computed.
     # for _ in tqdm.tqdm(range(z.shape[0]-1), delay=5, position=1, leave=False):
     for _ in range(z.shape[0]-1):
-        sims[tc] = z[to_do[tc]] @ z[i]
+        zt = z[to_do[tc]]
+        sims[tc] = zt @ z[i]
         # Compute point in min_sim.
         above_min_sim = np.argwhere(sims >= min_sim).flatten()
         if (above_min_sim.size > 0):
