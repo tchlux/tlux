@@ -6,9 +6,13 @@ from tlux.unique import ByteArray
 
 
 # TODO:
+#  - turning on pairwise_aggregation for single-element-only data sets causes
+#    a change in the loss function, indicating a bug
 #  - make a robust "rolling normalization" operation that can reliably fetch
 #    data from a large data set and maintain radialization properites in the
 #    face of embedding drift as well
+#  - make a distributed-trainer that does data parallel model training given a
+#    list of host names and port numbers
 #  - create a 'plot_snapshot' method that creates a Graph of the model weights,
 #    gradient magnitudes, curvatures, projected embeddings (colored by change),
 #    and any other information that might be useful in diagnosing model components.
@@ -965,20 +969,3 @@ if __name__ == "__main__":
 
 
     visualize_training_geometries()
-
-
-# 2024-03-28 20:03:02
-# 
-    ##############################################################
-    # #                                                          #
-    # # import json                                              #
-    # # print()                                                  #
-    # # print(json.dumps(dict(                                   #
-    # #     x=[[round(v,3) for v in row] for row in x.tolist()], #
-    # #     y=[[round(v,3) for v in row] for row in y.tolist()], #
-    # #     fx=[[0.633, 0.544]],                                 #
-    # # )))                                                      #
-    # # print()                                                  #
-    # # print()                                                  #
-    # # exit()                                                   #
-    ##############################################################

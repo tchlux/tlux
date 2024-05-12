@@ -862,6 +862,7 @@ CONTAINS
     ELSE
        OUTPUT_SCALE = 1.0_RT
     END IF
+    ! Initialize the aggregator model.
     CALL INIT_SUBMODEL(&
          CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, &
          CONFIG%ADSO, CONFIG%ADO+1, &
@@ -875,13 +876,13 @@ CONTAINS
          MODEL(CONFIG%ASEV:CONFIG%AEEV), &
          MODEL(CONFIG%AECS:CONFIG%AECE), &
          RANDOM_LENGTHS=.TRUE._C_BOOL)
-    ! Initialize the fixed model.
     !   Set up the output scaling for the fixed model (won't matter if it doesn't exist).
     IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
        OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
     ELSE
        OUTPUT_SCALE = 0.1_RT
     END IF
+    ! Initialize the fixed model.
     CALL INIT_SUBMODEL(&
          CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
          CONFIG%MDSO, CONFIG%MDO, &
@@ -907,9 +908,9 @@ CONTAINS
     !   aggregator input multiplier,
     MODEL(CONFIG%AIMS:CONFIG%AIME) = 0.0_RT
     MODEL(CONFIG%AIMS:CONFIG%AIME:CONFIG%ADN+1) = 1.0_RT
-    !   input shift,
+    !   fixed input shift,
     MODEL(CONFIG%MISS:CONFIG%MISE) = 0.0_RT    
-    !   input multiplier,
+    !   fixed input multiplier,
     MODEL(CONFIG%MIMS:CONFIG%MIME) = 0.0_RT
     MODEL(CONFIG%MIMS:CONFIG%MIME:CONFIG%MDN+1) = 1.0_RT
     !   output shift, and
@@ -991,7 +992,7 @@ CONTAINS
       ORIGIN(:) = INPUT_SHIFT(:)
       DO J = 1, MNS-1
          ORIGIN(:) = MATMUL(ORIGIN(:), STATE_VECS(:,:,J))
-         ! Argsort the values of origin, adding the most to the smallest values.
+         ! Argsort the values of origin, adding the most to the minimum values.
          CALL ARGSORT(ORIGIN(:), ORDER(:))
          DO I = 1, MDS
             STATE_SHIFT(ORDER(MDS-I+1),J) = INPUT_SHIFT(I) ! range [-shift, shift]
@@ -1555,8 +1556,10 @@ CONTAINS
       DO N = ONE, SIZE(INT_INPUTS,2,KIND=INT64)
          DO D = ONE, SIZE(INT_INPUTS,1,KIND=INT64)
             E = INT_INPUTS(D,N)
+            ! Add embeddings referenced directly by 1-index.
             IF ((E .GT. 0) .AND. (E .LE. MNE)) THEN
                EMBEDDED(:,N) = EMBEDDED(:,N) + EMBEDDINGS(:,E)
+            ! Larger integers are reserved for pairs of embeddings.
             ELSE IF (E .GT. MNE) THEN
                CALL INDEX_TO_PAIR(INT(MNE,INT64)+ONE, E-MNE, E1, E2)
                ! Skip "0" embeddings, since they are the zero vector.
@@ -1566,8 +1569,10 @@ CONTAINS
                IF (E2 .GT. ONE) THEN
                   EMBEDDED(:,N) = EMBEDDED(:,N) - EMBEDDINGS(:,E2-ONE)
                END IF
+            ! 0-valued integers are not embedded.
             END IF
          END DO
+         ! If multiple embeddings are provided (in columns) they are averaged.
          IF (SIZE(INT_INPUTS,1,KIND=INT64) > ONE) THEN
             EMBEDDED(:,N) = EMBEDDED(:,N) / RD
          END IF
@@ -1608,7 +1613,7 @@ CONTAINS
          JOINT=.FALSE._C_BOOL, INFO=INFO)
     IF (INFO .NE. 0) RETURN
     ! Normalize the aggregate inputs.
-    IF (CONFIG%ADO .GT. ZERO) THEN
+    IF (CONFIG%NORMALIZE .AND. (CONFIG%ADO .GT. ZERO)) THEN
        ! Set the number of threads.
        NT = MIN(SIZE(AX,2,KIND=INT64), CONFIG%NUM_THREADS)
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
@@ -1618,7 +1623,7 @@ CONTAINS
           BT = BE-BS+1
           IF (BT .LE. 0) CYCLE aggregate_normalization
           ! Normalize the data.
-          IF (CONFIG%NORMALIZE .AND. (CONFIG%ADN .GT. 0)) THEN
+          IF (CONFIG%ADN .GT. 0) THEN
              ! Apply shift terms to aggregator inputs.
              IF (CONFIG%NEEDS_SHIFTING) THEN
                 DO I = BS, BE
@@ -1639,7 +1644,7 @@ CONTAINS
        END DO aggregate_normalization
     END IF
     ! Normalize the fixed inputs.
-    IF (CONFIG%MDO .GT. 0) THEN
+    IF (CONFIG%NORMALIZE .AND. (CONFIG%MDO .GT. ZERO)) THEN
        ! Set the number of threads.
        NT = MIN(SIZE(X,2,KIND=INT64), CONFIG%NUM_THREADS)
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, BS, BE, BT) IF(NT > 1)
@@ -1649,7 +1654,7 @@ CONTAINS
           BE = BATCHM_ENDS(BATCH)
           BT = BE-BS+1
           IF ((BT .LE. 0) .OR. (MIN(BS,BE) .LE. 0)) CYCLE fixed_normalization
-          IF (CONFIG%NORMALIZE .AND. (CONFIG%MDN .GT. 0)) THEN
+          IF (CONFIG%MDN .GT. 0) THEN
              ! Apply shift terms to numeric model inputs.
              IF (CONFIG%NEEDS_SHIFTING) THEN
                 DO I = BS, BE
@@ -1687,7 +1692,7 @@ CONTAINS
     REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:,:) :: M_STATES ! SIZE(X, 2), MDS, (MNS|2)
     INTEGER(KIND=INT32), INTENT(INOUT) :: INFO
     ! Internal values.
-    INTEGER(KIND=INT64) :: I, J, BATCH, BS, BE, BT, GS, GE, FE, NT, E
+    INTEGER(KIND=INT64) :: I, BATCH, BS, BE, BT, NT, E
     REAL(KIND=RT), POINTER, DIMENSION(:) :: AY_SHIFT, AY_SCALE, Y_SHIFT
     REAL(KIND=RT), POINTER, DIMENSION(:,:) :: Y_RESCALE
     REAL(KIND=RT) :: CW
@@ -1729,7 +1734,7 @@ CONTAINS
                MODEL(CONFIG%ASSS:CONFIG%AESS), &
                MODEL(CONFIG%ASOV:CONFIG%AEOV), &
                AX(:,BS:BE), AY(BS:BE,:), A_STATES(BS:BE,:,:), YTRANS=.TRUE._C_BOOL)
-          ! Ensure valid AY error estimation terms (cannot be negative or zero).
+          ! Ensure valid AY error estimation terms (cannot be zero or negative).
           AY(BS:BE,CONFIG%ADO+1) = MAX(CONFIG%MIN_AGG_WEIGHT, AY(BS:BE,CONFIG%ADO+1))
        END DO aggregator_evaluation
        ! 
@@ -1738,84 +1743,10 @@ CONTAINS
        ! Compute the final output.
        IF (CONFIG%MDO .GT. 0) THEN
           E = CONFIG%MDN+CONFIG%MDE+ONE ! <- start of aggregator output
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE, CW) IF(NT > 1)
-          set_aggregation_to_x : DO I = ONE, SIZE(SIZES,KIND=INT64)
-             IF (SIZES(I) .GT. ZERO) THEN
-                ! Take the mean of all outputs from the aggregator model, store
-                !   as input to the model that proceeds this aggregation.
-                GS = AGG_STARTS(I)
-                GE = AGG_STARTS(I) + SIZES(I) - ONE
-                FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
-                IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                   ! Assume that the fixed data has the same alignment as the aggregate data.
-                   CW = AY(GE,CONFIG%ADO+1)
-                   X(E:,FE) = AY(GE,:CONFIG%ADO) * CW
-                   ! Accumulate the running sum in the last position, updating the divisor.
-                   DO J = ONE, SIZES(I)-ONE
-                      X(E:,FE) = X(E:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
-                      ! Accumulate the running sum of weights (to be made convex).
-                      CW = CW + AY(GE-J,CONFIG%ADO+1)
-                      ! Apply zero-mean shift terms to aggregated model inputs.
-                      X(E:,FE-J) = (X(E:,FE) / CW - AY_SHIFT(:)) * AY_SCALE(:)
-                   END DO
-                   ! Revert the running sum in the last position to just the first value.
-                   IF (SIZES(I) .GT. ZERO) THEN
-                      ! Apply zero-mean shift terms to aggregated model inputs.
-                      X(E:,FE) = (AY(GE,:CONFIG%ADO) - AY_SHIFT(:)) * AY_SCALE(:)
-                   END IF
-                ELSE
-                   ! Otherwise, without partial aggregation, just put the average aggregate into X.
-                   ! Apply zero-mean shift terms to aggregated model inputs.
-                   CW = SUM(AY(GS:GE,CONFIG%ADO+1))
-                   X(E:,I) = (MATMUL(AY(GS:GE,CONFIG%ADO+1), AY(GS:GE,:CONFIG%ADO)) / CW - AY_SHIFT(:)) * AY_SCALE(:)                   
-                END IF
-             ELSE ! (SIZES(I) .EQ. ZERO)
-                IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                   X(E:,FIX_STARTS(I):FIX_STARTS(I)+MAX(ONE,SIZES(I))-ONE) = 0.0_RT
-                ELSE
-                   X(E:,I) = 0.0_RT
-                END IF
-             END IF
-          END DO set_aggregation_to_x
+          CALL COMPUTE_SET_AGGREGATION(Y=X(E:,:))
        ELSE
           ! If there is no model after this, place results directly in Y.
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE) IF(NT > 1)
-          set_aggregation_to_y : DO I = ONE, SIZE(SIZES,KIND=INT64)
-             IF (SIZES(I) .GT. 0) THEN
-                ! Take the mean of all outputs from the aggregator model, store
-                !   as input to the model that proceeds this aggregation.
-                GS = AGG_STARTS(I)
-                GE = AGG_STARTS(I) + SIZES(I) - ONE
-                FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
-                IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                   ! Assume that the fixed data has the same alignment as the aggregate data.
-                   CW = AY(GE,CONFIG%ADO+1)
-                   Y(:,FE) = AY(GE,:CONFIG%ADO) * CW
-                   ! Accumulate the running sum in the last position, updating the divisor.
-                   DO J = ONE, SIZES(I)-ONE
-                      Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
-                      ! Accumulate the running sum of weights (to be made convex).
-                      CW = CW + AY(GE-J,CONFIG%ADO+1)
-                      ! Compute this output.
-                      Y(:,FE-J) = Y(:,FE) / CW
-                   END DO
-                   ! Revert the running sum in the last position to just the first value.
-                   IF (SIZES(I) .GT. ONE) THEN
-                      Y(:,FE) = AY(GE,:CONFIG%ADO)
-                   END IF
-                ELSE
-                   ! Otherwise, without partial aggregation, just put the weighted average aggregate into X.
-                   CW = SUM(AY(GS:GE,CONFIG%ADO+1))
-                   Y(:,I) = MATMUL(AY(GS:GE,CONFIG%ADO+1), AY(GS:GE,:CONFIG%ADO)) / CW
-                END IF
-             ELSE
-                IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                   Y(:,FIX_STARTS(I)) = 0.0_RT
-                ELSE
-                   Y(:,I) = 0.0_RT
-                END IF
-             END IF
-          END DO set_aggregation_to_y
+          CALL COMPUTE_SET_AGGREGATION(Y=Y(:,:))
        END IF  ! MDO > 0
     END IF  ! ADO > 0
     ! 
@@ -1881,6 +1812,46 @@ CONTAINS
 
 
   CONTAINS
+
+    SUBROUTINE COMPUTE_SET_AGGREGATION(Y)
+      REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: Y
+      INTEGER(KIND=INT64) :: I, J, GS, GE, FE
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE) IF(NT > 1)
+      set_aggregation_to_y : DO I = ONE, SIZE(SIZES,KIND=INT64)
+         IF (SIZES(I) .GT. 0) THEN
+            ! Take the mean of all outputs from the aggregator model, store
+            !   as input to the model that proceeds this aggregation.
+            GS = AGG_STARTS(I)
+            GE = AGG_STARTS(I) + SIZES(I) - ONE
+            FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
+            IF (CONFIG%PARTIAL_AGGREGATION) THEN
+               ! Assume that the fixed data has the same alignment as the aggregate data.
+               CW = AY(GE,CONFIG%ADO+1)
+               Y(:,FE) = AY(GE,:CONFIG%ADO) * CW
+               ! Accumulate the running sum in the last position, updating the divisor.
+               DO J = ONE, SIZES(I)-ONE
+                  Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
+                  ! Accumulate the running sum of weights (to be made convex).
+                  CW = CW + AY(GE-J,CONFIG%ADO+1)
+                  ! Compute this output.
+                  Y(:,FE-J) = Y(:,FE) / CW
+               END DO
+               ! Revert the running sum in the last position to just the value (weight = 1).
+               Y(:,FE) = AY(GE,:CONFIG%ADO)
+            ELSE
+               ! Otherwise, without partial aggregation, just put the weighted average aggregate into X.
+               CW = SUM(AY(GS:GE,CONFIG%ADO+1))
+               Y(:,I) = MATMUL(AY(GS:GE,CONFIG%ADO+1), AY(GS:GE,:CONFIG%ADO)) / CW
+            END IF
+         ELSE
+            IF (CONFIG%PARTIAL_AGGREGATION) THEN
+               Y(:,FIX_STARTS(I)) = 0.0_RT
+            ELSE
+               Y(:,I) = 0.0_RT
+            END IF
+         END IF
+      END DO set_aggregation_to_y
+    END SUBROUTINE COMPUTE_SET_AGGREGATION
 
     SUBROUTINE UNPACKED_EVALUATE(N, MDI, MDS, MNS, MDSO, MDO, INPUT_VECS, &
          INPUT_SHIFT, STATE_VECS, STATE_SHIFT, OUTPUT_VECS, X, Y, &
@@ -2082,8 +2053,8 @@ CONTAINS
                    ! Compute the initial gradient for the element that occurs only once,
                    !  the first position which is added to all other elements.
                    AY(GS,:CONFIG%ADO) = X(XDG:,FS) / CW
-                   ! Error term (average output error over elements of this size or smaller).
-                   YSUM = SUM(ABS(Y(:,FS))) / REAL(SIZES(I),KIND=RT)
+                   ! Error term (2-norm output error over elements of this size or smaller).
+                   YSUM = SQRT(SUM(Y(:,FS)**2))
                    AY(GS,CONFIG%ADO+1) = AY(GS,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
                    ! 
                    ! Compute the gradient for each aggregate element, which is now
@@ -2096,9 +2067,12 @@ CONTAINS
                       AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + X(XDG:,FS+J) / CW
                       ! Store this aggregate value's gradient term.
                       AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
-                      ! Error term
-                      YSUM = YSUM + SUM(ABS(Y(:,FS+J))) / REAL(SIZES(I)-J,KIND=RT)
-                      AY(GS+J,CONFIG%ADO+1) = AY(GS+J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
+                      ! Error term (sum 2-norm errors here, average is computed in division).
+                      YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2))
+                      ! Divide by the number of elements to get average 2-norm error
+                      !  of all predictions that utilize tihs specific input.
+                      AY(GS+J,CONFIG%ADO+1) = AY(GS+J,CONFIG%ADO+1) - &
+                           (1.0_RT / (1.0_RT + YSUM / REAL(J+1, KIND=RT)))
                    END DO
                    ! Reset the computation of the first AY that was used to aggregate.
                    AY(GS,:CONFIG%ADO) = X(XDG:,FS) / CWS
@@ -2107,7 +2081,7 @@ CONTAINS
                 ! Without partial aggregation, all AY receive equal weight.
                 GE = AGG_STARTS(I) + SIZES(I) - ONE
                 CW = SUM(AY(GS:GS+SIZES(I)-1,CONFIG%ADO+1))
-                YSUM = SUM(ABS(Y(:,I)))
+                YSUM = SQRT(SUM(Y(:,I)**2))
                 DO J = GS, GE
                    ! TODO: The X / DIV computation after this loop is redundant (store in temp X(...), divide early).
                    AY(J,:CONFIG%ADO) = X(XDG:,I)
@@ -2135,7 +2109,7 @@ CONTAINS
                    !  the first position which is added to all other elements.
                    AY(GS,:CONFIG%ADO) = Y(:,FS) / CW
                    ! Error term
-                   YSUM = SUM(ABS(Y(:,FS))) / REAL(SIZES(I),KIND=RT)
+                   YSUM = SQRT(SUM(Y(:,FS)**2))
                    AY(GS,CONFIG%ADO+ONE) = AY(GS,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
                    ! 
                    ! Compute the gradient for each aggregate element, which is now
@@ -2149,7 +2123,7 @@ CONTAINS
                       ! Store this aggregate value's gradient term.
                       AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
                       ! Error term
-                      YSUM = YSUM + SUM(ABS(Y(:,FS+J))) / REAL(SIZES(I)-J,KIND=RT)
+                      YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2)) / REAL(SIZES(I)-J,KIND=RT)
                       AY(GS+J,CONFIG%ADO+ONE) = AY(GS+J,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
                    END DO
                    ! Reset the computation of the first AY that was used to aggregate.
@@ -2159,7 +2133,7 @@ CONTAINS
              ELSE
                 GE = AGG_STARTS(I) + SIZES(I)-ONE
                 CW = SUM(AY(GS:GE,CONFIG%ADO+1))
-                YSUM = SUM(ABS(Y(:,I)))  ! Total error for a column.
+                YSUM = SUM(Y(:,I)**2)  ! Total error for a column.
                 DO J = GS, GE
                    AY(J,:CONFIG%ADO) = Y(:,I) / CW
                 END DO
@@ -4044,7 +4018,7 @@ CONTAINS
          !               Use broad parallelism to distribute fit work.
          ! 
          ! Compute the batch start and end indices.
-         CALL COMPUTE_BATCHES(CONFIG, NA, CONFIG%NMS, SIZES, &
+         CALL COMPUTE_BATCHES(CONFIG, NA, NM, SIZES, &
               BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS, &
               JOINT=.TRUE._C_BOOL, INFO=INFO)
          IF (INFO .NE. 0) RETURN
@@ -4264,7 +4238,7 @@ CONTAINS
       CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
       CALL CPU_TIME(CPU_TIME_START)
       ! Convert the sum of squared errors into the mean squared error.
-      CONFIG%FIT_MSE = SUM_SQUARED_ERROR / REAL(CONFIG%NMS * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
+      CONFIG%FIT_MSE = SUM_SQUARED_ERROR / REAL(NM * CONFIG%DO, RT) ! RNY * SIZE(Y,1)
       IF (IS_NAN(CONFIG%FIT_MSE) .OR. (.NOT. IS_FINITE(CONFIG%FIT_MSE))) THEN
          INFO = 30 ! Encountered NaN or Inf mean squared error during fitting, this should not happen. Are any values extremely large?
          RETURN
