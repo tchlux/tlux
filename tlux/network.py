@@ -2,19 +2,22 @@ import logging
 import pickle
 import socket
 import threading
+import time
 from queue import Queue
 from typing import Any, Callable, Optional
 
+SERIALIZER = pickle
+ONE_MB = 1048576
 
 # Use pickle to serialize data.
-def PICKLE_DUMPS(o: Any) -> bytes:
-    return pickle.dumps(o, protocol=pickle.HIGHEST_PROTOCOL)
+def DUMPS(o: Any) -> bytes:
+    return SERIALIZER.dumps(o, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 # Use pickle to load serialized data.
 # WARNING: Generally unsafe.
-def PICKLE_LOADS(o: bytes) -> Any:
-    return pickle.loads(o)
+def LOADS(o: bytes) -> Any:
+    return SERIALIZER.loads(o)
 
 
 # Get the IP address of this host, otherwise return the host name.
@@ -30,7 +33,7 @@ def get_ip(socket_type):
             ip = addr_info[0][4][0]  # Retrieves the first IPv6 address
         else:
             raise ValueError(f"network.NetworkQueue Unexpected socket type {repr(socket_type)}")
-    except Exception as e:
+    except Exception:
         # Otherwise just use the host name.
         ip = socket.gethostname()
     logging.info(f"network.NetworkQueue local IP {repr(ip)}")
@@ -46,8 +49,12 @@ class NetworkQueue:
             listen_host: Optional[str] = None,
             listen_port: Optional[int] = 0,
             socket_type = socket.AF_INET,
-            serialize: Callable[[Any],bytes] = PICKLE_DUMPS,
-            deserialize: Callable[[bytes],Any] = PICKLE_LOADS,
+            chunk_size: int = 8*1024, # 8KB
+            recv_buffer: int = 8*2048, # 16KB
+            send_buffer: int = 8*1024 + 12, # 8KB + TCP header
+            egress_limit_mb_sec: int = -1, # 100 MB/s
+            serialize: Callable[[Any],bytes] = DUMPS,
+            deserialize: Callable[[bytes],Any] = LOADS,
     ):
         # Create a holder for clients, queues that contains incoming data from client connections.
         self.active = True
@@ -57,6 +64,10 @@ class NetworkQueue:
         self.arrivals = Queue()
         self.popped = []
         self.socket_type = socket_type
+        self.chunk_size = chunk_size
+        self.recv_buffer = recv_buffer
+        self.send_buffer = send_buffer
+        self.egress_limit_mb_sec = egress_limit_mb_sec
         self.serialize = serialize
         self.deserialize = deserialize
 
@@ -78,16 +89,28 @@ class NetworkQueue:
 
         # Connect to the other NetworkQueue.
         if ((host is not None) and (port is not None)):
-            logging.info(f"network.NetworkQueue establishing connection with {host}:{port}")
-            host_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
-            host_socket.connect((host, port))
-            self.clients["host"] = (
-                host_socket,
-                threading.Thread(target=self._client_listener, args=(host_socket, "host"), daemon=True)
-            )
-            # Start the dedicated host communications listener.
-            self.clients["host"][1].start()
-            logging.info(f"network.NetworkQueue connected to host {host}:{port}")
+            self._establish_host_connection()
+
+
+    # Set up a socket for communication as part of the NetworkQueue.
+    def _setup_socket(self, s):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self.recv_buffer)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.send_buffer)
+
+
+    # Establish a connection to the 'host' NetworkQueue.
+    def _establish_host_connection(self):
+        logging.info(f"network.NetworkQueue establishing connection with 'host' {self.host}:{self.port}")
+        host_socket = socket.socket(self.socket_type, socket.SOCK_STREAM)
+        self._setup_socket(host_socket)
+        host_socket.connect((self.host, self.port))
+        self.clients["host"] = (
+            host_socket,
+            threading.Thread(target=self._client_listener, args=(host_socket, "host"), daemon=True)
+        )
+        # Start the dedicated host communications listener.
+        self.clients["host"][1].start()
+        logging.info(f"network.NetworkQueue connected to host {self.host}:{self.port}")
 
 
     # Listen for connections from other NetworkQueue objects.
@@ -98,7 +121,8 @@ class NetworkQueue:
                 if self.exit_event.is_set():
                     client_socket.close()
                     break
-                client_id = addr[1]  # Using the client's port as a simple ID
+                self._setup_socket(client_socket)
+                client_id = f"{addr[0]}:{addr[1]}"  # Using the client's IP:port as a simple ID
                 # Store the socket and the communication thread for this client.
                 self.clients[client_id] = (
                     client_socket,
@@ -107,7 +131,8 @@ class NetworkQueue:
                 # Start a dedicated client communications listener.
                 self.clients[client_id][1].start()
                 logging.info(f"network.NetworkQueue connected to client {repr(client_id)} at {addr}")
-            except socket.error:
+            except socket.error as e:
+                logging.error(f"network.NetworkQueue encountered accepter socket error: {e}")
                 break
 
 
@@ -130,10 +155,11 @@ class NetworkQueue:
                 data_received = 0
                 chunks = []
                 while data_received < obj_size:
-                    chunk = client_socket.recv(obj_size - data_received)
+                    chunk = client_socket.recv(min(self.chunk_size, obj_size - data_received))
                     if not chunk:
                         logging.error(f"network.NetworkQueue got size {obj_size} with incomplete data from client {repr(client_id)}, connection closed prematurely.")
                         break
+                    # logging.info(f"network.NetworkQueue received {len(chunk)} bytes from client {repr(client_id)}")
                     chunks.append(chunk)
                     data_received += len(chunk)
                 # Put the received data into the client's designated queue stored locally.
@@ -142,56 +168,87 @@ class NetworkQueue:
                 self.arrivals.put(client_id)
                 logging.info(f"network.NetworkQueue data of size {obj_size} successfully arrived from client {repr(client_id)}")
             # Socket errors trigger an immediate break.
-            except socket.error:
-                logging.error(f"network.NetworkQueue encountered socket error with client {repr(client_id)}")
+            except socket.error as e:
+                logging.error(f"network.NetworkQueue encountered listener socket error with client {repr(client_id)}: {e}")
                 break
-            # In case of any errors, 
+            # In case of any errors,
             except Exception as e:
                 logging.error(f"network.NetworkQueue encountered error with client {repr(client_id)}: {e}")
                 break
         # Close the connection.
         client_socket.close()
-        # Remove this client from the tracked queues and clients.
-        self.queues.pop(client_id, None)
-        self.clients.pop(client_id, None)
-        logging.info(f"network.NetworkQueue Connection to client {client_id} closed")
+        if (client_id == "host"):
+            logging.warning("network.NetworkQueue host connection failed, attempting to reconnect..")
+            self._establish_host_connection()
+        else:
+            # Remove this client from the tracked queues and clients.
+            self.queues.pop(client_id, None)
+            self.clients.pop(client_id, None)
+            logging.info(f"network.NetworkQueue Connection to client {client_id} closed")
 
 
     # Send an item to clients (or a specific client if provided).
-    def put(self, item, client_id=None):
+    def put(self, item, client_id=None, retries=5, retry_wait_sec=1.0):
         serialized_item = self.serialize(item)
         total_size = len(serialized_item)
         size_bytes = total_size.to_bytes(8, "big")
+
+        # Send data in a loop until all is sent
+        def send_all(sock, data, chunk_size=self.chunk_size):
+            start = time.time()
+            total_sent = 0
+            while total_sent < len(data):
+                sent = sock.send(data[total_sent:total_sent+chunk_size])
+                if sent == 0:
+                    raise RuntimeError("network.NetworkQueue socket connection broken")
+                # logging.info(f"network.NetworkQueue sent {sent} bytes to client {repr(client_id)}")
+                total_sent += sent
+                # Enforce an upper limit on egress rate per chunk by sleeping if needed.
+                if 0 < self.egress_limit_mb_sec < float('inf'):
+                    end = time.time()
+                    sent_mb = sent / ONE_MB
+                    egress_rate_mb_sec = sent_mb / (end - start)
+                    if egress_rate_mb_sec > self.egress_limit_mb_sec:
+                        wait_time_sec = sent_mb / self.egress_limit_mb_sec - (end - start)
+                        time.sleep(wait_time_sec)
+                        if total_sent <= 5*self.chunk_size:
+                            logging.info(f"network.NetworkQueue sleeping for {wait_time_sec} seconds to enforce egress rate limit of {self.egress_limit_mb_sec:.2f} MB/s after observing {egress_rate_mb_sec:.2f} MB/s transmission.")
+                    start = time.time()
+
         # Sending to a specific client or all clients
         if client_id in self.clients:
-            client_socket, _ = self.clients[client_id]
-            try:
-                client_socket.sendall(size_bytes + serialized_item)
-            except Exception as e:
-                logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
-            logging.info(f"network.NetworkQueue sent {8 + total_size} bytes to {repr(client_id)}")
+            clients = [(client_id, self.clients[client_id])]
         else:
-            for client_id, (client_socket, _) in self.clients.items():
-                try:
-                    client_socket.sendall(size_bytes + serialized_item)
-                except Exception as e:
-                    logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)}: {e}")
-                logging.info(f"network.NetworkQueue sent to {repr(client_id)}")
+            clients = list(self.clients.items())
+        # Send the bytes
+        logging.info(f"network.NetworkQueue sending object sized {total_size} to {'all ' if len(self.clients) > 1 else ''}{len(self.clients)} client{'s' if len(self.clients) != 1 else ''}..")
+        for client_id, (client_socket, _) in clients:
+            try:
+                # Then send all of the data.
+                send_all(client_socket, size_bytes + serialized_item)
+            except Exception as e:
+                logging.error(f"network.NetworkQueue failed to send item to client {repr(client_id)} ({retries} retries remaining): {e}")
+                if (retries > 0):
+                    time.sleep(retry_wait_sec)
+                    self.put(item, client_id=client_id, retries=retries-1, retry_wait_sec=2*retry_wait_sec)
+                else:
+                    raise e
+            logging.info(f"network.NetworkQueue sent {8 + total_size} bytes to {repr(client_id)}")
 
 
     # Get an item from clients (or a specific client if provided).
-    def get(self, client_id=None):
+    def get(self, client_id=None, **get_kwargs):
         if (client_id in self.queues):
             q = self.queues[client_id]
-            item = q.get()
+            item = q.get(**get_kwargs)
             self.popped.append(client_id)
             return item
         else:
-            client_id = self.arrivals.get()
+            client_id = self.arrivals.get(**get_kwargs)
             while (client_id in self.popped):
                 self.popped.remove(client_id)
-                client_id = self.arrivals.get()
-            return self.queues[client_id].get()
+                client_id = self.arrivals.get(**get_kwargs)
+            return self.queues[client_id].get(**get_kwargs)
 
 
     # Close this Queue once it is done being used.
@@ -211,13 +268,13 @@ class NetworkQueue:
 
     # Produce a string summarizing this NetworkQueue.
     def __str__(self):
-        host = f""
+        host = ""
         if self.host is not None:
             host = f"host={repr(self.host)}, port={repr(self.port)}, "
-        listener = f""
+        listener = ""
         if hasattr(self, "listener_port"):
             listener = f"listen_host={repr(self.listener_host)}, listen_port={self.listener_port}, "
-        clients = f""
+        clients = ""
         if len(self.clients) > 0:
             clients = f"client_count={len(self.clients)}, "
         socket_type = str(repr(self.socket_type)).split(":")[0].split(".")[1]
