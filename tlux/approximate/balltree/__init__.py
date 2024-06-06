@@ -1,5 +1,9 @@
 # Ball Tree wrapper for Fortran module.
 
+# TODO: Make the ball tree use a block storage scheme so that
+#       distance calculations can be done efficiently with
+#       matrix multiplications instead of one-at-a-time.
+# TODO: Support cosine similarity (for speed).
 # TODO: Investigate the correctness of the partial tree traversal
 #       (budget < size(order)) when there are duplicate data points.
 # TODO: Make queries over trees with size > built do a brute-force
