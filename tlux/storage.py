@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import os
 import pickle
@@ -6,36 +7,96 @@ import time
 from typing import Any, Iterable, Iterator, Optional, Tuple, Union
 
 
+HOST: str = os.uname().nodename  # Get the current host.
+USER: str = os.getlogin()  # Get the current user.
+PID: str = str(os.getpid())  # Get the current process ID.
+LOCK_FILE_SEPERATOR: str = "--LOCK--"
 DEFAULT_REQUEST_DELAY: float = 0.001
 DEFAULT_MAX_DELAY: float = 1.0
 DEFAULT_MAX_RETRIES: int = 100
+DEFAULT_LOCK_DURATION_SEC: int = 10
+
+
+# Check if a process with the given PID is currently active.
+def is_pid_active(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 # FileLock is used to ensure that a lock is held during read, write, and delete operations.
 # 
 # Arguments:
 #   lock_path (str): The path to the *desired* lock file (must *not* exist whenever "unlocked").
+#   lock_duration (int): The number of seconds for which competing operations should allow the lock to be held before ignoring it.
 #   request_delay (float): The time waited in seconds for initial delay between lock attempts.
 #   max_retries (int): The maximum number of retries on locking before raising an error.
 # 
 class FileLock:
-    def __init__(self, lock_path: str, request_delay: float = DEFAULT_REQUEST_DELAY, max_retries: int = DEFAULT_MAX_RETRIES) -> None:
-        self.lock_path = lock_path  if (not lock_path.endswith(".lock")) else lock_path
-        self.request_delay = request_delay
-        self.max_retries = max_retries
+    class LockFailure(Exception): pass
+
+    def __init__(self, lock_path: str, lock_duration: int = DEFAULT_LOCK_DURATION_SEC, request_delay: float = DEFAULT_REQUEST_DELAY, max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+        self.lock_path: str = lock_path if (not lock_path.endswith(".lock")) else lock_path
+        self.lock_duration: int = lock_duration
+        self.lock_info_path: str = os.path.join(self.lock_path, LOCK_FILE_SEPERATOR.join([HOST, USER, PID, str(self.lock_duration)]))
+        self.default_lock_info: str = LOCK_FILE_SEPERATOR.join([HOST, USER, PID, str(self.lock_duration)])
+        self.request_delay: float = request_delay
+        self.max_retries: int = max_retries
+        self.acquisition_time: float = 0.0
 
     def __enter__(self) -> 'FileLock':
         for retry in range(self.max_retries):
             try:
                 os.mkdir(self.lock_path)
+                os.mkdir(self.lock_info_path)
+                self.acquisition_time = os.path.getctime(self.lock_info_path)
                 return self
             except OSError as e:
-                time.sleep(min(self.request_delay * (2 ** retry), DEFAULT_MAX_DELAY))
+                # Check the file hostname+user+PID in the directory, release if the host and user
+                #  is same as this process, and that PID does not exist (has terminated).
+                try: lock_info: str = next(iter(os.listdir(self.lock_path)))
+                except (StopIteration, FileNotFoundError): lock_info: str = self.default_lock_info
+                host, user, pid, lock_duration = lock_info.split(LOCK_FILE_SEPERATOR)
+                # Try to get the creation time of the lock, if it's gone, then cycle a retry.
+                try:
+                    lock_expiration = os.path.getctime(self.lock_path) + float(lock_duration)
+                except FileNotFoundError:
+                    continue
+                # Check for lock expiration conditions.
+                if time.time() >= lock_expiration:
+                    # WARNING: Lock failures and race conditions are possible due to the below operation.
+                    try:
+                        logging.warning("Forcibly removing lock {repr(self.lock_path)}..")
+                        os.rmdir(self.lock_info_path)
+                        os.rmdir(self.lock_path)
+                    except (FileNotFoundError, OSError): pass
+                    continue
+                elif (((host, user) == (HOST, USER)) and (not is_pid_active(int(pid)))):
+                    try:
+                        logging.warning(f"Removing lock at {repr(self.lock_path)} held by nonliving process {pid}..", flush=True)
+                        os.rmdir(self.lock_info_path)
+                        os.rmdir(self.lock_path)
+                    except (FileNotFoundError, OSError): pass
+                    continue
+                else:
+                    time.sleep(min(self.request_delay * (2 ** retry), DEFAULT_MAX_DELAY))
         else:
-            raise Exception("Max retries reached for acquiring file lock")
+            raise FileLock.LockFailure("Max retries reached for acquiring file lock")
 
     def __exit__(self, exc_type: Optional[type], exc_value: Optional[Exception], traceback: Optional[Any]) -> None:
-        os.rmdir(self.lock_path)
+        # Attempt to gracefully exit.
+        try:
+            if (os.path.getctime(self.lock_info_path) != self.acquisition_time):
+                raise FileLock.LockFailure(f"Lock acquisition time does not match expected value. Race condition encountered.")
+        except Exception:
+            raise FileLock.LockFailure(f"Lock changed during execution. Race condition encountered.")
+        try:
+            os.rmdir(self.lock_info_path)
+            os.rmdir(self.lock_path)
+        except:
+            raise FileLock.LockFailure(f"Lock removed during execution. Race condition encountered.")
 
 
 # KeyValueStore is a class for managing a persistently stored dictionary.
@@ -72,7 +133,7 @@ class KeyValueStore:
             self._save()
 
     def _lock(self) -> 'FileLock':
-        return FileLock(self.lock_path, self.request_delay, self.max_retries)
+        return FileLock(lock_path=self.lock_path, request_delay=self.request_delay, max_retries=self.max_retries)
 
     def _load(self) -> None:
         if (os.path.exists(self.path) and (os.path.getsize(self.path) > 0)):
