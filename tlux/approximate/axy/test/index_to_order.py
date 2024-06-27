@@ -20,6 +20,21 @@
 #   (1+2n)  (1+2(n-1))  ...  3  1
 # 
 #  n - (i-n) / 2 - 1
+# 
+# To consider:
+#   Perhaps the pairing function should consider all pairs up to
+#   the current set instead of focusing on achieving first -> last
+#   in a way that prioritizes comparison with the elements further
+#   up in the list. Like this:
+# 
+#     (1,1) ...
+#     (1,1) (2,2) (1,2) (2,1) ...
+#     (1,1) (2,2) (1,2) (2,1) (3,3) (1,3) (3,1) (2,3) (3,2) ...
+#     (1,1) (2,2) (1,2) (2,1) (3,3) (1,3) (3,1) (2,3) (3,2) (4,4) (1,4) (4,1) (2,4) (4,2) (3,4) (4,3) ...
+# 
+#   Or maybe not! Maybe the former is a good mechanism where the early
+#   elements in the list are prioritized for comparison with everything
+#   else and later elements will only get compared with first elements.
 
 
 def index_to_pair(index_of_pair, num_elements):

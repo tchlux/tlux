@@ -125,7 +125,7 @@ def _test_svd(max_dimension=16, n=100, trials=100, precision=2):
                 if (Vh[i,0] * vt[0,i] < 0):
                     Vh[i,:] *= -1
             # Compute the pairwise cosine similarities.
-            cos_similarities = np.abs(np.sum(Vh.T * vt, axis=0))
+            cos_similarities = np.sum(Vh.T * vt, axis=0)
             sim_inds = cos_similarities.argsort()
             assert (cos_similarities[sim_inds[-rank]] > 0.95), \
                 "Computed Vt was incorrect.\n" \
@@ -141,7 +141,7 @@ def _test_svd(max_dimension=16, n=100, trials=100, precision=2):
                 "mops.svd(matrix, singular_values, VT, rank=True)\n" \
                 "bad_result = VT @ VT.T"
             # Optionally, check the accuracy of singular values by reconstructing the matrix
-            # This part is left as an exercise; it involves using singular values and vectors
+            # This part is left as future work; it involves using singular values and vectors
             # to reconstruct the original matrix and comparing it with the input matrix.
     print(" passed.", flush=True)
 

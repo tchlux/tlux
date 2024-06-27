@@ -194,10 +194,10 @@ print("Partials:")
 for p in partials:
     value = str(p)
     p.stop = True
-    print(p, "=", value)
+    print("", p, "=", value)
 
 print()
 print("Gradients:")
 for i in inputs:
-    print(i.letter, "=", i.gradient())
+    print("", i.letter, "=", i.gradient())
 
