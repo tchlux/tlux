@@ -123,7 +123,7 @@ MODULE AXY
      INTEGER(KIND=INT32) :: NOE     ! number of output embeddings
      ! Summary numbers that are computed.
      INTEGER(KIND=INT32) :: DON     ! dimension of output numeric values
-     INTEGER(KIND=INT32) :: DO      ! dimension output (either MDO or ADO plus DOE). 
+     INTEGER(KIND=INT32) :: DO      ! dimension output (either MDO or ADO, plus DOE). 
      ! Model descriptors.
      INTEGER(KIND=INT64) :: TOTAL_SIZE
      INTEGER(KIND=INT64) :: NUM_VARS
@@ -188,7 +188,6 @@ MODULE AXY
      LOGICAL(KIND=C_BOOL) :: KEEP_BEST = .TRUE. ! True if best observed model should be greedily kept at end of optimization (by MSE if no error checking, otherwise by error check).
      LOGICAL(KIND=C_BOOL) :: EARLY_STOP = .TRUE. ! True if optimization should end when steps since best model is greater than the steps remaining.
      LOGICAL(KIND=C_BOOL) :: RESHUFFLE = .TRUE. ! True if the linear random generator for optimization should be randomized after cycling over all input data.
-     ! LOGICAL(KIND=C_BOOL) :: GRANULAR_PARALLELISM = .FALSE. ! True if parallelism should be pushed down into core operators (evaluate, model_gradient, etc.) during fit.
      ! Aggregation controls.
      LOGICAL(KIND=C_BOOL) :: PAIRWISE_AGGREGATION = .FALSE. ! True if all pairs of aggregate inputs should be considered in evaluation.
      LOGICAL(KIND=C_BOOL) :: PARTIAL_AGGREGATION = .FALSE. ! True if intermediate values (in sum of aggregates) should be passed through fixed model.
@@ -862,6 +861,11 @@ CONTAINS
     ELSE
        OUTPUT_SCALE = 1.0_RT
     END IF
+    ! Initialize the aggregate model embeddings.
+    CALL INIT_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
+         MODEL(CONFIG%ASEV:CONFIG%AEEV), &
+         MODEL(CONFIG%AECS:CONFIG%AECE), &
+         RANDOM_LENGTHS=.TRUE._C_BOOL)
     ! Initialize the aggregator model.
     CALL INIT_SUBMODEL(&
          CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, &
@@ -871,17 +875,17 @@ CONTAINS
          MODEL(CONFIG%ASSV:CONFIG%AESV), &
          MODEL(CONFIG%ASSS:CONFIG%AESS), &
          MODEL(CONFIG%ASOV:CONFIG%AEOV))
-    ! Initialize the aggregate model embeddings.
-    CALL INIT_EMBEDDINGS(CONFIG%ADE, CONFIG%ANE, &
-         MODEL(CONFIG%ASEV:CONFIG%AEEV), &
-         MODEL(CONFIG%AECS:CONFIG%AECE), &
-         RANDOM_LENGTHS=.TRUE._C_BOOL)
     !   Set up the output scaling for the fixed model (won't matter if it doesn't exist).
     IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
        OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
     ELSE
        OUTPUT_SCALE = 0.1_RT
     END IF
+    ! Initialize the fixed model embeddings.
+    CALL INIT_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
+         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
+         MODEL(CONFIG%MECS:CONFIG%MECE), &
+         RANDOM_LENGTHS=.TRUE._C_BOOL)
     ! Initialize the fixed model.
     CALL INIT_SUBMODEL(&
          CONFIG%MDI, CONFIG%MDS, CONFIG%MNS, &
@@ -891,11 +895,6 @@ CONTAINS
          MODEL(CONFIG%MSSV:CONFIG%MESV), &
          MODEL(CONFIG%MSSS:CONFIG%MESS), &
          MODEL(CONFIG%MSOV:CONFIG%MEOV))
-    ! Initialize the fixed model embeddings.
-    CALL INIT_EMBEDDINGS(CONFIG%MDE, CONFIG%MNE, &
-         MODEL(CONFIG%MSEV:CONFIG%MEEV), &
-         MODEL(CONFIG%MECS:CONFIG%MECE), &
-         RANDOM_LENGTHS=.TRUE._C_BOOL)
     ! Initialize the output embeddings.
     CALL INIT_EMBEDDINGS(CONFIG%DOE, CONFIG%NOE, &
          MODEL(CONFIG%OSEV:CONFIG%OEEV), &
@@ -977,7 +976,7 @@ CONTAINS
          CALL RANDOM_UNIT_VECTORS(STATE_VECS(:,:,I))
       END DO
       CALL RANDOM_UNIT_VECTORS(OUTPUT_VECS(:,:))
-      ! Make the output vectors have very small magnitude initially.
+      ! Make the output vectors have desired initial magnitude (e.g., small).
       OUTPUT_VECS(:,:) = OUTPUT_VECS(:,:) * OUTPUT_SCALE
       ! Generate deterministic equally spaced shifts for inputs and internal layers, 
       !  zero shift for the output layer (first two will be rescaled).
@@ -1005,7 +1004,7 @@ CONTAINS
   END SUBROUTINE INIT_MODEL
 
 
-  ! Returnn nonzero INFO if any shapes or values do not match expectations.
+  ! Return nonzero INFO if any shapes or values do not match expectations.
   SUBROUTINE CHECK_SHAPE(CONFIG, MODEL, AX, AXI, SIZES, X, XI, Y, YI, INFO, FOR_EVALUATION)
     TYPE(MODEL_CONFIG), INTENT(IN) :: CONFIG
     REAL(KIND=RT), INTENT(IN), DIMENSION(:) :: MODEL
@@ -1734,8 +1733,8 @@ CONTAINS
                MODEL(CONFIG%ASSS:CONFIG%AESS), &
                MODEL(CONFIG%ASOV:CONFIG%AEOV), &
                AX(:,BS:BE), AY(BS:BE,:), A_STATES(BS:BE,:,:), YTRANS=.TRUE._C_BOOL)
-          ! Ensure valid AY error estimation terms (cannot be zero or negative).
-          AY(BS:BE,CONFIG%ADO+1) = MAX(CONFIG%MIN_AGG_WEIGHT, AY(BS:BE,CONFIG%ADO+1))
+          ! It's possible that some AY error estimation terms are zero or negative,
+          !  and that is currently handled with a MAX(epsilon, ...) in aggregation.
        END DO aggregator_evaluation
        ! 
        ! Aggregate the output of the set model.
@@ -1816,7 +1815,7 @@ CONTAINS
     SUBROUTINE COMPUTE_SET_AGGREGATION(Y)
       REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: Y
       INTEGER(KIND=INT64) :: I, J, GS, GE, FE
-      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE) IF(NT > 1)
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE, CW) IF(NT > 1)
       set_aggregation_to_y : DO I = ONE, SIZE(SIZES,KIND=INT64)
          IF (SIZES(I) .GT. 0) THEN
             ! Take the mean of all outputs from the aggregator model, store
@@ -1826,13 +1825,13 @@ CONTAINS
             FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
             IF (CONFIG%PARTIAL_AGGREGATION) THEN
                ! Assume that the fixed data has the same alignment as the aggregate data.
-               CW = AY(GE,CONFIG%ADO+1)
+               CW = MAX(CONFIG%MIN_AGG_WEIGHT, AY(GE,CONFIG%ADO+1))  ! convex weight
                Y(:,FE) = AY(GE,:CONFIG%ADO) * CW
                ! Accumulate the running sum in the last position, updating the divisor.
                DO J = ONE, SIZES(I)-ONE
-                  Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * AY(GE-J,CONFIG%ADO+1)
+                  Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * MAX(CONFIG%MIN_AGG_WEIGHT, AY(GE-J,CONFIG%ADO+1))
                   ! Accumulate the running sum of weights (to be made convex).
-                  CW = CW + AY(GE-J,CONFIG%ADO+1)
+                  CW = CW + MAX(CONFIG%MIN_AGG_WEIGHT, AY(GE-J,CONFIG%ADO+1))
                   ! Compute this output.
                   Y(:,FE-J) = Y(:,FE) / CW
                END DO
@@ -1840,9 +1839,11 @@ CONTAINS
                Y(:,FE) = AY(GE,:CONFIG%ADO)
             ELSE
                ! Otherwise, without partial aggregation, just put the weighted average aggregate into X.
-               CW = SUM(AY(GS:GE,CONFIG%ADO+1))
-               Y(:,I) = MATMUL(AY(GS:GE,CONFIG%ADO+1), AY(GS:GE,:CONFIG%ADO)) / CW
+               CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
+               Y(:,I) = MATMUL(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)), AY(GS:GE,:CONFIG%ADO)) / CW
             END IF
+            ! Incorporate AY output normalization.
+            Y(:,I) = (Y(:,I) - AY_SHIFT(:)) * AY_SCALE(:)
          ELSE
             IF (CONFIG%PARTIAL_AGGREGATION) THEN
                Y(:,FIX_STARTS(I)) = 0.0_RT
@@ -2041,107 +2042,10 @@ CONTAINS
        ! Propogate gradient from the input to the fixed model.
        IF (CONFIG%MDO .GT. 0) THEN
           XDG = SIZE(X,1) - CONFIG%ADO + ONE  ! <- the first X column for aggregated values
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, CW, CWS, YSUM) IF(NT > 1)
-          DO I = ONE, SIZE(SIZES, KIND=INT64)
-             GS = AGG_STARTS(I)
-             IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                IF (SIZES(I) .GT. ZERO) THEN
-                   FS = FIX_STARTS(I)
-                   ! Compute the sum of all weights applied to this group.
-                   CW = SUM(AY(GS:GS+SIZES(I)-1,CONFIG%ADO+1))
-                   CWS = CW
-                   ! Compute the initial gradient for the element that occurs only once,
-                   !  the first position which is added to all other elements.
-                   AY(GS,:CONFIG%ADO) = X(XDG:,FS) / CW
-                   ! Error term (2-norm output error over elements of this size or smaller).
-                   YSUM = SQRT(SUM(Y(:,FS)**2))
-                   AY(GS,CONFIG%ADO+1) = AY(GS,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-                   ! 
-                   ! Compute the gradient for each aggregate element, which is now
-                   !  the sum of the gradients from the X.
-                   DO J = ONE, SIZES(I) - ONE
-                      ! Compute the sum of all weights applied to this group.
-                      !  Avoiding subtracting from existing CW for numerical stability.
-                      CW = SUM(AY(GS+J:GS+SIZES(I)-1,CONFIG%ADO+1))
-                      ! Add to the running total gradient.
-                      AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + X(XDG:,FS+J) / CW
-                      ! Store this aggregate value's gradient term.
-                      AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
-                      ! Error term (sum 2-norm errors here, average is computed in division).
-                      YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2))
-                      ! Divide by the number of elements to get average 2-norm error
-                      !  of all predictions that utilize tihs specific input.
-                      AY(GS+J,CONFIG%ADO+1) = AY(GS+J,CONFIG%ADO+1) - &
-                           (1.0_RT / (1.0_RT + YSUM / REAL(J+1, KIND=RT)))
-                   END DO
-                   ! Reset the computation of the first AY that was used to aggregate.
-                   AY(GS,:CONFIG%ADO) = X(XDG:,FS) / CWS
-                END IF
-             ELSE
-                ! Without partial aggregation, all AY receive equal weight.
-                GE = AGG_STARTS(I) + SIZES(I) - ONE
-                CW = SUM(AY(GS:GS+SIZES(I)-1,CONFIG%ADO+1))
-                YSUM = SQRT(SUM(Y(:,I)**2))
-                DO J = GS, GE
-                   ! TODO: The X / DIV computation after this loop is redundant (store in temp X(...), divide early).
-                   AY(J,:CONFIG%ADO) = X(XDG:,I)
-                   ! Compute the target value for the last column of AY to be sum
-                   !  of componentwise squared errors values for all outputs.
-                   AY(J,CONFIG%ADO+1) = AY(J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-                END DO
-                ! Apply the same divisor that was applied in evaluation to all points.
-                AY(GS:GE,:CONFIG%ADO) = AY(GS:GE,:CONFIG%ADO) / CW
-             END IF
-          END DO
+          CALL COMPUTE_AGGREGATION_GRADIENT(OUT=X(XDG:,:))
        ! Propogate gradient directly from the aggregate output.
        ELSE
-          !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, YSUM) IF(NT > 1)
-          DO I = ONE, SIZE(SIZES, KIND=INT64)
-             GS = AGG_STARTS(I)
-             ! Partial aggregation.
-             IF (CONFIG%PARTIAL_AGGREGATION) THEN
-                IF (SIZES(I) .GT. ZERO) THEN
-                   FS = FIX_STARTS(I)
-                   ! Compute the sum of all weights applied to this group.
-                   CW = SUM(AY(GS:GS+SIZES(I)-1,CONFIG%ADO+1))
-                   CWS = CW
-                   ! Compute the initial gradient for the element that occurs only once,
-                   !  the first position which is added to all other elements.
-                   AY(GS,:CONFIG%ADO) = Y(:,FS) / CW
-                   ! Error term
-                   YSUM = SQRT(SUM(Y(:,FS)**2))
-                   AY(GS,CONFIG%ADO+ONE) = AY(GS,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
-                   ! 
-                   ! Compute the gradient for each aggregate element, which is now
-                   !  the sum of the gradients from the X.
-                   DO J = ONE, SIZES(I) - ONE
-                      ! Compute the sum of all weights applied to this group.
-                      !  Avoiding subtracting from existing CW for numerical stability.
-                      CW = SUM(AY(GS+J:GS+SIZES(I)-1,CONFIG%ADO+1))
-                      ! Add to the running total gradient.
-                      AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + Y(:,FS+J) / CW
-                      ! Store this aggregate value's gradient term.
-                      AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
-                      ! Error term
-                      YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2)) / REAL(SIZES(I)-J,KIND=RT)
-                      AY(GS+J,CONFIG%ADO+ONE) = AY(GS+J,CONFIG%ADO+ONE) - (1.0_RT / (1.0_RT + YSUM))
-                   END DO
-                   ! Reset the computation of the first AY that was used to aggregate.
-                   AY(GS,:CONFIG%ADO) = Y(:,FS) / CWS
-                END IF                
-             ! No partial aggregation.
-             ELSE
-                GE = AGG_STARTS(I) + SIZES(I)-ONE
-                CW = SUM(AY(GS:GE,CONFIG%ADO+1))
-                YSUM = SUM(Y(:,I)**2)  ! Total error for a column.
-                DO J = GS, GE
-                   AY(J,:CONFIG%ADO) = Y(:,I) / CW
-                END DO
-                ! Compute the target value for the last column of AY to be sum
-                !  of componentwise squared errors values for all outputs.
-                AY(GS:GE,CONFIG%ADO+1) = AY(GS:GE,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-             END IF
-          END DO
+          CALL COMPUTE_AGGREGATION_GRADIENT(OUT=Y(:,:))
        END IF
        !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(BATCH, GS, GE, TN) IF(NT > 1)
        DO BATCH = ONE, SIZE(BATCHA_STARTS, KIND=INT64)
@@ -2165,6 +2069,75 @@ CONTAINS
     END IF
 
   CONTAINS
+
+    ! Compute the gradient from the output through the aggregation operation.
+    SUBROUTINE COMPUTE_AGGREGATION_GRADIENT(OUT)
+      REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: OUT
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, CW, CWS, YSUM) IF(NT > 1)
+      DO I = ONE, SIZE(SIZES, KIND=INT64)
+         GS = AGG_STARTS(I)
+         GE = GS + SIZES(I) - ONE
+         IF (CONFIG%PARTIAL_AGGREGATION) THEN
+            IF (SIZES(I) .GT. ZERO) THEN
+               FS = FIX_STARTS(I)
+               ! Compute the sum of all weights applied to this group.
+               CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
+               CWS = CW
+               ! Compute the initial gradient for the element that occurs only once,
+               !  the first position which is added to all other elements.
+               AY(GS,:CONFIG%ADO) = OUT(:,FS) / CW
+               ! Error term (2-norm output error over elements of this size or smaller).
+               YSUM = SQRT(SUM(Y(:,FS)**2))
+               IF (AY(GS, CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
+                  AY(GS,CONFIG%ADO+1) = AY(GS,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
+               ELSE
+                  AY(GS,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - AY(GS,CONFIG%ADO+1)
+               END IF
+               ! 
+               ! Compute the gradient for each aggregate element, which is now
+               !  the sum of the gradients from the X.
+               DO J = ONE, SIZES(I) - ONE
+                  ! Compute the sum of all weights applied to this group.
+                  !  Avoiding subtracting from existing CW for numerical stability.
+                  CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS+J:GE,CONFIG%ADO+1)))
+                  ! Add to the running total gradient.
+                  AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + OUT(:,FS+J) / CW
+                  ! Store this aggregate value's gradient term.
+                  AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
+                  ! Error term (sum 2-norm errors here, average is computed in division).
+                  YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2))
+                  ! Divide by the number of elements to get average 2-norm error
+                  !  of all predictions that utilize tihs specific input.
+                  IF (AY(GS+J,CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
+                     AY(GS+J,CONFIG%ADO+1) = AY(GS+J,CONFIG%ADO+1) - &
+                          (1.0_RT / (1.0_RT + YSUM / REAL(J+1, KIND=RT)))
+                  ELSE
+                     AY(GS+J,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - &
+                          AY(GS+J,CONFIG%ADO+1)
+                  END IF
+               END DO
+               ! Reset the computation of the first AY that was used to aggregate.
+               AY(GS,:CONFIG%ADO) = OUT(:,FS) / CWS
+            END IF
+         ELSE
+            ! Without partial aggregation, all AY receive equal weight.
+            CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
+            YSUM = SQRT(SUM(Y(:,I)**2))
+            DO J = GS, GE
+               AY(J,:CONFIG%ADO) = OUT(:,I)
+               ! Compute the target value for the last column of AY to be sum
+               !  of componentwise squared errors values for all outputs.
+               IF (AY(J,CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
+                  AY(J,CONFIG%ADO+1) = AY(J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
+               ELSE
+                  AY(J,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - AY(J,CONFIG%ADO+1)
+               END IF
+            END DO
+            ! Apply the same divisor that was applied in evaluation to all points.
+            AY(GS:GE,:CONFIG%ADO) = AY(GS:GE,:CONFIG%ADO) / CW
+         END IF
+      END DO
+    END SUBROUTINE COMPUTE_AGGREGATION_GRADIENT
 
     ! Compute the model gradient.
     SUBROUTINE UNPACKED_BASIS_GRADIENT( CONFIG, Y, STATES, X, &
@@ -3082,7 +3055,7 @@ CONTAINS
           ! Apply the shift to the data before computing the variance.
           !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
           DO D = 0, CONFIG%ADO-1
-             X(E+D,:NM) = X(E+D,:NM) + AY_SHIFT(D+1)
+             X(E+D,:NM) = X(E+D,:NM) - AY_SHIFT(D+1)
           END DO
           ! Compute the AY scale as the standard deviation of mean-aggregated outputs.
           AY_SCALE(:) = SUM(X(E:,:NM)**2,2) / REAL(NM,RT)
@@ -3312,16 +3285,16 @@ CONTAINS
          WHERE ((.NOT. IS_FINITE(AYX_MEAN(:))) .OR. IS_NAN(AYX_MEAN(:)))
             AYX_MEAN(:) = 0.0
          END WHERE
-         ! Now "AYX_MEAN" has the componentwise average of all aggregate (mean collapsed) outputs.
+         ! Update the shift term.
          IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
             AY_SHIFT(:) = &
                  (1.0_RT - CONFIG%STEP_AY_CHANGE) * AY_SHIFT(:) &
-               + (CONFIG%STEP_AY_CHANGE         ) * (AY_SHIFT(:) + AYX_MEAN(:))
+               + (CONFIG%STEP_AY_CHANGE         ) * (AY_SHIFT(:) + AYX_MEAN(:) / AY_SCALE(:))
          ELSE
             AY_SHIFT(:) = AY_SHIFT(:) + AYX_MEAN(:)
          END IF
          ! 
-         ! AY variance.
+         ! AY->X variance.
          AYX_MEAN(:) = 0.0_RT
          !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) REDUCTION(+:AYX_MEAN)
          DO N = 1, SIZE(SIZES,KIND=INT64)
@@ -3333,15 +3306,16 @@ CONTAINS
          WHERE ((.NOT. IS_FINITE(AYX_MEAN(:))) .OR. IS_NAN(AYX_MEAN(:)))
             AYX_MEAN(:) = 1.0_RT
          END WHERE
-         AYX_MEAN(:) = SQRT(MAX(AYX_MEAN(:), SQRT(EPSILON(0.0_RT))))
-         AYX_MEAN(:) = AY_SCALE(:) / AYX_MEAN(:)
+         AYX_MEAN(:) = SQRT(MAX(AYX_MEAN(:), SQRT(EPSILON(0.0_RT)))) ! Convert to deviation.
+         ! Update the scale term.
          IF (CONFIG%STEP_AY_CHANGE .LT. 1.0_RT) THEN
             AY_SCALE(:) = &
                    (1.0_RT - CONFIG%STEP_AY_CHANGE) * AY_SCALE(:) &
-                 + (CONFIG%STEP_AY_CHANGE         ) * AYX_MEAN(:)
+                 + (CONFIG%STEP_AY_CHANGE         ) * AY_SCALE(:) / AYX_MEAN(:)
          ELSE
-            AY_SCALE(:) = AYX_MEAN(:)
+            AY_SCALE(:) = 1.0_RT / AYX_MEAN(:)
          END IF
+         !
          DEALLOCATE(AYX_MEAN)
       END IF
       ! 
@@ -4009,8 +3983,8 @@ CONTAINS
          CALL FETCH_DATA(CONFIG, AGG_ITERATORS, &
               AX_IN, AX_GRADIENT, AXI_IN, AXI, SIZES_IN, SIZES, &
               X_IN, X_GRADIENT, XI_IN, XI, Y_IN, Y, YI_IN, YI, YW_IN, YW, NA, NM )
-         ! Write code that normalizes the batch of data and updates the normalization factors
-         !  based on the batch size and the current step. Otherwise if this is not a new batch
+         ! Normalize the batch of data and update the normalization factors based on
+         !  the batch size and the current step. Otherwise if this is not a new batch
          !  then does nothing.
          CALL NORMALIZE_STEP(CONFIG, MODEL, RWORK, AX_GRADIENT(:,:NA), X_GRADIENT(:,:NM), Y(:,:NM), YW(:,:NM))
          ! 
