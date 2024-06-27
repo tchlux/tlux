@@ -1,11 +1,9 @@
-# If anything above fails, fall back to Python implementations.
 import numpy as np
 
 from tlux.math.fraction import Fraction
 from tlux.math.polynomial import Spline, Polynomial, NewtonPolynomial
 from tlux.math.polynomial import fit as fit_spline
 from tlux.math.polynomial import polynomial as fit_polynomial
-
 
 # Returns True if the value is numeric (int, float) and False otherwise.
 def is_numeric(value):
