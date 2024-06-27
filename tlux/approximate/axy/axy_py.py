@@ -421,7 +421,8 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         ay = (values.T @ m.a_output_vecs[:,:])
         state_values["ay"] = ay
         ay_error = ay[:,config.ado:config.ado+1]  # extract +1 for error prediction
-        ay = ay[:,:config.ado] # strip off +1 for error prediction
+        # Ensure the AY weights are valid (always positive).
+        ay[:,-1] = np.maximum(config.min_agg_weight, ay[:,-1])
         # If there is a following model..
         if (config.mdo > 0):
             # Compute the first aggregator output embedding position.
@@ -431,6 +432,8 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         else:
             # Set the aggregator output to be Y.
             agg_out = y[:,:]
+        print("ay: ")
+        print(ay, flush=True)
         # Aggregate the batches. With partial aggregation, we have one output for
         #  partial mean starting from the "last" aggregate output.
         if (config.partial_aggregation):
@@ -462,6 +465,8 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
                 else:
                     agg_out[:,i] = 0
                 a += s
+    print("x: ", e)
+    print(agg_out, flush=True)
     # Evaluate the fixed model.
     if (config.mdo > 0):
         if (config.normalize and (config.mdn > 0)):
