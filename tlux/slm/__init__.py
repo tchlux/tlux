@@ -17,7 +17,7 @@ from llama_cpp.llama import Llama, LlamaGrammar
 MODEL_PATH = os.path.expanduser("~/.slm.gguf")
 
 # Load the model.
-LLM = Llama(MODEL_PATH, embedding=True, verbose=False, num_gpu_layers=-1)
+LLM = Llama(MODEL_PATH, embedding=False, verbose=False, num_gpu_layers=-1)
 
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
@@ -100,7 +100,8 @@ if __name__ == "__main__":
     if embed:
         # Produce only the embedding.
         import numpy as np
-        print(",".join(map(str, np.asarray(LLM.embed(prompt)).mean(axis=0))))
+        slm = Llama(MODEL_PATH, embedding=True, verbose=False, num_gpu_layers=-1)
+        print(",".join(map(str, np.asarray(slm.embed(prompt)).mean(axis=0))))
     else:
         # First output the prompt itself so the response is in context.
         print(prompt, end="", flush=True)
