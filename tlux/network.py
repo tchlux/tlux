@@ -237,18 +237,22 @@ class NetworkQueue:
 
 
     # Get an item from clients (or a specific client if provided).
-    def get(self, client_id=None, **get_kwargs):
+    def get(self, client_id=None, return_client=False, **get_kwargs):
         if (client_id in self.queues):
             q = self.queues[client_id]
             item = q.get(**get_kwargs)
             self.popped.append(client_id)
-            return item
         else:
             client_id = self.arrivals.get(**get_kwargs)
             while (client_id in self.popped):
                 self.popped.remove(client_id)
                 client_id = self.arrivals.get(**get_kwargs)
-            return self.queues[client_id].get(**get_kwargs)
+            item = self.queues[client_id].get(**get_kwargs)
+        # Return either both the item and client, or just the item.
+        if return_client:
+            return item, client_id
+        else:
+            return item
 
 
     # Close this Queue once it is done being used.
