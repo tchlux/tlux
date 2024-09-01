@@ -15,6 +15,7 @@ DEFAULT_REQUEST_DELAY: float = 0.001
 DEFAULT_MAX_DELAY: float = 1.0
 DEFAULT_MAX_RETRIES: int = 100
 DEFAULT_LOCK_DURATION_SEC: int = 10
+DEFAULT_WRITE_DELAY_SEC: float = 0.0
 
 
 # Check if a process with the given PID is currently active.
@@ -106,13 +107,14 @@ class FileLock:
 #   path (str): The path to the pickle file used for storage.
 #   request_delay (float): The time waited in seconds for initial delay between lock attempts.
 #   max_retries (int): The maximum number of retries on locking before raising an error.
+#   write_delay_sec (float): The minimum number of seconds elapsed between writes.
 # 
 # Attributes:
 #   path (str): The path to the data file.
 #   lock_path (str): The path to the lock file.
 # 
 class KeyValueStore:
-    def __init__(self, path: Optional[str] = None, request_delay: float = DEFAULT_REQUEST_DELAY, max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+    def __init__(self, path: Optional[str] = None, request_delay: float = DEFAULT_REQUEST_DELAY, max_retries: int = DEFAULT_MAX_RETRIES, write_delay_sec: float = DEFAULT_WRITE_DELAY_SEC) -> None:
         # Get the default path (a temporary file).
         self._is_temporary = False
         if (path is None):
@@ -124,9 +126,11 @@ class KeyValueStore:
         self.max_retries = max_retries
         self.path = path
         self.lock_path = path + '.lock'
+        self.write_delay_sec = write_delay_sec
         # Internal attributes.
         self._data = {}
         self._last_modified = 0
+        self._last_write = 0.0
         # Initialize the key value store.
         with self._lock():
             self._load()
@@ -144,8 +148,13 @@ class KeyValueStore:
                     self._last_modified = last_modified
 
     def _save(self) -> None:
+        delay = time.time() - self._last_write
+        if (delay <= self.write_delay_sec): return
+        # Write the local file.
         with open(self.path, 'wb') as f:
             pickle.dump(self._data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        # Store the time of completing the last write.
+        self._last_write = time.time()
 
     # Destructor to clean up temporary file if it was created (only by creating processs).
     def __del__(self):
