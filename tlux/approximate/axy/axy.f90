@@ -2330,8 +2330,8 @@ CONTAINS
           ! Compute a weighting function that translates [0, -inf) -> [1, 0).
           Y_GRADIENT(:DON,:) = Y_GRADIENT(:DON,:) * (1.0_RT / (1.0_RT - YW(:,:)))
        END WHERE
+    ! Handle 1 weight per point.
     ELSE IF (SIZE(YW,1) .EQ. 1) THEN
-       ! Handle 1 weight per point.
        DO D = 1, DON
           WHERE (YW(1,:) .GT. 0.0_RT)
              Y_GRADIENT(D,:) = Y_GRADIENT(D,:) * YW(1,:)
@@ -3238,7 +3238,13 @@ CONTAINS
       INTEGER(KIND=INT64) :: L, D, N
       REAL(KIND=RT) :: SCALAR
       REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: AYX_MEAN, A_EMB_MEAN, M_EMB_MEAN
+      ! TODO: Variables for normalizing output embeddings.
+      ! REAL(KIND=RT), DIMENSION(CONFIG%DOE,CONFIG%DOE) :: O_ROT, O_TMP
+      ! REAL(KIND=RT), DIMENSION(CONFIG%DOE) :: O_LENS
+      ! INTEGER, DIMENSION(CONFIG%DOE) :: O_ORDER
+      ! INTEGER :: O_RANK
       ! 
+      ! Limit the maximum 2-norm of any embedding to be 1.
       !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(L, D, SCALAR)
       DO L = 1, CONFIG%MNS+CONFIG%ANS+ONE
          ! [1,ANS-1] -> A_STATE_VECS
@@ -3269,7 +3275,7 @@ CONTAINS
       END DO
       ! 
       ! Update the aggregator model output shift to produce componentwise mean-zero
-      !  values (prevent divergence), but only when there is a model afterwards. 
+      !  unit variance values (prevent divergence), but only when there is a model afterwards. 
       IF ((CONFIG%MDO .GT. 0) .AND. (CONFIG%ADO .GT. 0) .AND. &
            (SIZE(AY,1,INT64) .GT. ZERO) .AND. (CONFIG%STEP_AY_CHANGE .GT. 0.0_RT)) THEN
          ALLOCATE(AYX_MEAN(1:CONFIG%ADO))
@@ -3322,7 +3328,7 @@ CONTAINS
       ! TODO: Embedding normalization should probably fall under "input conditioning"
       !       instead of falling under "model conditioning"
       ! 
-      ! A_EMBEDDINGS
+      ! A_EMBEDDINGS  sliding window mean zero variance one
       IF ((CONFIG%ANE .GT. 0) .AND. (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT)) THEN
          ! Update the exponential trailing mean term and subtract it from current values.
          ! WARNING: Local allocation.
@@ -3361,7 +3367,7 @@ CONTAINS
          END DO
          DEALLOCATE(A_EMB_MEAN)
       END IF
-      ! M_EMBEDDINGS
+      ! M_EMBEDDINGS  sliding window mean zero variance one
       IF ((CONFIG%MNE .GT. 0) .AND. (CONFIG%STEP_EMB_CHANGE .GT. 0.0_RT)) THEN
          ! Update the exponential trailing mean term and subtract it from current values.
          ! WARNING: Local allocation.
@@ -3400,6 +3406,16 @@ CONTAINS
          END DO
          DEALLOCATE(M_EMB_MEAN)
       END IF
+      ! ! O_EMB_VECS  shifted such that the first DOE embeddings are the "root".
+      ! IF (CONFIG%DOE .GT. 0) THEN
+      !    O_ROT(:,:) = O_EMB_VECS(1:CONFIG%DOE,1:CONFIG%DOE) ! Copy first DOE embeddings into matrix.
+      !    FORALL (D=1:CONFIG%DOE) O_ORDER(D) = INT(D) ! Initialize original positions of vectors.
+      !    CALL ORTHONORMALIZE(O_ROT, O_LENS, O_RANK, O_ORDER) ! Perform orthonormalization.
+      !    O_TMP(:,O_ORDER(:)) = O_ROT(:,:) ! Copy vectors into their original order.
+      !    O_ROT(:,:) = O_TMP(:,:)
+      !    ! Apply the rotation.
+      !    O_EMB_VECS(:,:) = MATMUL(TRANSPOSE(O_ROT(:,:)), O_EMB_VECS(:,:))
+      ! END IF
     END SUBROUTINE UNIT_MAX_NORM
 
     ! Check the rank of all internal states.
