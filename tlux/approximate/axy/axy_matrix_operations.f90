@@ -76,14 +76,14 @@ CONTAINS
 
     ! Standard SGEMM.
     INTERFACE
-       SUBROUTINE SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
-            AB_MULT, A, A_ROWS, B, B_ROWS, C_MULT, C, C_ROWS)
-         CHARACTER :: OP_A, OP_B
-         INTEGER :: OUT_ROWS, OUT_COLS, INNER_DIM, A_ROWS, B_ROWS, C_ROWS
-         REAL :: AB_MULT, C_MULT
-         REAL, DIMENSION(*) :: A
-         REAL, DIMENSION(*) :: B
-         REAL, DIMENSION(*) :: C
+       SUBROUTINE SGEMM(OP_A_, OP_B_, OUT_ROWS_, OUT_COLS_, INNER_DIM_, &
+            AB_MULT_, A_, A_ROWS_, B_, B_ROWS_, C_MULT_, C_, C_ROWS_)
+         CHARACTER :: OP_A_, OP_B_
+         INTEGER :: OUT_ROWS_, OUT_COLS_, INNER_DIM_, A_ROWS_, B_ROWS_, C_ROWS_
+         REAL :: AB_MULT_, C_MULT_
+         REAL, DIMENSION(*) :: A_
+         REAL, DIMENSION(*) :: B_
+         REAL, DIMENSION(*) :: C_
        END SUBROUTINE SGEMM
     END INTERFACE
     CALL SGEMM(OP_A, OP_B, OUT_ROWS, OUT_COLS, INNER_DIM, &
@@ -118,12 +118,12 @@ CONTAINS
 
     ! Standard SSYRK.
     INTERFACE
-       SUBROUTINE SSYRK(UPLO, TRANS, N, K, ALPHA, A, LDA, BETA, C, LDC)
-         CHARACTER, INTENT(IN) :: UPLO, TRANS
-         INTEGER, INTENT(IN) :: N, K, LDA, LDC
-         REAL, INTENT(IN) :: ALPHA, BETA
-         REAL, INTENT(IN), DIMENSION(LDA,*) :: A
-         REAL, INTENT(INOUT), DIMENSION(LDC,*) :: C
+       SUBROUTINE SSYRK(UPLO_, TRANS_, N_, K_, ALPHA_, A_, LDA_, BETA_, C_, LDC_)
+         CHARACTER, INTENT(IN) :: UPLO_, TRANS_
+         INTEGER, INTENT(IN) :: N_, K_, LDA_, LDC_
+         REAL, INTENT(IN) :: ALPHA_, BETA_
+         REAL, INTENT(IN), DIMENSION(LDA_,*) :: A_
+         REAL, INTENT(INOUT), DIMENSION(LDC_,*) :: C_
        END SUBROUTINE SSYRK
     END INTERFACE
 
@@ -257,7 +257,7 @@ CONTAINS
     INTEGER, INTENT(OUT), DIMENSION(:), OPTIONAL :: ORDER ! SIZE(VT,2)
     ! Local variables.
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: ATA, Q
-    INTEGER :: I, J, K, NUM_STEPS
+    INTEGER :: I, K, NUM_STEPS
     REAL(KIND=RT) :: MULTIPLIER
     LOGICAL :: INITIALIZE_VT
     ! Set the number of steps, the number of sequential matrix multiplications.
@@ -410,12 +410,11 @@ CONTAINS
     ! Local variables.
     LOGICAL :: SCALE_BY_AVERAGE
     LOGICAL, ALLOCATABLE, DIMENSION(:,:) :: VALIDITY_MASK
-    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: TEMP_VECS
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: VALS, RN, MINS, SCALAR
     REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: X1
-    INTEGER(KIND=INT64) :: I, J, D, N
+    INTEGER(KIND=INT64) :: I, D, N
     INTEGER(KIND=INT64) :: NMAX
-    INTEGER :: TO_FLATTEN
+    INTEGER(KIND=INT64) :: TO_FLATTEN
     LOGICAL :: APPLY_TO_X
     ! --------------------------------------------------------
     D = SIZE(X,1,KIND=INT64)
@@ -482,7 +481,7 @@ CONTAINS
        !  in [0,1] to prevent numerical issues with SVD.
        SCALAR(I) = 1.0_RT
        SCALAR(I) = MAXVAL(X1(I,:), MASK=VALIDITY_MASK(:,I)) - MINS(I)
-       IF (SCALAR(I) .NE. 0.0_RT) THEN
+       IF (ABS(SCALAR(I)) .GT. EPSILON(1.0_RT)) THEN
           WHERE (VALIDITY_MASK(:,I))
              X1(I,:) = (X1(I,:) - MINS(I)) / SCALAR(I)
           END WHERE
@@ -592,14 +591,14 @@ CONTAINS
     REAL(KIND=RT), DIMENSION(:), ALLOCATABLE :: WORK
     REAL(KIND=RT), DIMENSION(:,:), ALLOCATABLE :: PROJECTION
     INTERFACE
-       SUBROUTINE SGELS(TRANS, M, N, NRHS, A, LDA, B, LDB, WORK, LWORK, INFO)
+       SUBROUTINE SGELS(TRANS_, M_, N_, NRHS_, A_, LDA_, B_, LDB_, WORK_, LWORK_, INFO_)
          USE ISO_FORTRAN_ENV, ONLY: RT => REAL32
-         CHARACTER, INTENT(IN) :: TRANS
-         INTEGER, INTENT(IN) :: M, N, NRHS, LDA, LDB, LWORK
-         REAL(KIND=RT), INTENT(INOUT), DIMENSION(LDA,*) :: A
-         REAL(KIND=RT), INTENT(IN), DIMENSION(LDB,*) :: B
-         REAL(KIND=RT), INTENT(INOUT), DIMENSION(*) :: WORK
-         INTEGER, INTENT(OUT) :: INFO
+         CHARACTER, INTENT(IN) :: TRANS_
+         INTEGER, INTENT(IN) :: M_, N_, NRHS_, LDA_, LDB_, LWORK_
+         REAL(KIND=RT), INTENT(INOUT), DIMENSION(LDA_,*) :: A_
+         REAL(KIND=RT), INTENT(IN), DIMENSION(LDB_,*) :: B_
+         REAL(KIND=RT), INTENT(INOUT), DIMENSION(*) :: WORK_
+         INTEGER, INTENT(OUT) :: INFO_
        END SUBROUTINE SGELS
     END INTERFACE
     ! TODO: Test this function since I redefined the interface and updated some code.
