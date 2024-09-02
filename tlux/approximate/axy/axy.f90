@@ -1837,13 +1837,21 @@ CONTAINS
                END DO
                ! Revert the running sum in the last position to just the value (weight = 1).
                Y(:,FE) = AY(GE,:CONFIG%ADO)
+               ! Incorporate AY output normalization.
+               IF (CONFIG%MDO .GT. 0) THEN
+                  DO J = FIX_STARTS(I), FE
+                     Y(:,J) = (Y(:,J) - AY_SHIFT(:)) * AY_SCALE(:)
+                  END DO
+               END IF
             ELSE
                ! Otherwise, without partial aggregation, just put the weighted average aggregate into X.
                CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
                Y(:,I) = MATMUL(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)), AY(GS:GE,:CONFIG%ADO)) / CW
+               ! Incorporate AY output normalization.
+               IF (CONFIG%MDO .GT. 0) THEN
+                  Y(:,I) = (Y(:,I) - AY_SHIFT(:)) * AY_SCALE(:)
+               END IF
             END IF
-            ! Incorporate AY output normalization.
-            Y(:,I) = (Y(:,I) - AY_SHIFT(:)) * AY_SCALE(:)
          ELSE
             IF (CONFIG%PARTIAL_AGGREGATION) THEN
                Y(:,FIX_STARTS(I)) = 0.0_RT
@@ -3068,6 +3076,8 @@ CONTAINS
           END DO
        END IF
        CONFIG%AY_NORMALIZED = .TRUE.
+    ELSE
+       AY_SCALE(:) = 1.0_RT
     END IF
     ! Reset the normalize setting.
     CONFIG%NORMALIZE = NORMALIZE

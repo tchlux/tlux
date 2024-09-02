@@ -419,7 +419,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         state_values["a_states"] = np.asarray(state_values["a_states"]).T
         # Apply output transformation.
         ay = (values.T @ m.a_output_vecs[:,:])
-        state_values["ay"] = ay
+        state_values["ay"] = ay.copy()
         ay_error = ay[:,config.ado:config.ado+1]  # extract +1 for error prediction
         # Ensure the AY weights are valid (always positive).
         ay[:,-1] = np.maximum(config.min_agg_weight, ay[:,-1])
@@ -432,41 +432,50 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         else:
             # Set the aggregator output to be Y.
             agg_out = y[:,:]
-        print("ay: ")
-        print(ay, flush=True)
-        # Aggregate the batches. With partial aggregation, we have one output for
-        #  partial mean starting from the "last" aggregate output.
+        # Aggregate the batches with partial aggregation
         if (config.partial_aggregation):
             f_start = 0
             a_start = 0
-            for i,s in enumerate(sizes):
+            for i, s in enumerate(sizes):
                 a_end = a_start + s
-                f_end = f_start + max(1,s)
-                for out_i, agg_i in zip(range(f_end-1, f_start-1, -1), range(a_end-1, a_start-1, -1)):
-                    agg_out[:,out_i] = ay[agg_i:a_end,:config.ado].mean(axis=0)
-                    if (config.mdo > 0):
-                        # Apply output shift and scale.
-                        agg_out[:,out_i] = (agg_out[:,out_i] - m.ay_shift) * m.ay_scale
-                # When there is no size, a zero value is assigned.
-                if (s == 0):
-                    agg_out[:,f_end-1] = 0.0
+                f_end = f_start + max(0, s - 1)
+                if s > 0:
+                    # Initialize the convex weight
+                    cw = max(config.min_agg_weight, ay[a_end - 1, config.ado])
+                    agg_out[:, f_end] = ay[a_end - 1, :config.ado] * cw
+                    # Accumulate the running sum in the last position, updating the divisor.
+                    for j in range(1, s):
+                        agg_out[:, f_end] += ay[a_end - 1 - j, :config.ado] * max(config.min_agg_weight, ay[a_end - 1 - j, config.ado])
+                        # Accumulate the running sum of weights (to be made convex).
+                        cw += max(config.min_agg_weight, ay[a_end - 1 - j, config.ado])
+                        # Compute this output.
+                        agg_out[:, f_end - j] = agg_out[:, f_end] / cw
+                    # Revert the running sum in the last position to just the value (weight = 1).
+                    agg_out[:, f_end] = ay[a_end - 1, :config.ado]
+                    # Normalize the output.
+                    if config.mdo > 0:
+                        # Apply output shift and scale
+                        agg_out[:, f_start:f_end + 1] = ((agg_out[:, f_start:f_end + 1].T - m.ay_shift) * m.ay_scale).T
+                else:
+                    # When there is no size, a zero value is assigned
+                    agg_out[:, f_end] = 0.0
                 # Transition the start for the next element.
                 a_start = a_end
-                f_start = f_end
-        # Without partial aggregation, we only compute the mean all outputs in each group.
+                f_start = f_end + 1
+        # Without partial aggregation, compute the mean of all outputs in each group
         else:
             a = 0
             for i,s in enumerate(sizes):
                 if (s > 0):
-                    agg_out[:,i] = ay[a:a+s,:config.ado].sum(axis=0) / s
-                    if (config.mdo > 0):
-                        # Apply output shift and scale.
+                    cw = ay[a:a+s,config.ado].sum()
+                    agg_out[:,i] = (ay[a:a+s,config.ado][:,np.newaxis] * ay[a:a+s,:config.ado]).sum(axis=0) / cw
+                    if config.mdo > 0:
+                        # Apply output shift and scale
                         agg_out[:,i] = (agg_out[:,i] - m.ay_shift) * m.ay_scale
+                # When there is no size, a zero value is assigned
                 else:
                     agg_out[:,i] = 0
                 a += s
-    print("x: ", e)
-    print(agg_out, flush=True)
     # Evaluate the fixed model.
     if (config.mdo > 0):
         if (config.normalize and (config.mdn > 0)):

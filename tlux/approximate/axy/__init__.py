@@ -6,8 +6,8 @@ from tlux.unique import ByteArray
 
 
 # TODO:
-#  - turning on pairwise_aggregation for single-element-only data sets causes
-#    a change in the loss function, indicating a bug
+#  - partial aggregation (in this file) appears to break 3-function approximation
+#    only for the third function, indicating a bug
 #  - make a robust "rolling normalization" operation that can reliably fetch
 #    data from a large data set and maintain radialization properites in the
 #    face of embedding drift as well
@@ -20,6 +20,7 @@ from tlux.unique import ByteArray
 #    and propogates an output gradient back to the inputs (+1 for all outputs).
 #  - python fallback that supports the basic evaluation of
 #    a model (but no support for training new models).
+#  - jax wrap for forward pass used to verify gradient calculations and find discrepancies
 
 SHOW_FAILURE_PLOT = False
 
@@ -702,7 +703,7 @@ if __name__ == "__main__":
         # step_emb_change=0.01,
         # step_ay_change=0.5,
         log_grad_norm_frequency = 1,
-        rank_check_frequency = 1,
+        # rank_check_frequency = 1,
         early_stop = False,
         # ax_normalized = True,
         # ay_normalized = True,
