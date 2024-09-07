@@ -9,12 +9,14 @@
 import argparse
 import os
 from llama_cpp.llama import Llama, LlamaGrammar
+from llama_cpp.llama_cache import LlamaDiskCache
 
 # Models downloaded with LMStudio will be in a path such as:
 #    ~/.cache/lm-studio/models/...
 
 # Set the path to the model.
 MODEL_PATH = os.path.expanduser('~/.slm.gguf')
+CACHE_PATH = os.path.expanduser('~/.slm.cache')
 CHAT_FORMAT = "llama-3"
 DEFAULT_CTX = 1024
 DEFAULT_TEMP = 0.1
@@ -51,7 +53,9 @@ value ::= object | array | string | number | ("true" | "false" | "null") ws
 
 # Load the model.
 def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, num_gpu_layers=-1, chat_format=CHAT_FORMAT):
-    return Llama(model_path, n_ctx=n_ctx, embedding=embedding, verbose=verbose, num_gpu_layers=num_gpu_layers, chat_format=chat_format)
+    model = Llama(model_path, n_ctx=n_ctx, embedding=embedding, verbose=verbose, num_gpu_layers=num_gpu_layers, chat_format=chat_format)
+    # model.set_cache(LlamaDiskCache(CACHE_PATH))  # This appears to have fixed debug print statments, not ready yet.
+    return model
 
 
 # Truncate some text to the specified token length.
