@@ -13,21 +13,21 @@ class AxyModel:
         self.ax_shift      = self.model[self.config.aiss-1:self.config.aise].reshape(self.config.adn, order="F")
         self.ax_rescale    = self.model[self.config.aims-1:self.config.aime].reshape(self.config.adn, self.config.adn, order="F")
         self.a_embeddings  = self.model[self.config.asev-1:self.config.aeev].reshape(self.config.ade, self.config.ane, order="F")
-        self.a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, order="F")
-        self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, order="F")
-        self.a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), order="F")
-        self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), order="F")
-        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, order="F")
+        self.a_input_vecs  = self.model[self.config.asiv-1:self.config.aeiv].reshape(self.config.adi, self.config.ads, self.config.anc, order="F")
+        self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, self.config.anc, order="F")
+        self.a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), self.config.anc, order="F")
+        self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), self.config.anc, order="F")
+        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, self.config.anc, order="F")
         self.ay_shift      = self.model[self.config.aoss-1:self.config.aose].reshape(self.config.ado, order="F")
         self.ay_scale      = self.model[self.config.aoms-1:self.config.aome].reshape(self.config.ado, order="F")
         self.x_shift       = self.model[self.config.miss-1:self.config.mise].reshape(self.config.mdn, order="F")
         self.x_rescale     = self.model[self.config.mims-1:self.config.mime].reshape(self.config.mdn, self.config.mdn, order="F")
         self.m_embeddings  = self.model[self.config.msev-1:self.config.meev].reshape(self.config.mde, self.config.mne, order="F")
-        self.m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, order="F")
-        self.m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, order="F")
-        self.m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), order="F")
-        self.m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, max(0,self.config.mns-1), order="F")
-        self.m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, max(0,self.config.mdo), order="F")
+        self.m_input_vecs  = self.model[self.config.msiv-1:self.config.meiv].reshape(self.config.mdi, self.config.mds, self.config.mnc, order="F")
+        self.m_input_shift = self.model[self.config.msis-1:self.config.meis].reshape(self.config.mds, self.config.mnc, order="F")
+        self.m_state_vecs  = self.model[self.config.mssv-1:self.config.mesv].reshape(self.config.mds, self.config.mds, max(0,self.config.mns-1), self.config.mnc, order="F")
+        self.m_state_shift = self.model[self.config.msss-1:self.config.mess].reshape(self.config.mds, max(0,self.config.mns-1), self.config.mnc, order="F")
+        self.m_output_vecs = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, max(0,self.config.mdo), self.config.mnc, order="F")
         self.y_shift       = self.model[self.config.moss-1:self.config.mose].reshape(self.config.do - self.config.doe, order="F")
         self.y_rescale     = self.model[self.config.moms-1:self.config.mome].reshape(self.config.do - self.config.doe, self.config.do - self.config.doe, order="F")
         self.o_embeddings  = self.model[self.config.osev-1:self.config.oeev].reshape(self.config.doe, self.config.noe, order="F")
@@ -185,17 +185,17 @@ class Details(dict):
         self.update(dict(
             # Model.
             a_embeddings  = model[config.asev-1:config.aeev].reshape(config.ade, config.ane, order="F"),
-            a_input_vecs  = model[config.asiv-1:config.aeiv].reshape(config.adi, config.ads, order="F"),
-            a_input_shift = model[config.asis-1:config.aeis].reshape(config.ads, order="F"),
-            a_state_vecs  = model[config.assv-1:config.aesv].reshape(config.ads, config.ads, max(0,config.ans-1), order="F"),
-            a_state_shift = model[config.asss-1:config.aess].reshape(config.ads, max(0,config.ans-1), order="F"),
-            a_output_vecs = model[config.asov-1:config.aeov].reshape(config.adso, config.ado+1, order="F"),
+            a_input_vecs  = model[config.asiv-1:config.aeiv].reshape(config.adi, config.ads, config.anc, order="F"),
+            a_input_shift = model[config.asis-1:config.aeis].reshape(config.ads, config.anc, order="F"),
+            a_state_vecs  = model[config.assv-1:config.aesv].reshape(config.ads, config.ads, max(0,config.ans-1), config.anc, order="F"),
+            a_state_shift = model[config.asss-1:config.aess].reshape(config.ads, max(0,config.ans-1), config.anc, order="F"),
+            a_output_vecs = model[config.asov-1:config.aeov].reshape(config.adso, config.ado+1, config.anc, order="F"),
             m_embeddings  = model[config.msev-1:config.meev].reshape(config.mde, config.mne, order="F"),
-            m_input_vecs  = model[config.msiv-1:config.meiv].reshape(config.mdi, config.mds, order="F"),
-            m_input_shift = model[config.msis-1:config.meis].reshape(config.mds, order="F"),
-            m_state_vecs  = model[config.mssv-1:config.mesv].reshape(config.mds, config.mds, max(0,config.mns-1), order="F"),
-            m_state_shift = model[config.msss-1:config.mess].reshape(config.mds, max(0,config.mns-1), order="F"),
-            m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, max(0,config.mdo), order="F"),
+            m_input_vecs  = model[config.msiv-1:config.meiv].reshape(config.mdi, config.mds, config.mnc, order="F"),
+            m_input_shift = model[config.msis-1:config.meis].reshape(config.mds, config.mnc, order="F"),
+            m_state_vecs  = model[config.mssv-1:config.mesv].reshape(config.mds, config.mds, max(0,config.mns-1), config.mnc, order="F"),
+            m_state_shift = model[config.msss-1:config.mess].reshape(config.mds, max(0,config.mns-1), config.mnc, order="F"),
+            m_output_vecs = model[config.msov-1:config.meov].reshape(config.mdso, max(0,config.mdo), config.mnc, order="F"),
             o_embeddings  = model[config.osev-1:config.oeev].reshape(config.doe, config.noe, order="F"),
             ax_shift = model[config.aiss-1:config.aise].reshape(config.adn, order="F"),
             ax_rescale = model[config.aims-1:config.aime].reshape(config.adn, config.adn, order="F"),
@@ -213,15 +213,15 @@ class Details(dict):
             ax = rwork[config.saxb-1:config.eaxb].reshape(config.adi, config.na, order="F"),
             ax_gradient = rwork[config.sag-1:config.eag].reshape(config.adi, config.na, order="F"),
             a_emb_temp = rwork[config.saet-1:config.eaet].reshape(config.ade, config.ane, config.num_threads, order="F"),
-            a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, order="F"),
-            a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, order="F"),
+            a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, config.anc, order="F"),
+            a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, config.anc, order="F"),
             ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
             ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
             x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nms, order="F"),
             x_gradient = rwork[config.sxg-1:config.exg].reshape(config.mdi, config.nms, order="F"),
             m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
-            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nms, config.mds, config.mns+1, order="F"),
-            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nms, config.mds, config.mns+1, order="F"),
+            m_states = rwork[config.smxs-1:config.emxs].reshape(config.nms, config.mds, config.mns+1, config.mnc, order="F"),
+            m_grads = rwork[config.smxg-1:config.emxg].reshape(config.nms, config.mds, config.mns+1, config.mnc, order="F"),
             y = rwork[config.smyb-1:config.emyb].reshape(config.do, config.nms, order="F"),
             o_emb_temp = rwork[config.soet-1:config.eoet].reshape(config.doe, config.noe, config.num_threads, order="F"),
             y_gradient = rwork[config.syg-1:config.eyg].reshape(config.do, config.nms, order="F"),

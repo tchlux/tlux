@@ -79,6 +79,7 @@ class AXY:
         ado = kwargs.pop("ado", None)
         ads = kwargs.pop("ads", None)
         ans = kwargs.pop("ans", None)
+        anc = kwargs.pop("anc", None)
         ade = kwargs.pop("ade", None)
         ane = kwargs.pop("ane", None)
         # Model parameters.
@@ -86,6 +87,7 @@ class AXY:
         mdo = kwargs.pop("mdo", None)
         mds = kwargs.pop("mds", None)
         mns = kwargs.pop("mns", None)
+        mnc = kwargs.pop("mnc", None)
         mde = kwargs.pop("mde", None)
         mne = kwargs.pop("mne", None)
         # Number of output embeddings.
@@ -98,9 +100,9 @@ class AXY:
         # Initialize if enough arguments were provided.
         if (None not in {adn, mdn, mdo}):
             self.config = self.AXY.new_model_config(
-                adn=adn, ado=ado, ads=ads, ans=ans, ane=ane, ade=ade,
+                adn=adn, ado=ado, ads=ads, ans=ans, anc=anc, ane=ane, ade=ade,
                 noe=noe, doe=doe,
-                mdn=mdn, mdo=mdo, mds=mds, mns=mns, mne=mne, mde=mde,
+                mdn=mdn, mdo=mdo, mds=mds, mns=mns, mnc=mnc, mne=mne, mde=mde,
                 num_threads=self.num_threads,
             )
             # Set any configuration keyword arguments given at initialization
@@ -264,9 +266,9 @@ class AXY:
                 )
         # Store the multiplier to be used in embeddings (to level the norm contribution).
         if (self.config.mdo > 0):
-            last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, order="F")
+            last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, self.config.mnc, order="F")
         else:
-            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, order="F")[:,:-1]
+            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, self.config.anc, order="F")[:,:-1,:]
         self.embedding_transform = np.linalg.norm(last_weights, axis=1)
         # Normalize the embedding transformation to be unit norm.
         transform_norm = np.linalg.norm(self.embedding_transform)
@@ -418,11 +420,11 @@ class AXY:
                 x = _x
         # If all internal states are being saved, the make more space, otherwise only two copies are needed.
         if (save_states):
-            a_states = np.zeros((na, self.config.ads, self.config.ans), dtype="float32", order="F")
-            m_states = np.zeros((nmt, self.config.mds, self.config.mns), dtype="float32", order="F")
+            a_states = np.zeros((na, self.config.ads, self.config.ans, self.config.anc), dtype="float32", order="F")
+            m_states = np.zeros((nmt, self.config.mds, self.config.mns, self.config.mnc), dtype="float32", order="F")
         else:
-            a_states = np.zeros((na, self.config.ads, 2), dtype="float32", order="F")
-            m_states = np.zeros((nmt, self.config.mds, 2), dtype="float32", order="F")
+            a_states = np.zeros((na, self.config.ads, 2, self.config.anc), dtype="float32", order="F")
+            m_states = np.zeros((nmt, self.config.mds, 2, self.config.mnc), dtype="float32", order="F")
         # ------------------------------------------------------------
         # Embed the categorical inputs as numeical inputs.
         self.AXY.embed(self.config, self.model, axi.T, xi.T, ax.T, x.T)
@@ -681,11 +683,13 @@ if __name__ == "__main__":
 
     settings = dict(
         seed=seed,
-        ads = 64,
+        ads = 16,
         ans = 2,
+        anc = 4,
         ado = None,
-        mds = 64,
+        mds = 16,
         mns = 2,
+        mnc = 4,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
         steps = 1000,
         # nm = nm,
