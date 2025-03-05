@@ -110,6 +110,7 @@ class AxyModel:
             f"  output dimension {self.config.ado}\n"+
             f"  state dimension  {self.config.ads}\n"+
             f"  number of states {self.config.ans}\n"+
+            f"  number of chords {self.config.anc}\n"+
            (f"  embedding dimension  {self.config.ade}\n"+
             f"  number of embeddings {self.config.ane}\n"
              if self.config.ane > 0 else "")+
@@ -125,6 +126,7 @@ class AxyModel:
             f"  output dimension {self.config.mdo}\n"+
             f"  state dimension  {self.config.mds}\n"+
             f"  number of states {self.config.mns}\n"+
+            f"  number of chords {self.config.mnc}\n"+
            (f"  embedding dimension  {self.config.mde}\n"+
             f"  number of embeddings {self.config.mne}\n"
              if self.config.mne > 0 else "")+
@@ -364,13 +366,18 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
             rwork=details.rwork.copy(),
             iwork=details.iwork.copy(),
             lwork=details.lwork.copy(),
+            record=details.record,
             # Manually set the following to have zero size (they are not being kept).
             agg_iterators_in=np.zeros(details.agg_iterators_in.shape[:-1] + (0,), dtype=details.agg_iterators_in.dtype),
-            record=np.zeros(details.record.shape[:-1] + (0,), dtype=details.record.dtype),
             yw=np.zeros((0,) + details.yw.shape[1:], dtype=details.yw.dtype),
         )
         # Store a Details object snapshot into the history.
         history.append(Details(**details_kwargs))
+        # Ensure that the 'record' is only kept for the last item in history.
+        if len(history) > 1:
+            hd = history[-2]  # "hd" -> historical details
+            hd.record = np.zeros(hd.record.shape[:-1] + (0,), dtype=hd.record.dtype),
+        # Perform default MSE and time update too.
         mse_and_time(details)
     # Plot the history.
     elif len(history) > 0:
@@ -378,6 +385,19 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
         import random
         from tlux.plot import Plot
         from tlux.math import pca
+        # Generate a visual of the loss function.
+        p = Plot("Mean squared error")
+        # Rescale the columns of the record for visualization.
+        record = history[-1].record
+        for i in sorted(set(range(0, record.shape[0]+1, max(1,record.shape[0] // steps))) | {record.shape[0]}):
+            step_indices = list(range(1,i+1))
+            p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
+            p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
+            p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines", frame=i)
+            p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
+            p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
+            p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
+        p.show(append=True, show=True, y_range=[-.2, 1.2])
         # 
         # Construct the projections for the "ax", "ay", "x", and "y" data based on final values.
         print("history[-1].ax.T.shape: ", history[-1].ax.T.shape, flush=True)
@@ -439,7 +459,6 @@ def visualize_training_geometries(details=None, history=[], steps=200, max_point
                 if (o_emb_projection.size > 0):
                     p.add("o emb", *project(d.o_embeddings.T, o_emb_projection).T, group="o emb", frame=i)
         # Plot the mean and variance values over time.
-        print("mean_values['x'][0].shape: ", mean_values['x'][0].shape, flush=True)
         from util.stats.plotting import plot_percentiles
         pmv = Plot("Means")
         pvv = Plot("Variances")

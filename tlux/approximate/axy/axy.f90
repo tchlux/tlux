@@ -3289,7 +3289,7 @@ CONTAINS
       ! INTEGER :: O_RANK
       !
       ! Limit the maximum 2-norm of any state projection vector to 1.
-      !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(L, D, SCALAR)
+      !$OMP PARALLEL DO NUM_THREADS(NUM_THREADS) PRIVATE(L, D, C, SCALAR)
       DO L = 1, CONFIG%MNS+CONFIG%ANS+ONE
          ! [1,ANS-1] -> A_STATE_VECS
          IF (L .LT. CONFIG%ANS) THEN

@@ -665,7 +665,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = False
+    use_x = True
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False
@@ -685,11 +685,11 @@ if __name__ == "__main__":
         seed=seed,
         ads = 16,
         ans = 2,
-        anc = 4,
+        anc = 32,
         ado = None,
         mds = 16,
         mns = 2,
-        mnc = 4,
+        mnc = 32,
         # mdo = 0,  # Set to 0 to force only an aggregate model (no interaction between aggregates).
         steps = 1000,
         # nm = nm,
@@ -909,68 +909,5 @@ if __name__ == "__main__":
                            mode="markers", shade=True, marker_size=4)
     p.plot(show=False)
 
-    # # Generate a visual for data projections.
-    # loaded_output = loaded_model.predict(
-    #     ax=(ax.copy() if use_a else None),
-    #     axi=(axi if use_a else None),
-    #     sizes=(sizes if use_a else None),
-    #     x=(x.copy() if use_x else None),
-    #     xi=(xi if use_x else None),
-    #     save_states=True
-    # )
-    # trained_output = trained_model.predict(
-    #     ax=(ax.copy() if use_a else None),
-    #     axi=(axi if use_a else None),
-    #     sizes=(sizes if use_a else None),
-    #     x=(x.copy() if use_x else None),
-    #     xi=(xi if use_x else None),
-    #     save_states=True
-    # )
-
-    # print()
-    # print("Plotting embeddings..")
-    # from tlux.math import project
-    # p = Plot("Data embeddings")
-    # munpacked = m.unpack()
-    # if (munpacked.a_embeddings.size > 0):
-    #     p.add("a-embs", *project(munpacked.a_embeddings.T, 3).T)
-    # if (use_a):
-    #     p.add("ax", *project(m.states["ax"], 3).T)
-    #     p.add("ay", *project(m.states["ay"], 3).T)
-    # if (munpacked.m_embeddings.size > 0):
-    #     p.add("m-embs", *project(munpacked.m_embeddings.T, 3).T)
-    # if (munpacked.o_embeddings.size > 0):
-    #     p.add("o-embs", *project(munpacked.o_embeddings.T, 3).T)
-    # if (m.states["x"].size > 0):
-    #     p.add("x", *project(m.states["x"], 3).T)
-    # if ((len(m.states["m_states"]) > 0) and (m.states["m_states"][-1].size > 0)):
-    #     p.add("m-last-state", *project(m.states["m_states"][-1], 3).T)
-    # print()
-
-
-    # Generate a visual for the training loss.
-    print("Generating surface plot..")
-    # Generate a visual of the loss function.
-    if (len(getattr(globals().get("m",None), "record", [])) > 0):
-        # p.show(append=True, show=False)
-        print()
-        print("Generating loss plot..")
-        p = Plot("Mean squared error")
-        # Rescale the columns of the record for visualization.
-        record = m.record
-        for i in range(0, record.shape[0]+1, max(1,record.shape[0] // 100)):
-            if i != record.shape[0]: continue # HACK: Only include last frame.
-            step_indices = list(range(1,i+1))
-            p.add("MSE", step_indices, record[:i,0], color=1, mode="lines", frame=i)
-            p.add("Step factors", step_indices, record[:i,1], color=2, mode="lines", frame=i)
-            p.add("Step sizes", step_indices, record[:i,2], color=3, mode="lines", frame=i)
-            p.add("Update ratio", step_indices, record[:i,3], color=4, mode="lines", frame=i)
-            p.add("Eval utilization", step_indices, record[:i,4], color=5, mode="lines", frame=i)
-            p.add("Grad utilization", step_indices, record[:i,5], color=6, mode="lines", frame=i)
-        p.show(append=True, show=True, y_range=[-.2, 1.2])
-    else:
-        p.show(append=True, show=True)
-    print("", "done.", flush=True)
-
-
+    # Show the internal stats for the model while training.
     visualize_training_geometries()
