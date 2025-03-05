@@ -8,6 +8,7 @@
 # Import the library for loading ".gguf" model files and specifying grammars (constrained outputs).
 import argparse
 import os
+import sys
 from llama_cpp.llama import Llama, LlamaGrammar
 from llama_cpp.llama_cache import LlamaDiskCache
 
@@ -20,6 +21,7 @@ CACHE_PATH = os.path.expanduser('~/.slm.cache')
 CHAT_FORMAT = "llama-3"
 DEFAULT_CTX = 1024
 DEFAULT_TEMP = 0.1
+LM = None
 
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
@@ -51,10 +53,29 @@ value ::= object | array | string | number | ("true" | "false" | "null") ws
 # ------------------------------------------------------------------------------------
 
 
+
+class suppress_stderr:
+    def __enter__(self):
+        self.stderr_fileno = sys.stderr.fileno()
+        self.saved_stderr = os.dup(self.stderr_fileno)
+        self.null_stderr = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(self.null_stderr, self.stderr_fileno)
+    def __exit__(self, *args):
+        os.dup2(self.saved_stderr, self.stderr_fileno)
+        os.close(self.null_stderr)
+        os.close(self.saved_stderr)
+
+
 # Load the model.
 def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, num_gpu_layers=-1, chat_format=CHAT_FORMAT):
-    model = Llama(model_path, n_ctx=n_ctx, embedding=embedding, verbose=verbose, num_gpu_layers=num_gpu_layers, chat_format=chat_format)
+    model_path = os.path.expanduser(model_path)
+    with suppress_stderr():
+        model = Llama(model_path, n_ctx=n_ctx, embedding=embedding, verbose=verbose, num_gpu_layers=num_gpu_layers, chat_format=chat_format)
     # model.set_cache(LlamaDiskCache(CACHE_PATH))  # This appears to have fixed debug print statments, not ready yet.
+    # Cache the loaded model globally.
+    global LM
+    LM = model
+    # Return the loaded model.
     return model
 
 
@@ -66,8 +87,15 @@ def truncate(lm, text, n_ctx=DEFAULT_CTX):
 # Get the completion for a prompt. Return it and the stop reason.
 #   "min_tokens" is the minimum number of tokens that there will be
 #   room for in the response before "n_ctx" is exhausted.
-def complete(lm, prompt, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, **kwargs):
+def complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, **kwargs):
+    if (lm is None):
+        if (LM is None):
+            load_lm()
+        lm = LM
     prompt = truncate(lm, prompt, n_ctx=n_ctx-min_tokens)
+    # Ensure no "messages" are included.
+    kwargs.pop("messages", None)
+    # Generate a response.
     response = lm(
         prompt,
         grammar=grammar,
@@ -86,8 +114,17 @@ def complete(lm, prompt, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temper
 
 
 # Get the completion for a prompt using chat formatting. Return it and the stop reason.
-def chat_complete(lm, prompt, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), **kwargs):
+def chat_complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), **kwargs):
+    if (lm is None):
+        if (LM is None):
+            load_lm()
+        lm = LM
     prompt = truncate(lm, prompt, n_ctx=n_ctx-min_tokens)
+    if len(messages) > 0:
+        messages = [
+            m if type(m) is dict else dict(role=('user' if (i%2==0) else 'assistant'), content=m)
+            for (i, m) in enumerate(messages)
+        ]
     response = lm.create_chat_completion(
         messages=list(messages) + [dict(role='user', content=prompt)],
         grammar=grammar,
