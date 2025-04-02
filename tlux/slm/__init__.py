@@ -7,10 +7,16 @@
 
 # Import the library for loading ".gguf" model files and specifying grammars (constrained outputs).
 import argparse
+import logging
 import os
+import requests
 import sys
 from llama_cpp.llama import Llama, LlamaGrammar
 from llama_cpp.llama_cache import LlamaDiskCache
+
+
+# # Disable logs for diskcache.
+# logging.getLogger("diskcache").setLevel(logging.WARNING)
 
 # Models downloaded with LMStudio will be in a path such as:
 #    ~/.cache/lm-studio/models/...
@@ -18,10 +24,15 @@ from llama_cpp.llama_cache import LlamaDiskCache
 # Set the path to the model.
 MODEL_PATH = os.path.expanduser('~/.slm.gguf')
 CACHE_PATH = os.path.expanduser('~/.slm.cache')
-CHAT_FORMAT = "llama-3"
+
+# CHAT_FORMAT = "llama-3"  # Meta models
+# CHAT_FORMAT = "gemma"  # Google models
+CHAT_FORMAT = "chatml"  # Qwen models
+
 DEFAULT_CTX = 1024
-DEFAULT_TEMP = 0.1
+DEFAULT_TEMP = 0.2
 LM = None
+COMPLETION = None
 
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
@@ -114,19 +125,30 @@ def complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX
 
 
 # Get the completion for a prompt using chat formatting. Return it and the stop reason.
-def chat_complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), **kwargs):
+def chat_complete(lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), system="", **kwargs):
     if (lm is None):
         if (LM is None):
             load_lm()
         lm = LM
+    # If only messages were provided, extract out the prompt as the last one.
+    if (prompt is None) and (len(messages) > 0):
+        messages, prompt = messages[:-1], messages[-1]
+    # If a string was given as a grammar, convert it into a llama grammar.
+    if (type(grammar) is str):
+        if ("root ::=" not in grammar):
+            grammar = "root ::= " + grammar
+        grammar = LlamaGrammar.from_string(grammar)
+    # Ensure that the prompt is sufficiently short.
     prompt = truncate(lm, prompt, n_ctx=n_ctx-min_tokens)
     if len(messages) > 0:
         messages = [
             m if type(m) is dict else dict(role=('user' if (i%2==0) else 'assistant'), content=m)
             for (i, m) in enumerate(messages)
         ]
+    # Get the system prompt if provided.
+    system = [dict(role='system', content=system)] if (system is not None and (len(system) > 0)) else []
     response = lm.create_chat_completion(
-        messages=list(messages) + [dict(role='user', content=prompt)],
+        messages=system + list(messages) + [dict(role='user', content=prompt)],
         grammar=grammar,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -141,6 +163,87 @@ def chat_complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAUL
     else:
         response = response.get('choices', [{}])[0]
         return response.get('message',{}).get('content',''), response.get('finish_reason', None)
+
+
+# A minimal wrapper to interact with a local LM Studio server via direct HTTP requests.
+# 
+# Args:
+#     prompt (str): The user prompt to send.
+#     max_tokens (int): Maximum tokens to generate (-1 for no limit).
+#     temperature (float): Sampling temperature (default: 0.1).
+#     stream (bool): Whether to stream the response (default: False).
+#     messages (list): Previous conversation messages (strings or dicts).
+#     system (str): System prompt (default: "").
+#     base_url (str): Server base URL (default: "http://127.0.0.1:3544/v1").
+#     **kwargs: Additional parameters to pass to the API.
+# 
+# Returns:
+#     tuple: (text, finish_reason) for non-streaming, or generator yielding (token, finish_reason) for streaming.
+# 
+def server_chat_complete(prompt=None, max_tokens=-1, temperature=0.1, stream=False, messages=(), system="", base_url="http://127.0.0.1:3544/v1", **kwargs):
+    # Convert messages to proper format
+    if len(messages) > 0:
+        messages = [
+            m if isinstance(m, dict) else {'role': 'user' if i % 2 == 0 else 'assistant', 'content': m}
+            for i, m in enumerate(messages)
+        ]
+    else:
+        messages = []
+    # Push the prompt to the back of the messages.
+    if prompt is not None:
+        messages += [{"role": "user", "content": prompt}]
+    # Construct the full conversation.
+    full_messages = ([{"role": "system", "content": system}] if system else []) + messages
+    
+    # Build request body
+    data = {
+        "model": "default",  # Adjust this based on your LM Studio model
+        "messages": full_messages,
+        "temperature": temperature,
+        "stream": stream,
+        **kwargs
+    }
+    if max_tokens != -1:
+        data["max_tokens"] = max_tokens
+    
+    # Set headers (no Authorization)
+    headers = {"Content-Type": "application/json"}
+    url = f"{base_url}/chat/completions"
+    
+    if stream:
+        # Streaming request
+        response = requests.post(url, headers=headers, json=data, stream=True)
+        response.raise_for_status()
+        
+        def stream_generator():
+            for line in response.iter_lines():
+                if line:
+                    if line.startswith(b"data: "):
+                        event_data = line[6:].decode("utf-8")
+                        if event_data == "[DONE]":
+                            yield "", "stop"
+                        else:
+                            try:
+                                chunk = json.loads(event_data)
+                                choice = chunk["choices"][0]
+                                token = choice.get("delta", {}).get("content", "")
+                                finish_reason = choice.get("finish_reason")
+                                yield token, finish_reason
+                            except json.JSONDecodeError:
+                                continue
+        
+        return stream_generator()
+    else:
+        # Non-streaming request
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        choice = result["choices"][0]
+        text = choice["message"]["content"]
+        finish_reason = choice.get("finish_reason", "stop")
+        return text, finish_reason
+
+
 
 if __name__ == '__main__':
     # Add command line arguments.
@@ -226,5 +329,6 @@ if __name__ == '__main__':
                 try: prompt = input()
                 except (KeyboardInterrupt, EOFError): break
                 print(flush=True)
+                response = ""
             else:
                 break
