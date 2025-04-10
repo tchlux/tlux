@@ -5,11 +5,20 @@ from tlux.decorators import cache
 import numpy as np
 
 # Generate a communication network queue.
-embedding_queue = NetworkQueue(host="Macsey.local", port=12345, listen_port=None)
+embedding_queue = None
+
+# Delayed initialization for the embedding queue.
+def get_embedding_queue():
+    global embedding_queue
+    if (embedding_queue is None):
+        embedding_queue = NetworkQueue(host="Macsey.local", port=12345, listen_port=None)
+    return embedding_queue
 
 # Get embeddings for a list of strings.
 @cache()
 def get_embeddings(list_of_strings: list[str], batch_size: int=100):
+    # Get the embedding queue for communicating with the server.
+    embedding_queue = get_embedding_queue()
     # Iterate over source data and generate embeddings.
     embeddings: list[list[np.ndarray]] = []
     for batch_i in tqdm(

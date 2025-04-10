@@ -137,7 +137,7 @@ class NetworkQueue:
 
 
     # Establishes a dedicated Queue for a client and listens for communications.
-    def _client_listener(self, client_socket: socket.socket, client_id: int):
+    def _client_listener(self, client_socket: socket.socket, client_id: str):
         q = Queue()
         self.queues[client_id] = q
         while (not self.exit_event.is_set()):
@@ -145,7 +145,7 @@ class NetworkQueue:
                 # First listen for an integer that specifies the size of the data.
                 size_data = client_socket.recv(8)
                 if (size_data == b''):
-                    logging.info(f"NetowrkQueue received data b'' from client {repr(client_id)} indicating a closed connection.")
+                    logging.info(f"NetworkQueue received data b'' from client {repr(client_id)} indicating a closed connection.")
                     break
                 # TODO: Have a loop to ensure "size_data" is 8 bytes long.
                 # Then decode that integer listen for the object that follows.

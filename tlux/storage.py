@@ -69,7 +69,7 @@ class FileLock:
                 if time.time() >= lock_expiration:
                     # WARNING: Lock failures and race conditions are possible due to the below operation.
                     try:
-                        logging.warning("Forcibly removing lock {repr(self.lock_path)}..")
+                        logging.warning(f"Forcibly removing lock {repr(self.lock_path)}..")
                         os.rmdir(self.lock_info_path)
                         os.rmdir(self.lock_path)
                     except (FileNotFoundError, OSError): pass

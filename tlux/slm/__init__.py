@@ -8,9 +8,11 @@
 # Import the library for loading ".gguf" model files and specifying grammars (constrained outputs).
 import argparse
 import logging
+import json
 import os
 import requests
 import sys
+import time
 from llama_cpp.llama import Llama, LlamaGrammar
 from llama_cpp.llama_cache import LlamaDiskCache
 
@@ -33,6 +35,9 @@ DEFAULT_CTX = 1024
 DEFAULT_TEMP = 0.2
 LM = None
 COMPLETION = None
+
+# Log directory for the inspectable chat logs.
+LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
 
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
@@ -242,6 +247,116 @@ def server_chat_complete(prompt=None, max_tokens=-1, temperature=0.1, stream=Fal
         text = choice["message"]["content"]
         finish_reason = choice.get("finish_reason", "stop")
         return text, finish_reason
+
+
+# Chat completion with logging to LM Studio conversations folder (so that it is easy to inspect).
+def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
+    # Ensure logs directory exists
+    now = time.strftime("%Y-%m-%d_%H.%M.%S")
+    timestamp = len(os.listdir(log_dir))
+    # Count all messages.
+    message_count = 0
+    if "system" in kwargs:
+        message_count += 1
+    if "messages" in kwargs:
+        message_count += len(list(kwargs["messages"]))
+    if "prompt" in kwargs:
+        message_count += 1
+    # Create a chat name.
+    chat_log_name = f"{message_count:02d}-messages ({now})"
+    # Generate the response
+    response, stop_reason = server_chat_complete(**kwargs)
+    # Initialize JSON structure
+    json_data = {
+        "name": chat_log_name,
+        "pinned": False,
+        "createdAt": timestamp,
+        "tokenCount": 0,
+        "messages": [],
+        "usePerChatPredictionConfig": True,
+        "perChatPredictionConfig": {
+            "fields": []
+        }
+    }
+    token_count = 0
+    # Handle system prompt
+    system_prompt = kwargs.get("system", "")
+    if system_prompt:
+        json_data["perChatPredictionConfig"]["fields"].append({
+            "key": "llm.prediction.systemPrompt",
+            "value": system_prompt
+        })
+        token_count += len(system_prompt)    
+    # Construct all of the expected message objects.
+    messages = []
+    if "messages" in kwargs:
+        for i, content in enumerate(kwargs["messages"]):
+            token_count += len(content)
+            # Even numbered (starting at 0) are user messages.
+            if (i % 2 == 0):
+                message_obj = {
+                    "versions": [{
+                        "type": "singleStep",
+                        "role": "user",
+                        "content": [{"type": "text", "text": content}]
+                    }],
+                    "currentlySelected": 0
+                }
+            # Odd numbered (starting at 1) are bot messages.
+            else:
+                message_obj = {
+                    "versions": [{
+                        "type": "multiStep",
+                        "role": "assistant",
+                        "steps": [{
+                            "type": "contentBlock",
+                            "stepIdentifier": "",
+                            "content": [{"type": "text", "text": content}],
+                            "defaultShouldIncludeInContext": True,
+                            "shouldIncludeInContext": True
+                        }]
+                    }],
+                    "currentlySelected": 0
+                }
+            # Append the message.
+            messages.append(message_obj)
+    # Add the "prompt" if it was added too.
+    if "prompt" in kwargs:
+        token_count += len(kwargs["prompt"])
+        messages.append({
+            "versions": [{
+                "type": "singleStep",
+                "role": "user",
+                "content": [{"type": "text", "text": kwargs["prompt"]}]
+            }],
+            "currentlySelected": 0
+        })
+    # Add the response from the bot as the final message.
+    token_count += len(response)
+    messages.append({
+        "versions": [{
+            "type": "multiStep",
+            "role": "assistant",
+            "steps": [{
+                "type": "contentBlock",
+                "stepIdentifier": "",
+                "content": [{"type": "text", "text": response}],
+                "defaultShouldIncludeInContext": True,
+                "shouldIncludeInContext": True
+            }]
+        }],
+        "currentlySelected": 0
+    })
+    # Update the token count.
+    json_data["tokenCount"] = token_count
+    # Update the messages.
+    json_data["messages"] = messages
+    # Write JSON log
+    chat_log_name = os.path.join(log_dir, f"{timestamp}.conversation.json")
+    with open(chat_log_name, "w") as f:
+        json.dump(json_data, f, indent=2)
+    # Return original results
+    return response, stop_reason
 
 
 
