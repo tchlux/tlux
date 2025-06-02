@@ -3,3 +3,5 @@ fortran_matrix_operations
 fortran_random
 words-*
 test_axy_random
+axy_*
+deprecated
