@@ -13,8 +13,6 @@ import os
 import requests
 import sys
 import time
-from llama_cpp.llama import Llama, LlamaGrammar
-from llama_cpp.llama_cache import LlamaDiskCache
 
 
 # # Disable logs for diskcache.
@@ -29,10 +27,11 @@ CACHE_PATH = os.path.expanduser('~/.slm.cache')
 
 # CHAT_FORMAT = "llama-3"  # Meta models
 # CHAT_FORMAT = "gemma"  # Google models
-CHAT_FORMAT = "chatml"  # Qwen models
+CHAT_FORMAT = "chatml"  # Devstral and Qwen models
 
 DEFAULT_CTX = 1024
 DEFAULT_TEMP = 0.2
+DEFAULT_N_THREADS = 8
 LM = None
 COMPLETION = None
 
@@ -42,29 +41,35 @@ LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
 
-# Grammar for stricly "yes" / "no" outputs.
-YES_NO = LlamaGrammar.from_string(r'''
-root ::= (([nN] "o") | ([yY] "es"))
-''', verbose=False)
+try:
+    from llama_cpp.llama import Llama, LlamaGrammar
+    from llama_cpp.llama_cache import LlamaDiskCache
 
-# Grammar for a single sentence.
-ONE_SENTENCE_GRAMMAR = LlamaGrammar.from_string(r'''
-root ::= " "? word (" " word)* "."
-word ::= [0-9A-Za-z',()-]+
-''', verbose=False)
+    # Grammar for stricly "yes" / "no" outputs.
+    YES_NO = LlamaGrammar.from_string(r'''
+    root ::= (([nN] "o") | ([yY] "es"))
+    ''', verbose=False)
 
-# Grammar for valid JSON-parseable output (doesn't handle premature stops).
-JSON_ARRAY_GRAMMAR = LlamaGrammar.from_string(r'''# For generating JSON arrays
-root ::= "[" ws ( value ("," ws value)* )? "]"
-ws ::= ([ \t\n] ws)?
-number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
-string ::= "\"" ( [^"\\]  # anything that's not a quote or backslash, OR ...
-   | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
-  )* "\"" ws
-array  ::= "[" ws (value ("," ws value)* )? "]" ws
-object ::= "{" ws (string ":" ws value ("," ws string ":" ws value)* )? "}" ws
-value ::= object | array | string | number | ("true" | "false" | "null") ws
-''', verbose=False)
+    # Grammar for a single sentence.
+    ONE_SENTENCE_GRAMMAR = LlamaGrammar.from_string(r'''
+    root ::= " "? word (" " word)* "."
+    word ::= [0-9A-Za-z',()-]+
+    ''', verbose=False)
+
+    # Grammar for valid JSON-parseable output (doesn't handle premature stops).
+    JSON_ARRAY_GRAMMAR = LlamaGrammar.from_string(r'''# For generating JSON arrays
+    root ::= "[" ws ( value ("," ws value)* )? "]"
+    ws ::= ([ \t\n] ws)?
+    number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
+    string ::= "\"" ( [^"\\]  # anything that's not a quote or backslash, OR ...
+       | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
+      )* "\"" ws
+    array  ::= "[" ws (value ("," ws value)* )? "]" ws
+    object ::= "{" ws (string ":" ws value ("," ws string ":" ws value)* )? "}" ws
+    value ::= object | array | string | number | ("true" | "false" | "null") ws
+    ''', verbose=False)
+except ModuleNotFoundError:
+    pass
 
 # ------------------------------------------------------------------------------------
 
@@ -83,10 +88,18 @@ class suppress_stderr:
 
 
 # Load the model.
-def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, num_gpu_layers=-1, chat_format=CHAT_FORMAT):
+def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, num_gpu_layers=-1, chat_format=CHAT_FORMAT, n_threads=DEFAULT_N_THREADS):
     model_path = os.path.expanduser(model_path)
     with suppress_stderr():
-        model = Llama(model_path, n_ctx=n_ctx, embedding=embedding, verbose=verbose, num_gpu_layers=num_gpu_layers, chat_format=chat_format)
+        model = Llama(
+            model_path,
+            n_ctx=n_ctx,
+            embedding=embedding,
+            verbose=verbose,
+            num_gpu_layers=num_gpu_layers,
+            chat_format=chat_format,
+            n_threads=n_threads,
+        )
     # model.set_cache(LlamaDiskCache(CACHE_PATH))  # This appears to have fixed debug print statments, not ready yet.
     # Cache the loaded model globally.
     global LM
@@ -304,11 +317,31 @@ def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
                 }
             # Odd numbered (starting at 1) are bot messages.
             else:
+                # Thinking blocks need to be extracted and look like this.
+                if ("<think>" in content) and ("</think>" in content):
+                    thoughts = content[
+                        content.index("<think>") + len("<think>") :
+                        content.index("</think>")
+                    ]
+                    content = content[content.index("</think>") + len("</think>"):]
+                    steps = [{
+                        "type": "contentBlock",
+                        "stepIdentifier": "",
+                        "content": [{"type": "text", "text": thoughts, "tokensCount": len(thoughts)}],
+                        "defaultShouldIncludeInContext": True,
+                        "shouldIncludeInContext": True,
+                        "style": {"type": "thinking", "ended": True, "title": ""},
+                        "prefix": "<think>",
+                        "suffix": "</think>"
+                    }]
+                else:
+                    steps = []
+                # Construct the message object for this.
                 message_obj = {
                     "versions": [{
                         "type": "multiStep",
                         "role": "assistant",
-                        "steps": [{
+                        "steps": steps + [{
                             "type": "contentBlock",
                             "stepIdentifier": "",
                             "content": [{"type": "text", "text": content}],
@@ -331,13 +364,32 @@ def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
             }],
             "currentlySelected": 0
         })
+
+    # Thinking blocks need to be extracted and look like this.
+    steps = []
+    if ("<think>" in response) and ("</think>" in response):
+        thoughts = response[
+            response.index("<think>") + len("<think>") :
+            response.index("</think>")
+        ]
+        response = response[response.index("</think>") + len("</think>"):]
+        steps = [{
+            "type": "contentBlock",
+            "stepIdentifier": "",
+            "content": [{"type": "text", "text": thoughts, "tokensCount": len(thoughts)}],
+            "defaultShouldIncludeInContext": True,
+            "shouldIncludeInContext": True,
+            "style": {"type": "thinking", "ended": True, "title": ""},
+            "prefix": "<think>",
+            "suffix": "</think>"
+        }]
     # Add the response from the bot as the final message.
     token_count += len(response)
     messages.append({
         "versions": [{
             "type": "multiStep",
             "role": "assistant",
-            "steps": [{
+            "steps": steps + [{
                 "type": "contentBlock",
                 "stepIdentifier": "",
                 "content": [{"type": "text", "text": response}],
@@ -371,7 +423,7 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--max_tokens', type=int, default=-1, help='The maximum number of tokens to produce.')
     parser.add_argument('-c', '--context_size', type=int, default=DEFAULT_CTX, help='The upper limit in prompt size before the head is truncated.')
     parser.add_argument('-t', '--temperature', type=float, default=DEFAULT_TEMP, help='The temperature used in response generation.')
-    parser.add_argument('prompt', type=str, help='The prompt to pass to the model.')
+    parser.add_argument('-p', '--prompt', type=str, default="", help='The prompt to pass to the model.')
 
     # Parse the command line arguments.
     args = parser.parse_args()
