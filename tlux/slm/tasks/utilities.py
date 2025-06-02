@@ -5,8 +5,39 @@ import re
 import subprocess
 # from tlux.slm import chat_complete as base_chat_complete
 # from tlux.slm import server_chat_complete as base_chat_complete
-from tlux.slm import logged_server_chat_complete as chat_complete
+from tlux.slm import logged_server_chat_complete as base_chat_complete
 from tlux.decorators import cache
+
+
+# Make sure "<think>" blocks are removed from the responses.
+def chat_complete(*args, reasoning=False, retries=2, **kwargs):
+    assert (len(args) <= 0), f"Chat completions only support keyword arguments for sake of long term code reliability."
+
+    # # If raesoning is explicitly disabled, then pass the necessary string to stop it.
+    # if not reasoning:
+    #     if "prompt" in kwargs:
+    #         kwargs["prompt"] += " /nothink"
+    #     elif "messages" in kwargs:
+    #         messages = list(kwargs["messages"])
+    #         messages[-1] += " /nothink"
+    #         kwargs["messages"] = messages
+
+    # Try executing the base chat completion.
+    exc = None
+    for _ in range(retries+1):
+        try:
+            response, stop_reason = base_chat_complete(*args, **kwargs)
+            if ("<think>" in response) and ("</think>" in response):
+                response = response[response.index("</think>")+len("</think>"):].strip()
+            return response, stop_reason
+        except Exception as e:
+            exc = e
+    else:
+        print("-"*100)
+        for (k, v) in kwargs.items():
+            print("", repr(k), repr(v))
+        print("-"*100, flush=True)
+        raise exc
 
 
 # Given markdown text, extract the contents of the first (and presumed only) code block.
@@ -136,7 +167,7 @@ def complete_from_options(options: list[str], reasoning_attempts=0, max_retries=
         raise(ValueError("Did not find 'prompt' nor 'messages' in the keyword arguments for completion. Cannot enforce option selection without one of those."))
     votes = {o: 0 for o in options_set}
     # Construct multiple prompts for reasoning.
-    reasoning_text = "Explain your thinking."
+    reasoning_text = "Explain your thinking, and conclude your line of reasoning with a tentative response."
     if reasoning_attempts > 1:
         reasoning_text_values = rephrase(reasoning_text, new_phrasings=reasoning_attempts-1)
     else:
@@ -154,27 +185,37 @@ def complete_from_options(options: list[str], reasoning_attempts=0, max_retries=
             )
             messages.extend([
                 reasoning,
-                "Given your thoughts, now " + options_text.lower(),
+                "Thank you for sharing your thoughts. Now " + options_text.lower(),
             ])
         else:
             messages[-1] += " " + options_text
         # Use chat_complete to evaluate if the result meets the expected outcome.
-        for _ in range(max_retries):
+        for _ in range(max_retries+1):
             evaluation, stop_reason = chat_complete(
                 messages=messages,
                 **complete_kwargs,
             )
             # Reduce to the chosen option.
             chosen_option = evaluation.strip().rstrip(".").lower()
+            lowval = evaluation.lower()
+            # If the response was as requested, use it.
             if chosen_option in options_set:
                 break
+            # If only one of the options appears in the response, assume it was chosen.
+            elif sum(1 if (o in lowval) else 0 for o in options_set) == 1:
+                for o in options_set:
+                    if o in lowval:
+                        chosen_option = o
+                        break
+                break
+            # Otherwise the model did not adhere to the requested pattern. Try to coerce it.
             else:
-                complete_kwargs["messages"].extend([
+                messages.extend([
                     evaluation,
-                    "That was an invalid response. " + options_text
+                    "Now please respond with the single most appropriate of the provided options. " + options_text
                 ])
         else:
-            raise(RuntimeError("Could not get the model to reply with provided options.\n\n" + ("\n" + "-"*80 + "\n").join(complete_kwargs["messages"])))
+            raise(RuntimeError("Could not get the model to reply with provided options.\n\n" + ("\n" + "-"*80 + "\n").join(messages)))
         # Store the vote.
         votes[chosen_option] += 1
     # Select the most voted option.

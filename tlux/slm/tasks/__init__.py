@@ -1,3 +1,5 @@
+# mv logs/* sandbox_dir/* trash/ ; python3 __init__.py
+# 
 # ---------------------------------------------------------------------
 #                        Handbook Follower Framework
 # 
@@ -110,7 +112,7 @@ from versioning import snapshot_directory, diff_snapshots, undo_diff
 # Handler for vector operations
 import numpy as np
 
-chat_complete = partial(chat_complete, temperature=0.0)
+chat_complete = partial(chat_complete, temperature=0.5)
 
 # Store snapshots of the sandbox directory (for undoing actions).
 snapshots = [snapshot_directory(sandbox_dir)]
@@ -127,6 +129,7 @@ You will be given work in the form of an instruction or objective from a develop
 - Consider performance and security when writing code; when there are known vulnerabilities, be sure to inform the developer.
 - Always use unit tests (with mocks if appropriate) to verify the expected behavior of functions you author.
 - When writing tests, focus on the most simple and clear cut cases to be sure the tests don't become too complicated.
+- All unit tests need to be executed and unambiguously pass without errors.
 - All tests should be contained in their own separate file that has the prefix "test_" before the existing file name.
 - It is preferred for you to use only the standard library and not rely on external modules to solve problems.
 """
@@ -205,7 +208,8 @@ def generate_action_for_state(
         purpose: str,
         objective: str,
         history: list[str],
-        actions: dict[str, tuple[str, list[tuple[str, str]]]]
+        actions: dict[str, tuple[str, list[tuple[str, str]]]],
+        use_reasoning: bool = True,
 ) -> tuple[str, str]:
     # Compile the history into a more nicely formatted string.
     if len(history) > 0:
@@ -226,35 +230,35 @@ def generate_action_for_state(
         messages=[
             manual,
             "I see you have provided a manual. How can I help?",
-            f"{objective_block}\n{history_block}\nGiven the objective and history of operations, describe what you think the general next step that should be taken according to the manual."
+            f"{objective_block}\n{history_block}\nFirst describe in your own words what has already been observed and accomplished, then describe what you think of as the best next step according to the manual."
         ],
     )
     suggested_addition = f"\n\nAccording to the operating manual, this is the suggestion for a next step:\n```\n{manual_suggestion.replace('```', '``')}\n```"
     # Generate thinking instructions.
     think_instruction = f"You have been given a high level objective and a history of your previous actions. At the end, you will be asked to pick one of the actions in order to advance towards the goal.\n{objective_block}\n{history_block}\n{action_block}\n{suggested_addition}\n\nGiven the objective and history of operations, describe what you think the general next step that should be taken and then which of the available actions are most likely to achieve that."
-    # Get the reasoning from the model for why it might pick any of the actions.
-    reasoning, _ = chat_complete(prompt=think_instruction, system=purpose)
+    messages = [think_instruction]
+    if (use_reasoning):
+        # Get the reasoning from the model for why it might pick any of the actions.
+        reasoning, _ = chat_complete(prompt=think_instruction, system=purpose)
+        messages += [reasoning, "Now please respond with the action you think is best to take first."]
     # Use chat_complete to generate candidate actions for a given step.
     chosen_action = complete_from_options(
-        messages=[
-            think_instruction,
-            reasoning,
-            "Now please respond with the action you think is best to take first.",
-        ],
+        messages=messages,
         options=list(actions),
         system=purpose,
     )
+    messages += [
+        chosen_action,
+        "Thank you. Now please succinctly state your intent in choosing this action so that future records may clearly show why it was chosen and what the purpose of choosing it was.",
+    ]
     # Create an "intent" that can be recorded to the history.
     intent, _ = chat_complete(
-        messages=[
-            think_instruction,
-            reasoning,
-            "Now please respond with the action you think is best to take first.",
-            chosen_action,
-            "Thank you. Now please succinctly state your intent in choosing this action so that future records may clearly show why it was chosen and what the purpose of choosing it was.",
-        ],
+        messages=messages,
         system=purpose,
     )
+    # Store the chosen action as the "reasoning" if none was explicitly used.
+    if (not use_reasoning):
+        reasoning = intent
     # Return the chosen action and intent.
     return (chosen_action, intent, reasoning)
 
@@ -317,24 +321,24 @@ def execute_action(
 
 # Return boolean indicating whether or not the current history appears
 # to satisfy the requirements of the manual.
-def satisfies_completion(manual: str, objective: str, history: list[str]) -> bool:
+def satisfies_completion(manual: str, objective: str, history: list[str], checks: int = 3, reasoning_attempts: int = 1) -> bool:
     history = "\n\n".join(history)
     # Generate alternative phrasings of the question that marks conclusion.
-    conclusion_questions = rephrase("Given the current history of operation, does it appear that the objective has been completely satisfied in accordance with all criteria listed in the manual?")
+    conclusion_questions = rephrase("Given the current history of operation, does it appear that the objective has been completely satisfied in accordance with all criteria listed in the manual?", new_phrasings=checks-1)
     # Each version of the question will produce a vote.
     votes = []
     for q in conclusion_questions:
         # Evaluate whether or not we are done.
         is_done = complete_from_options(
-            reasoning_attempts=1,
+            reasoning_attempts=reasoning_attempts,
             messages=[
                 manual,
                 "I see you have provided a manual. How can I help?",
                 f"Provided objective:\n```\n{objective}\n```\n\nOperational history:\n```\n{history}\n```\n\n" + q,
             ],
-            options=["Yes", "No"],
+            options=["satisfied", "incomplete"],
         )
-        votes.append(is_done == "Yes")
+        votes.append(is_done == "satisfied")
     # Return "Yes" only if it is the most common answer.
     return (sum(votes) / len(votes) >= 0.5)
 
@@ -342,6 +346,8 @@ def satisfies_completion(manual: str, objective: str, history: list[str]) -> boo
 if __name__ == "__main__":
     # Define the specific objective
     objective = "Write a function to compute the Fibonacci sequence."
+    # objective = "Read 'axy.f90' and generate a file with a list of all function names contained within 'axy.f90' and their purpose."
+    reasoning_attempts = 0
 
     # Assign a local manual.
     manual = coder_manual
@@ -368,7 +374,7 @@ if __name__ == "__main__":
     print(flush=True)
 
     # Initalize a holder for history context.
-    history = []
+    history: list[str] = []
     outcomes = {}
     lessons = {}
     while True:
@@ -376,29 +382,39 @@ if __name__ == "__main__":
 
         # Generate an action for the current state using the SLM
         action, intent, reasoning = generate_action_for_state(manual, purpose, objective, history, actions)
+        # Ensure that only our own custom instructions include code blocks.
+        intent = intent.replace("```", "``")
+        reasoning = reasoning.replace("```", "``")
+        # Show the user the action, intent, and reasoning.
         print("Action:   ", repr(action), flush=True)
         print("Intent:   ", repr(intent), flush=True)
         print("Reasoning:", repr(reasoning), flush=True)
-        history.append(intent)
+        history.append(intent.replace("```", "``"))
 
         # Execute the action and capture the outcome
         parameter_values, result, summary = execute_action(purpose, reasoning, history[:-1], actions, action)
+        call_string = action + "("
         print()
         if len(parameter_values) > 0:
             print("Parameter_Values:")
             for (p,v) in parameter_values.items():
+                if (len(v) > 70):
+                    v = v[:70] + f"... remaining {len(v)-70} characters truncated ..."
                 v = repr(v)
-                if (len(v) > 30):
-                    v = v[:30] + "..." + v[0]
                 print("", p, "=", v)
+                call_string += "\n  " + f"{p} = {v},"
+            call_string += "\n)"
+        else:
+            call_string += ")"
         print()
         print("Result: ", repr(result))
         print("Summary:", repr(summary))
-        history.append(summary)
+        history.append(call_string.replace("```", "``"))
+        history.append(summary.replace("```", "``"))
 
         # Label the "value" of the action, success, failure.
         label = complete_from_options(
-            reasoning_attempts=3,
+            reasoning_attempts=reasoning_attempts,
             system=purpose,
             messages=[
                 f"An action was taken with the following reason and intent.\n\nIntent:\n```\n{intent}\n```\n\nReasoning:\n```\n{reasoning}\n```\n\nThe action specifically that was chosen was '{action}'. After executing that action, the following outcome was observed:\n\nResult:\n```\n{result}\n```\n\nDo you think that outcome indicates success or failure against the original intent?",
@@ -426,7 +442,7 @@ if __name__ == "__main__":
         print()
 
         # If it appears the task has been completed according to the manual, break.
-        if satisfies_completion(manual, objective, history):
+        if satisfies_completion(manual, objective, history, checks=1, reasoning_attempts=1):
             break
 
     # Once a terminal state is reached, conclude the process

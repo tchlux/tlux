@@ -166,7 +166,7 @@ def run_file(filename: str) -> str:
         if result.returncode == 0:
             return f"Output: {result.stdout}"
         else:
-            return f"Error: {result.stderr}"
+            return f"Error:\n{result.stdout}\n{result.stderr}"
     except Exception as e:
         return f"Error executing file '{filename}': {str(e)}"
 
@@ -184,14 +184,14 @@ def run_file(filename: str) -> str:
 #   into multiple chunks. If the file does not exist, a string with an
 #   error message is returned (e.g., "Error: File not found").
 #
-def read_file(filename: str) -> str:
+def read_file(filename: str) -> list[str]:
     filename = remove_wrappers(filename)
     full_path = os.path.join(sandbox_dir, filename)
     if not os.path.exists(full_path):
         return f"Error: File '{filename}' not found"
     try:
         with open(full_path, 'r') as f:
-            content = f.read()
+            content = f.read().strip().split("\n\n")
         return content
     except Exception as e:
         return f"Error reading file '{filename}': {str(e)}"
