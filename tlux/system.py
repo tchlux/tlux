@@ -145,7 +145,7 @@ class Asynchronous:
         worker = self.__getattribute__("_worker")
         if ((worker is not None) and (worker.is_alive())):
             tasks = self.__getattribute__("_tasks")
-            task.put((None, self.__getattribute__("_stop_word"), (), {}))
+            tasks.put((None, self.__getattribute__("_stop_word"), (), {}))
             worker.terminate()
         # Terminate the communicator thread (owned by the current process).
         communicator = self.__getattribute__("_communicator")

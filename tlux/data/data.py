@@ -18,7 +18,7 @@ from . import DEFAULT_WAIT, DEFAULT_MAX_DISPLAY, \
 #        are numeric, use float, otherwise use string. Use "is numeric".
 # TODO:  Check for duplicate column names, handle duplicate column
 #        names? Do names *have* to be Python strings?
-# TODO:  Support in-place addition with *some* duplicate solumns and
+# TODO:  Support in-place addition with *some* duplicate columns and
 #        the same number of rows? That or block duplicate col names.
 # TODO:  Change printout style for data frames with lots of columns,
 #        use variable max_print_width
