@@ -1,0 +1,5 @@
+The HKM search specification describes a full large-scale search system.
+Implementing every component is far beyond the scope of this repository.
+This initial version provides a minimal working skeleton that indexes raw
+text documents and performs a trivial substring search. Many modules are
+stubs and need full algorithms as outlined in the README.

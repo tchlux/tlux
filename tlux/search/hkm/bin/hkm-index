@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""Command line stub for building an index."""
+
+import argparse
+from ..fs import FileSystem
+from ..schema import BuildConfig
+from ..builder.driver import IndexBuilder
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Build HKM index")
+    parser.add_argument("index_root")
+    parser.add_argument("docs", nargs="+")
+    args = parser.parse_args()
+    fs = FileSystem()
+    cfg = BuildConfig(index_root=args.index_root, raw_paths=args.docs)
+    IndexBuilder(fs, cfg).run()
+
+
+if __name__ == "__main__":
+    main()

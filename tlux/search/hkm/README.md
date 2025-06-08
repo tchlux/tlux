@@ -1,5 +1,5 @@
 ===============================================================================
-hkm_search – Hierarchical-K-Means Large-Scale Search Toolkit
+hkm – Hierarchical-K-Means Large-Scale Search Toolkit
 ===============================================================================
 
 Author : Thomas C.H. Lux                  Version : 0.1-spec  
@@ -217,7 +217,7 @@ All writes are “write-temp → rename” for crash safety.
 7.  PUBLIC PYTHON API (HIGH-LEVEL)
 ===============================================================================
 
-    from hkm_search import FileSystem, IndexBuilder, Searcher
+    from tlux.search.hkm import FileSystem, IndexBuilder, Searcher
 
     # Build
     fs   = FileSystem()                  # Local file system by default
@@ -243,7 +243,7 @@ namedtuples and lists.
 8.  PACKAGE FILE MAP
 ===============================================================================
 
-    hkm_search/
+    hkm/
       __init__.py          (re-exports FS, IndexBuilder, Searcher)
       fs.py                (FileSystem base + LocalFS impl)
       schema.py            (dtypes + constants)
