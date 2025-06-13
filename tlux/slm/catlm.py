@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-catlm.py – Summarize a directory, show a tree view, and optionally emit the
+catlm.py - Summarize a directory, show a tree view, and optionally emit the
            first 50 text files as fenced Markdown blocks.
 
 This script provides a detailed summary of a directory's structure and contents
@@ -206,7 +206,7 @@ def dump_files(root: Path, exclusions: List[str]) -> None:
                 except Exception as exc:
                     print(f"[Error reading file: {exc}]")
             else:
-                print("[Binary file – content not displayed]")
+                print("[Binary file - content not displayed]")
             print("```")
             print(f"--- End of file: {rel_path} ---")
             count += 1
