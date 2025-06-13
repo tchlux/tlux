@@ -1,14 +1,22 @@
 """Index building orchestrator."""
 
 import json
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from ..fs import FileSystem
-from ..schema import BuildConfig, WINDOW_SIZES, DOC_META_DTYPE, DOC_INDEX_DTYPE
+from ..schema import (
+    BuildConfig,
+    WINDOW_SIZES,
+    DOC_META_DTYPE,
+    DOC_INDEX_DTYPE,
+    BLOOM_FP_RATE,
+)
 from ..embedder import embed_text, tokenize
+from ..builder.bloom import BloomFilter
 
 
 @dataclass
@@ -49,6 +57,17 @@ class IndexBuilder:
                 # Extract metadata
                 tokens = tokenize(text)
                 num_token_count = float(tokens.size)
+
+                # ------------------------------------------------------
+                # Bloom Filter (token-ids, 4-byte little-endian each)
+                # ------------------------------------------------------
+                bf = BloomFilter.create(capacity=tokens.size, fp_rate=BLOOM_FP_RATE)
+                pack = struct.pack
+                for tid in tokens:
+                    bf.add(pack("<I", int(tid)))
+                bloom_path = self.fs.join(hkm_dir, f"bloom_{i:08d}.bin")
+                with self.fs.open(bloom_path, "wb") as bf_out:
+                    bf_out.write(bf.to_bytes())
 
                 # Store document in shard
                 shard_path = self.fs.join(docs_dir, f"shard_{i:08d}.bin")
@@ -92,6 +111,7 @@ class IndexBuilder:
                         "doc_id": i,
                         "path": shard_path,
                         "embeddings": embed_paths,
+                        "bloom": bloom_path,
                     })
                     + "\n"
                 )

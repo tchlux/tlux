@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import struct
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -93,3 +94,18 @@ class BloomFilter:
     def __contains__(self, item: bytes) -> bool:  # noqa: Dunder/magic-name
         """Return ``True`` if *item* **may** be present; ``False`` if *definitely not*."""
         return all(self._test_bit(idx) for idx in self._hashes(item))
+
+    # ------------------------------------------------------------------
+    # Disk helpers
+    # ------------------------------------------------------------------
+    def to_bytes(self) -> bytes:
+        """Return a compact binary representation (little-endian)."""
+        return struct.pack("<H", self.hash_count) + bytes(self.bits)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "BloomFilter":
+        """Re-create filter from :py:meth:`to_bytes` output."""
+        if len(data) < 2:
+            raise ValueError("data too short for BloomFilter")
+        k = struct.unpack("<H", data[:2])[0]
+        return cls(bits=bytearray(data[2:]), hash_count=k)
