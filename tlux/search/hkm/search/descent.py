@@ -1,6 +1,6 @@
 """HKM tree traversal and preview streaming.
 
-This implementation is **generic** – it walks any on-disk HKM directory
+This implementation is **generic** - it walks any on-disk HKM directory
 layout that matches the README specification *without* requiring an
 in-memory tree.  It yields leaf node directories (those containing
 ``chunk_meta.npy``) that satisfy the *metadata upper-bound* filters in
@@ -51,13 +51,13 @@ def _load_stats(node_dir: Path) -> dict | None:
 def _node_passes_upper_bound(stats: dict | None, query: QuerySpec) -> bool:
     """Return *True* if *stats* cannot rule out matching docs."""
 
-    if stats is None:  # No stats – conservatively accept
+    if stats is None:  # No stats - conservatively accept
         return True
 
     # --- Label pruning ---------------------------------------------------
     if query.label_include:
         ok = False
-        # stats carries flattened keys like "lang:en" → count
+        # stats carries flattened keys like "lang:en" -> count
         for key, allowed in query.label_include.items():
             for val in allowed:
                 if f"{key}:{val}" in stats.get("labels_count", {}):

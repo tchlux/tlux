@@ -7,8 +7,8 @@ subset satisfying the *label* and *numeric* constraints contained in a
 Document objects may be either **dict-like** or simple objects with two
 attributes:
 
-* ``labels``  – mapping ``str → (str | list[str])``
-* ``numeric`` – mapping ``str → float``
+* ``labels``  - mapping ``str -> (str | list[str])``
+* ``numeric`` - mapping ``str -> float``
 
 Any document lacking a required field is *rejected*.
 """

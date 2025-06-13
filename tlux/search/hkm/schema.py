@@ -1,6 +1,7 @@
 """Shared constants and lightweight data structures."""
 
-from dataclasses import dataclass
+import numpy as np
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 
 # ---------------------------------------------------------------------------
@@ -15,6 +16,26 @@ DESCEND_K = 8
 HEAP_FACTOR = 4
 SHARD_MAX_BYTES = 8 * 2**20
 
+# ----------------------------------------------------------------------
+# Binary layout dtypes (shared by builder & loader)
+
+DOC_META_DTYPE = np.dtype(
+    [
+        ("doc_id",   np.uint64),
+        ("num_token_count", np.float32),  # Number of tokens in document
+        ("text_off", np.uint64),
+        ("text_len", np.uint32),
+    ]
+)
+
+DOC_INDEX_DTYPE = np.dtype(
+    [
+        ("doc_id", np.uint64),
+        ("worker", np.uint32),
+        ("shard",  np.uint32),
+        ("idx",    np.uint32),
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -28,12 +49,16 @@ class BuildConfig:
 
 @dataclass
 class QuerySpec:
-    """Normalized query specification."""
+    """Normalized query specification.
 
-    embeddings: List
-    token_sequence: List[int]
-    label_include: Dict[str, List[str]]
-    numeric_range: Dict[str, Tuple]
+    * ``text`` - raw UTF-8 substring to search for.  
+    * ``token_sequence`` - low-level token IDs (reserved for later HKM path).  
+    """
+    text: str = ""
+    embeddings: List = field(default_factory=list)
+    token_sequence: List[int] = field(default_factory=list)
+    label_include: Dict[str, List[str]] = field(default_factory=dict)
+    numeric_range: Dict[str, Tuple] = field(default_factory=dict)
     top_k: int = 10
 
 

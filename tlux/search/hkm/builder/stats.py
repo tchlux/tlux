@@ -28,7 +28,7 @@ def _compute_numeric_hist(
 ) -> List[List[float]]:
     """Return histogram triples ``[lo, hi, count]``.
 
-    If *n_bins* is *None*, the **Freedman–Diaconis** rule is used to pick
+    If *n_bins* is *None*, the **Freedman-Diaconis** rule is used to pick
     an adaptive bin width that balances resolution and robustness.
     """
 

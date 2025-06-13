@@ -1,6 +1,7 @@
 """Top-level search facade."""
 
 import json
+import struct
 from dataclasses import dataclass
 from typing import List
 
@@ -24,17 +25,39 @@ class Searcher:
         with self.fs.open(manifest_path) as f:
             return [json.loads(line) for line in f]
 
+
+    def _ints_to_le_bytes(ints: List[int]) -> bytes:
+        """Pack each int32 little-endian so ids >255 are supported."""
+        return b"".join(struct.pack("<I", x) for x in ints)
+
     def search(self, query_dict) -> SearchResult:
-        spec = parse_query(json.dumps(query_dict)) if isinstance(query_dict, dict) else query_dict
+        # Normalise input
+        spec = (
+            parse_query(json.dumps(query_dict))
+            if isinstance(query_dict, dict)
+            else query_dict
+        )
         hits: List[Hit] = []
         manifest = self._load_manifest()
-        token_bytes = bytes(spec.token_sequence)
-        for entry in manifest:
-            with self.fs.open(entry["path"], "rb") as f:
-                data = f.read()
-            idx = data.find(token_bytes)
-            if idx != -1:
-                hits.append(Hit(doc_id=entry["doc_id"], score=1.0, span=(idx, idx + len(token_bytes))))
-                if len(hits) >= spec.top_k:
-                    break
+        # Decide search mode
+        if spec.text:
+            query_bytes = spec.text.lower().encode("utf-8")
+            for entry in manifest:
+                with self.fs.open(entry["path"], "rb") as f:
+                    data = f.read().lower()
+                pos = data.find(query_bytes)
+                if pos != -1:
+                    hits.append(Hit(entry["doc_id"], 1.0, (pos, pos + len(query_bytes))))
+                    if len(hits) >= spec.top_k:
+                        break
+        elif spec.token_sequence:
+            query_bytes = _ints_to_le_bytes(spec.token_sequence)
+            for entry in manifest:
+                with self.fs.open(entry["path"], "rb") as f:
+                    data = f.read()
+                pos = data.find(query_bytes)
+                if pos != -1:
+                    hits.append(Hit(entry["doc_id"], 1.0, (pos, pos + len(query_bytes))))
+                    if len(hits) >= spec.top_k:
+                        break
         return SearchResult(docs=hits)

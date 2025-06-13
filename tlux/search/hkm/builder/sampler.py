@@ -4,7 +4,7 @@ This module provides two independent helpers used by the index builder:
 
 * **Reservoir sampling** for uniformly selecting *k* items from a stream
   of unknown or very large size using O(k) memory.
-* **k-means++ sampling** to obtain initial centroids for Lloyd’s
+* **k-means++ sampling** to obtain initial centroids for Lloyd's
   iterations.  The implementation is NumPy-only and follows the original
   Arthur & Vassilvitskii 2007 algorithm.
 """
@@ -61,7 +61,7 @@ def kmeanspp_sample(
     data:
         2-D array-like of shape ``(n, d)``.
     k:
-        Desired number of centroids (``1 ≤ k ≤ n``).
+        Desired number of centroids (``1 <= k <= n``).
     seed:
         Optional RNG seed for reproducible selection.
 

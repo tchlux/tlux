@@ -29,7 +29,7 @@ class BloomFilter:
     bits:
         Underlying bit-array (least-significant bit of ``bits[0]`` is bit 0).
     hash_count:
-        Number of hash functions (``k``).  Must be ``≥ 1``.
+        Number of hash functions (``k``).  Must be ``>= 1``.
     """
 
     bits: bytearray

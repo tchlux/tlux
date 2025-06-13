@@ -51,7 +51,7 @@ def kmeans(
     data:
         Array of shape ``(n, d)`` containing *n* ``float32`` embeddings.
     k:
-        Number of clusters (``1 ≤ k ≤ 4096``).
+        Number of clusters (``1 <= k <= 4096``).
     max_iter:
         Maximum number of Lloyd iterations.
     tol:

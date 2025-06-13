@@ -1,7 +1,7 @@
 """Preview chunk selection utilities.
 
 During index build, each HKM node stores a **preview set** of *128* chunk
-IDs – half *representative* (uniform random) and half *diverse* (greedy
+IDs - half *representative* (uniform random) and half *diverse* (greedy
 farthest-point).  The helpers below implement those two sampling
 strategies with an optional RNG seed for reproducibility.
 """
@@ -50,7 +50,7 @@ def select_diverse(
     embeddings:
         ``(n, d)`` array of *float32* chunk embeddings.
     k:
-        Number of points to select (``1 ≤ k ≤ n``).
+        Number of points to select (``1 <= k <= n``).
     seed:
         Optional RNG seed controlling the first anchor selection.
 

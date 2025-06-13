@@ -1,0 +1,12 @@
+# Core numerical stack
+numpy>=1.24
+
+# Contriever model + tokenizer
+torch>=2.1.0          # CPU or CUDA wheels as preferred
+transformers>=4.40.0
+sentencepiece>=0.1.99 # some tokenisers depend on it
+
+# Facebook research Contriever wrapper
+# contriever @ git+https://github.com/facebookresearch/contriever.git
+
+pytest>=7.0.0

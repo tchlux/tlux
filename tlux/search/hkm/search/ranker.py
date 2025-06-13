@@ -21,22 +21,22 @@ __all__ = ["rank"]
 
 
 def _pairwise_sq_l2(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Return matrix ``D[i, j] = ||a[i] - b[j]||²``.
+    """Return matrix ``D[i, j] = ||a[i] - b[j]||^2``.
 
     The computation is performed in *float32* regardless of the original
     dtype to minimise memory bandwidth while retaining adequate
     precision for ANN search.  Broadcasting formula:
 
-        ||x − y||² = ||x||² + ||y||² − 2 x·y.
+        ||x - y||^2 = ||x||^2 + ||y||^2 - 2 x*y.
     """
     a = np.asarray(a, dtype=np.float32)
     b = np.asarray(b, dtype=np.float32)
 
     # Pre-compute squared norms once for each side
     a_norm = (a ** 2).sum(axis=1, keepdims=True)
-    b_norm = (b ** 2).sum(axis=1, keepdims=True).T  # row → col vector
+    b_norm = (b ** 2).sum(axis=1, keepdims=True).T  # row -> col vector
 
-    # D = ||a||² + ||b||²ᵀ − 2 a·bᵀ
+    # D = ||a||^2 + ||b||^2^T - 2 a*b^T
     return a_norm + b_norm - 2.0 * np.matmul(a, b.T, dtype=np.float32)
 
 
@@ -52,7 +52,7 @@ def rank(
     queries:
         ``(q, d)`` array of float32 query vectors.
     top_k:
-        Number of nearest neighbours to return (``1 ≤ top_k ≤ n``).
+        Number of nearest neighbours to return (``1 <= top_k <= n``).
 
     Returns
     -------

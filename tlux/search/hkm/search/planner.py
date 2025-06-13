@@ -8,6 +8,7 @@ def parse_query(json_str: str) -> QuerySpec:
     """Parse a JSON string into a :class:`QuerySpec`."""
     obj = json.loads(json_str)
     return QuerySpec(
+        text=obj.get("text", ""),
         embeddings=obj.get("embeddings", []),
         token_sequence=obj.get("token_sequence", []),
         label_include=obj.get("label_include", {}),
