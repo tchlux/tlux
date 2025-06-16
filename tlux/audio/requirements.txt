@@ -1,0 +1,8 @@
+scipy
+pyaudio
+soundfile
+sounddevice
+kokoro
+silero-vad
+faster-whisper
+llama-cpp-python
