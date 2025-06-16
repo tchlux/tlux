@@ -111,7 +111,7 @@ Both build and search work with **whole-file** reads/writes only.
 
 Directory structure (fixed):
 
-    index_root/
+    index/
       docs/                                # immutable micro-shards
         worker_0000/
           doc_index.npy                    # sorted table (DOC_INDEX_DTYPE)
@@ -121,30 +121,36 @@ Directory structure (fixed):
           ...
         worker_0001/
           ...
-      hkm/                                 # ANN hierarchy
-        node_root/                         # depth 0
+      tree/                                 # ANN hierarchy
+        docs/
+          doc_index.npy  # Shard number, num docs, min_id, max_id, content length, shard bloom
+          shard_000000000000.content.bin
+          shard_000000000000.meta.npy
+          ...
+        embeddings/
+          shard_0000.npy      (<= 8 MB, 256 k x 1024 x 4 B)
+          ...
+        centroids.npy         (<= 4096 x 1024 float32)
+        stats.json
+        preview_random.npy    (512 x uint64 chunk_id, doc contents)
+        preview_diverse.npy   (512 x uint64 chunk_id, doc contents)
+        bloom.bin             n-gram presence hash for all docs in this node
+        cluster_0000/       # depth-first children
+          docs/
           embeddings/
-            shard_0000.npy      (<= 8 MB, 256 k x 1024 x 4 B)
-            ...
-          centroids.npy         (<= 4096 x 1024 float32)
+          centroids.npy
           stats.json
-          preview_random.npy    (64 x uint64 chunk_id)
-          preview_diverse.npy   (64 x uint64 chunk_id)
-          bloom.bin
-          node_root_0003/                  # depth-first children
+          ...
+          cluster_0000_0000/
+            docs/
             embeddings/
             centroids.npy
             stats.json
-            ...
-            node_root_0003_0019/
-              embeddings/
-              centroids.npy
-              stats.json
-              preview_random.npy
-              preview_diverse.npy
-              bloom.bin
-              embed.npy          (leaf copy <= 8 MB)
-              chunk_meta.npy     (leaf meta <= 8 MB)
+            preview_random.npy
+            preview_diverse.npy
+            bloom.bin
+            embed.npy          (leaf copy <= 8 MB)
+            chunk_meta.npy     (leaf meta <= 8 MB)
 
 Binary format: little-endian NumPy `.npy` v2.
 
@@ -153,8 +159,8 @@ Structured dtypes
   DOC_META_DTYPE (stored inside each docs/ shard)
 
         [('doc_id',   uint64),
-         ('cat0',     uint32), ... up to 20 cols ...,
-         ('num0',     float32), ...                ,
+         ('cat0',     uint32), ... up to 32 cols ...,
+         ('num0',     float32), ... up to 32 cols ...,
          ('text_off', uint64),
          ('text_len', uint32)]
 
@@ -198,7 +204,7 @@ PHASE B - Shard Worker (parallel)
 PHASE C - HKM Builder (parallel by subtree)  
   1.  For a subtree: sample 256 k embeddings -> <= 4096-way k-means.  
   2.  Assign embeddings, write `centroids.npy`, `stats.json`, `bloom.bin`.  
-  3.  Choose 64 random + 64 farthest-point previews, save.  
+  3.  Choose 512 random + 512 farthest-point previews, save.  
   4.  Copy subtree embeddings into `embeddings/shard_*.npy` (<= 8 MB each).  
   5.  Recurse until leaf <= 256 k chunks, then write `embed.npy`,
       `chunk_meta.npy`.  
@@ -288,7 +294,7 @@ signatures, and docstrings explaining their contract.
 ===============================================================================
 
     LEAF_MAX_CHUNKS        = 256_000
-    PREVIEW_CHUNKS         = 128        # 64 random + 64 diverse
+    PREVIEW_CHUNKS         = 1024        # 512 random + 512 diverse
     WINDOW_SIZES           = (8, 32, 128, 512)
     STRIDE_FACTOR          = 0.5
     BLOOM_FP_RATE          = 0.01

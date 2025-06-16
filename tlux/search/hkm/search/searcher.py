@@ -39,9 +39,13 @@ class Searcher:
 
 
     @staticmethod
-    def _ints_to_le_bytes(ints: List[int]) -> bytes:
-        """Pack each int32 little-endian so ids >255 are supported."""
-        return b"".join(struct.pack("<I", x) for x in ints)
+    def _ngrams_to_le_bytes(tokens: List[int]) -> List[bytes]:
+        """Return packed 1- to 3-grams from tokens as little-endian byte sequences."""
+        out = []
+        for i in range(len(tokens)):
+            for j in range(i + 1, min(len(tokens) + 1, i + 4)):
+                out.append(struct.pack("<" + "I" * (j - i), *(int(t) for t in tokens[i:j])))
+        return out
 
 
     def search(self, query_dict) -> SearchResult:
@@ -65,17 +69,12 @@ class Searcher:
                     if len(hits) >= spec.top_k:
                         break
         elif spec.token_sequence:
-            seq_bytes = self._ints_to_le_bytes(spec.token_sequence)
+            ngrams = self._ngrams_to_le_bytes(spec.token_sequence)
             for entry in manifest:
                 bloom_path = entry.get("bloom")
                 if bloom_path:  # quick reject if Bloom says impossible
                     bf = _load_bloom(bloom_path)
-                    maybe = True
-                    for t in spec.token_sequence:
-                        if struct.pack("<I", t) not in bf:
-                            maybe = False
-                            break
-                    if not maybe:
+                    if any(ngram not in bf for ngram in ngrams):
                         continue  # definitely absent, skip I/O
                 with self.fs.open(entry["path"], "rb") as f:
                     data = f.read()

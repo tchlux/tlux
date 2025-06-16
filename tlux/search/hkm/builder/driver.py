@@ -63,8 +63,9 @@ class IndexBuilder:
                 # ------------------------------------------------------
                 bf = BloomFilter.create(capacity=tokens.size, fp_rate=BLOOM_FP_RATE)
                 pack = struct.pack
-                for tid in tokens:
-                    bf.add(pack("<I", int(tid)))
+                for t1 in range(len(tokens)):
+                    for t2 in range(t1+1, min(len(tokens), t1+4)):
+                        bf.add(pack("<" + "I"*(t2-t1), *(int(t) for t in tokens[t1:t2])))
                 bloom_path = self.fs.join(hkm_dir, f"bloom_{i:08d}.bin")
                 with self.fs.open(bloom_path, "wb") as bf_out:
                     bf_out.write(bf.to_bytes())

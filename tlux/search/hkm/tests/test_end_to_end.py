@@ -79,14 +79,14 @@ def test_full(tmp_path: Path) -> None:
     text = store.get(hits.docs[0].doc_id)
     assert "Hello big world" in text
 
-    # -- 4. cleanup ----------------------------------------------------
-    shutil.rmtree(index_root)
+    # # -- 4. cleanup ----------------------------------------------------
+    # shutil.rmtree(index_root)
 
 
 if __name__ == "__main__":
     temp_dir = Path(os.path.expanduser("~/Git/tlux/tlux/search/hkm/tests/tmp"))
     os.makedirs(temp_dir, exist_ok=True)
     test_full(temp_dir)
-    shutil.rmtree(temp_dir)
+    # shutil.rmtree(temp_dir)
 
     # cd .. && source .env/bin/activate && pytest tests/ --pdb
