@@ -43,7 +43,7 @@ LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
 
 try:
     from llama_cpp.llama import Llama, LlamaGrammar
-    from llama_cpp.llama_cache import LlamaDiskCache
+    # from llama_cpp.llama_cache import LlamaDiskCache
 
     # Grammar for stricly "yes" / "no" outputs.
     YES_NO = LlamaGrammar.from_string(r'''
@@ -151,6 +151,9 @@ def chat_complete(lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=DEFA
     # If only messages were provided, extract out the prompt as the last one.
     if (prompt is None) and (len(messages) > 0):
         messages, prompt = messages[:-1], messages[-1]
+        if type(prompt) is dict:
+            assert (prompt["role"] == "user"), "Expected the last message to be from the user."
+            prompt = prompt["content"]
     # If a string was given as a grammar, convert it into a llama grammar.
     if (type(grammar) is str):
         if ("root ::=" not in grammar):
