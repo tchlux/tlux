@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from transformers import AutoTokenizer
-from .contriever.contriever import Contriever
+from .contriever import Contriever
 
 
 class ContrieverEmbedder:

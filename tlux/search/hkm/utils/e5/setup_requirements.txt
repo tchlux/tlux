@@ -1,0 +1,6 @@
+optimum
+transformers
+onnxruntime
+onnx
+numpy
+tokenizers

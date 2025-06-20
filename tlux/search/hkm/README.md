@@ -1,14 +1,11 @@
 ```
+
 ===============================================================================
 hkm - Hierarchical-K-Means Large-Scale Search Toolkit
 ===============================================================================
 
 Author : Thomas C.H. Lux                  Version : 0.1-spec  
 Date   : 2025-06-07                       License : MIT (proposed)
-
-This file is a **stand-alone specification**.  Hand it to any engineer with
-Python + NumPy experience and they can build the system exactly as intended,
-without needing prior context or extra guidance.
 
 -------------------------------------------------------------------------------
 TABLE OF CONTENTS
@@ -41,10 +38,10 @@ We must index **up to 100 B documents** (< 1 MB UTF-8 each) and support
 Hard constraints
 
   *  Pure CPython 3.x, **only** external dependency is NumPy  
-  *  CPU-only; no GPU, no AVX512 contract  
+  *  Works on CPU or GPU, but cheap enough that CPU is realistic
   *  RAM per process 4 - 32 GB  
   *  Storage is a remote file/object store with *whole-file reads only*  
-     (no range GET).  Atomic `mkdir` is available.  
+     (no range get). Atomic `mkdir` is available.  
   *  Preferred block sizes: 8 MB or 64 MB; bandwidth ~= 64 MB s-^1  
   *  Latency goal: < 1 s p95; first preview ~= 100 ms  
   *  Index is rebuilt offline; no live mutations required  
@@ -63,7 +60,7 @@ k-means (HKM) tree**:
   *  Sample 256 k embeddings -> <= 4096-way k-means -> assign -> recurse  
      until a leaf <= 256 k chunks.  
   *  A query visits O(log N) nodes and touches << 1 % of embeddings.  
-  *  All binary files are bounded to 8 MB, fitting the whole-file rule.
+  *  All binary files are bounded to 8-64 MB
 
 **Instant feedback requirement**
 
@@ -106,51 +103,51 @@ k-means (HKM) tree**:
 Both build and search work with **whole-file** reads/writes only.
 
 ===============================================================================
-4.  DATA MODEL AND ON-DISK LAYOUT
+4.  DATA MODEL AND FILE SYSTEM LAYOUT
 ===============================================================================
 
 Directory structure (fixed):
 
-    index/
-      docs/                                # immutable micro-shards
+    index/                                 # Nearest Cluster Centroid hierarchy
+      docs/                                # randomized docs broken up by number of workers
         worker_0000/
           doc_index.npy                    # sorted table (DOC_INDEX_DTYPE)
-          shard_00000000.bin               # (<= 8 MB raw UTF-8 text)
+          shard_00000000.bin               # (<= 8 MB tokenized text)
           shard_00000000.meta.npy          # DOC_META_DTYPE rows (one per doc)
           shard_00000001.bin
           ...
         worker_0001/
           ...
-      tree/                                 # ANN hierarchy
+      embeddings/
+        shard_0000.npy      # (<= 8 MB, 256 k x 1024 x 4 B)
+        ...
+      centroids.npy         # (<= 4096 x 1024 float32)
+      stats.json            # category counts, numeric histograms
+      preview_random.npy    # (512 x uint64 chunk_id, 512-token doc preview, embedding)
+      preview_diverse.npy   # (512 x uint64 chunk_id, 512-token doc preview, embedding)
+      bloom.bin             # token n-gram presence hash bit mask for all docs in this node
+      cluster_0000/         # depth-first children
         docs/
-          doc_index.npy  # Shard number, num docs, min_id, max_id, content length, shard bloom
-          shard_000000000000.content.bin
-          shard_000000000000.meta.npy
           ...
         embeddings/
-          shard_0000.npy      (<= 8 MB, 256 k x 1024 x 4 B)
           ...
-        centroids.npy         (<= 4096 x 1024 float32)
+        centroids.npy
         stats.json
-        preview_random.npy    (512 x uint64 chunk_id, doc contents)
-        preview_diverse.npy   (512 x uint64 chunk_id, doc contents)
-        bloom.bin             n-gram presence hash for all docs in this node
-        cluster_0000/       # depth-first children
+        preview_random.npy
+        preview_diverse.npy
+        bloom.bin
+        cluster_0000/
           docs/
+            ...
           embeddings/
+            ...
           centroids.npy
           stats.json
-          ...
-          cluster_0000_0000/
-            docs/
-            embeddings/
-            centroids.npy
-            stats.json
-            preview_random.npy
-            preview_diverse.npy
-            bloom.bin
-            embed.npy          (leaf copy <= 8 MB)
-            chunk_meta.npy     (leaf meta <= 8 MB)
+          preview_random.npy
+          preview_diverse.npy
+          bloom.bin
+        ...
+      ...
 
 Binary format: little-endian NumPy `.npy` v2.
 
@@ -176,13 +173,13 @@ Structured dtypes
 `stats.json` schema (per node)
 
     {
+      "doc_id_min"    : 123,
+      "doc_id_max"    : 456,
       "labels_bitset" : "<hex>",
       "numeric_min"   : [...],
       "numeric_max"   : [...],
       "labels_count"  : {"lang:en": 31231, ...},
-      "numeric_hist"  : {"year": [[1900,1950,12], ...]},
-      "doc_id_min"    : 123,
-      "doc_id_max"    : 456
+      "numeric_hist"  : {"year": [[1900,1950,12], ...]}
     }
 
 All per-node files are <= 8 MB.
@@ -300,18 +297,17 @@ signatures, and docstrings explaining their contract.
     BLOOM_FP_RATE          = 0.01
     KMEANS_MAX_K           = 4096
     DESCEND_K              = 8
-    HEAP_FACTOR            = 4          # candidate inflation
     SHARD_MAX_BYTES        = 8 * 2**20  # 8 MB
 
 ===============================================================================
 10. PERFORMANCE TARGETS  (32 vCPU, 16 GB RAM reference)
 ===============================================================================
 
-  *  Build throughput   > 1 M docs / min / worker  
-  *  Search cold-cache  p50 ~= 300 ms, p95 ~= 900 ms  
-  *  Preview first byte < 120 ms  
-  *  Serve RAM          < 512 MB resident + mmap  
-  *  Disk footprint     ~ 1.3 x raw embeddings (+metadata)
+  *  Build throughput   > 100K docs / min / worker
+  *  Search cold-cache  p50 ~= 300 ms, p95 ~= 900 ms
+  *  Preview first byte < 120 ms
+  *  Serve RAM          < 512 MB resident + mmap
+  *  Disk footprint     ~ 3 copies of all data
 
 ===============================================================================
 11. FUTURE WORK / OPEN QUESTIONS
