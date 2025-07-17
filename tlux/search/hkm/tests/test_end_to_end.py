@@ -11,7 +11,7 @@ import pytest
 from tlux.search.hkm import FileSystem
 from tlux.search.hkm import IndexBuilder, BuildConfig
 from tlux.search.hkm import Searcher, SearchResult, Hit
-from tlux.search.hkm.embedder import embed_text, tokenize
+from tlux.search.hkm.embedder import embed_windows, tokenize
 from tlux.search.hkm.search.filters import apply_filters
 from tlux.search.hkm.search.loader import DocumentStore
 from tlux.search.hkm.search.planner import parse_query

@@ -2,8 +2,8 @@
 
 from .fs import FileSystem
 from .schema import BuildConfig, QuerySpec, SearchResult, Hit
-from .builder.driver import IndexBuilder
-from .embedder import tokenize, embed_text
+from .builder.launcher import build_search_index
+from .embedder import tokenize, embed_windows
 from .search.searcher import Searcher
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "IndexBuilder",
     "Searcher",
     "tokenize",
-    "embed_text",
+    "embed_windows",
 ]

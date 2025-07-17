@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List
 
-from ..builder.bloom import BloomFilter
+from ..tools.value_seen_estimator import ValueObserver
 from ..fs import FileSystem
 from ..schema import Hit, SearchResult, QuerySpec
 from .planner import parse_query
@@ -16,7 +16,7 @@ from .planner import parse_query
 #  Bloom-filter loader (LRU cached)                                  #
 # ------------------------------------------------------------------ #
 @lru_cache(maxsize=1024)
-def _load_bloom(path: str) -> BloomFilter:
+def _load_bloom(path: str) -> HashBitMask:
     with open(path, "rb") as f:
         data = f.read()
     return BloomFilter.from_bytes(data)

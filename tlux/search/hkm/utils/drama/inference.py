@@ -1,19 +1,19 @@
 import os
 import numpy as np
-import onnxruntime as ort
 from tokenizers import Tokenizer
+from sentence_transformers import SentenceTransformer
 
 
 # Load once at module scope
 this_dir = os.path.dirname(__file__)
+model = SentenceTransformer("facebook/drama-base", trust_remote_code=True)
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 tokenizer = Tokenizer.from_file(os.path.join(this_dir, "tokenizer.json"))
-session = ort.InferenceSession(os.path.join(this_dir, "model_quantized.onnx"))
-
 
 # Special tokens
-FIRST_TOKEN    = 101
-LAST_TOKEN     = 102
-MAX_SEQ_LEN    = 512
+FIRST_TOKEN    = 128000
+LAST_TOKEN     = 128001
+MAX_SEQ_LEN    = 8192
 
 
 # Tokenizes a list of texts using batch encoding and strips BOS/EOS.
@@ -57,39 +57,12 @@ def embed(
     role: str = "doc",
 ) -> np.ndarray:
     assert role in {"doc", "query"}, "role must be 'doc' or 'query'"
-    # Reserve space for [FIRST] + [LAST]
-    body_max = max_len - 2
-    batch_size = len(token_ids)
-    # Build each sequence with special tokens
-    sequences = []
-    lengths = []
-    for ids in token_ids:
-        if (len(ids) > body_max): body = ids[:body_max]
-        else:                     body = ids
-        seq = [FIRST_TOKEN] + body + [LAST_TOKEN]
-        sequences.append(seq)
-        lengths.append(len(seq))
-    # Pad sequences and build attention mask
-    seq_len = max(lengths)
-    input_ids = np.zeros((batch_size, seq_len), dtype=np.int64)
-    attention_mask = np.zeros_like(input_ids)
-    for i, seq in enumerate(sequences):
-        L = lengths[i]
-        input_ids[i, :L]      = seq
-        attention_mask[i, :L] = 1
-    token_type_ids = np.zeros_like(input_ids)
-    # Prepare ONNX inputs; omit token_type_ids if graph doesn't require them
-    ort_inputs = {
-        "input_ids":      input_ids,
-        "attention_mask": attention_mask,
-        "token_type_ids": token_type_ids,
-    }
-    # Run inference
-    last_hidden = session.run(None, ort_inputs)[0]  # (batch, seq_len, hidden_dim)
-    # Mean-pool over tokens then L2-normalize
-    mask_f = attention_mask.astype(np.float32)[..., None]
-    pooled = (last_hidden * mask_f).sum(1) / mask_f.sum(1)
-    return pooled  #  / np.linalg.norm(pooled, axis=1, keepdims=True)
+    sentences = detokenize(token_ids)
+    if role == "doc":
+        result = model.encode_document(sentences)
+    else:
+        result = model.encode_query(sentences)
+    return result
 
 
 if __name__ == "__main__":

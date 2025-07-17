@@ -108,44 +108,42 @@ Both build and search work with **whole-file** reads/writes only.
 
 Directory structure (fixed):
 
-    index/                                 # Nearest Cluster Centroid hierarchy
-      docs/                                # randomized docs broken up by number of workers
+    index/                    # Nearest Cluster Centroid hierarchy
+      config.json             # Search index config, column names, size, ...
+      summary/
+        centroids.npy         # (<= 4096 x 1024 float32)
+        stats.json            # category counts, numeric histograms
+        preview_random.npy    # (512 x uint64 chunk_id, 512-token doc preview, embedding)
+        preview_diverse.npy   # (512 x uint64 chunk_id, 512-token doc preview, embedding)
+        category_counter.bin  # optional unique-value counters for all categories in this node
+        hashbitmask.bin       # optional token n-gram presence hash bit mask for all docs in this node
+      docs/                   # randomized docs broken up by number of workers
+        meta/
+          worker_0000_counters.bin  # All unique-value counters for categories from workers
+          ...
         worker_0000/
-          doc_index.npy                    # sorted table (DOC_INDEX_DTYPE)
-          shard_00000000.bin               # (<= 8 MB tokenized text)
-          shard_00000000.meta.npy          # DOC_META_DTYPE rows (one per doc)
-          shard_00000001.bin
+          doc_index.npy            # sorted table (DOC_INDEX_DTYPE)
+          shard_00000000.bin       # (<= 8 MB tokenized text)
+          shard_00000000.meta.npy  # DOC_META_DTYPE rows (one per doc)
           ...
-        worker_0001/
-          ...
-      embeddings/
-        shard_0000.npy      # (<= 8 MB, 256 k x 1024 x 4 B)
         ...
-      centroids.npy         # (<= 4096 x 1024 float32)
-      stats.json            # category counts, numeric histograms
-      preview_random.npy    # (512 x uint64 chunk_id, 512-token doc preview, embedding)
-      preview_diverse.npy   # (512 x uint64 chunk_id, 512-token doc preview, embedding)
-      bloom.bin             # token n-gram presence hash bit mask for all docs in this node
-      cluster_0000/         # depth-first children
+      embeddings/
+        worker_0000_batch_000000.npy  # (<= 8 MB, 256 k x 1024 x 4 B)
+        ...
+      cluster_0000/     # recursively structured subdirectories
+        summary/
+          ...
         docs/
           ...
         embeddings/
           ...
-        centroids.npy
-        stats.json
-        preview_random.npy
-        preview_diverse.npy
-        bloom.bin
         cluster_0000/
+          summary/
+            ...
           docs/
             ...
           embeddings/
             ...
-          centroids.npy
-          stats.json
-          preview_random.npy
-          preview_diverse.npy
-          bloom.bin
         ...
       ...
 
@@ -200,7 +198,7 @@ PHASE B - Shard Worker (parallel)
 
 PHASE C - HKM Builder (parallel by subtree)  
   1.  For a subtree: sample 256 k embeddings -> <= 4096-way k-means.  
-  2.  Assign embeddings, write `centroids.npy`, `stats.json`, `bloom.bin`.  
+  2.  Assign embeddings, write `centroids.npy`, `stats.json`, `hashbitmask.bin`.  
   3.  Choose 512 random + 512 farthest-point previews, save.  
   4.  Copy subtree embeddings into `embeddings/shard_*.npy` (<= 8 MB each).  
   5.  Recurse until leaf <= 256 k chunks, then write `embed.npy`,
@@ -221,8 +219,8 @@ All writes are "write-temp -> rename" for crash safety.
        - first `preview_random.npy`, then `preview_diverse.npy`.  
  4  **Leaf ranking**: load `embed.npy`, compare query vectors to matching
     `win_size`, keep heap of top-k chunks.  
- 5  **Exact token check** (optional): use `bloom.bin`; load full text only
-    if bloom says "possible".  
+ 5  **Exact token check** (optional): use `hashbitmask.bin`; load full text only
+    if hash bit mask says "possible".  
  6  Aggregate best chunk per document -> return top-k docs.
 
 ===============================================================================
@@ -267,12 +265,12 @@ namedtuples and lists.
         sampler.py         (reservoir & k-means++ samplers)
         kmeans.py          (<= 4096-way Lloyd in NumPy)
         stats.py           (label & numeric aggregations)
-        bloom.py           (bit-array bloom filter)
+        hashbitmask.py     (bit-array hash bit mask)
         preview.py         (random + farthest-point selection)
         writer.py          (atomic directory emitters)
       search/
         planner.py         (JSON -> QuerySpec)
-        filters.py         (predicates, bloom check, bound estimate)
+        filters.py         (predicates, hashbitmask check, bound estimate)
         descent.py         (HKM traversal + preview streaming)
         ranker.py          (NumPy distance + heap top-k)
         searcher.py        (top-level facade)
@@ -294,7 +292,7 @@ signatures, and docstrings explaining their contract.
     PREVIEW_CHUNKS         = 1024        # 512 random + 512 diverse
     WINDOW_SIZES           = (8, 32, 128, 512)
     STRIDE_FACTOR          = 0.5
-    BLOOM_FP_RATE          = 0.01
+    HASHBITMASK_FP_RATE    = 0.01
     KMEANS_MAX_K           = 4096
     DESCEND_K              = 8
     SHARD_MAX_BYTES        = 8 * 2**20  # 8 MB

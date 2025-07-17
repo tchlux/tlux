@@ -1,0 +1,14 @@
+onnx
+onnxruntime
+transformers
+sentence_transformers
+optimum
+tokenizers
+numpy
+
+# torch>=2.4.1
+# onnx>=1.16.0
+# transformers>=4.43.0
+# optimum>=1.16.0
+# tokenizers>=0.19
+# numpy>=1.26,<2

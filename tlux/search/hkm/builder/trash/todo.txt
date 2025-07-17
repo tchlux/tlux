@@ -1,0 +1,1 @@
+All the unique counters should be written to their own directory by the workers, and the metadata merger should merge all of them in a directory.

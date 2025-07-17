@@ -1,100 +1,120 @@
-"""Contriever-based tokenizer and embedding generator.
-
-This replaces the original *random* embedding stub with a production
-wrapper around **facebook/contriever**.  All public function signatures
-remain identical so callers need *no* changes.
+"""
+Text tokenizer and embedding generator.
 """
 
-from __future__ import annotations
+# Module for generating text embeddings.
 
 from functools import lru_cache
-from typing import Dict, List
-
+from collections import defaultdict
 import numpy as np
-import torch
-from transformers import AutoTokenizer
 
-from .utils.contriever_embedder import ContrieverEmbedder
-
-from .schema import STRIDE_FACTOR, WINDOW_SIZES
-
-# ---------------------------------------------------------------------------
-# Model + tokenizer: load once per process
-# ---------------------------------------------------------------------------
-
-_DEVICE = None
-_EMBEDDER = ContrieverEmbedder()
-_TOKENIZER = _EMBEDDER.tokenizer
-_MODEL = _EMBEDDER.model
-_DEVICE = _EMBEDDER.device
+from .utils.drama.inference import tokenize, detokenize, embed
+# from .utils.contriever.inference import tokenize, detokenize, embed
+# from .utils.e5.inference import tokenize, detokenize, embed
 
 
-# ---------------------------------------------------------------------------
-# Tokenisation helper
-# ---------------------------------------------------------------------------
+MAX_SEQ_LEN = 8192  # 512
+DEFAULT_WINDOWS = (32, 128, 512, 1024)  # (8, 32, 128, 512, 1024) 
+DEFAULT_OVERLAP = 0.5
 
-def tokenize(text: str) -> np.ndarray:
-    """Return 1-D NumPy array of token ids (int64)."""
-    ids: List[int] = _TOKENIZER.encode(text, add_special_tokens=False)
-    return np.asarray(ids, dtype=np.int64)
-
-
-# ---------------------------------------------------------------------------
-# Internal single-window embed util
-# ---------------------------------------------------------------------------
-
-@lru_cache(maxsize=1024)  # memoise repeated windows within a doc
-def _embed_window(token_tuple: tuple[int, ...]) -> np.ndarray:
-    ids_tensor = (
-        torch.tensor(token_tuple, dtype=torch.long, device=_DEVICE).unsqueeze(0)
-    )  # (1, L)
-    attn = torch.ones_like(ids_tensor)
-    with torch.no_grad():
-        hs = _MODEL(input_ids=ids_tensor, attention_mask=attn) # .last_hidden_state
-        vec = hs.mean(dim=1).squeeze(0).cpu().numpy()
-    return vec.astype(np.float32, copy=False)
+# The following caching does not work because of list types.
+# # store the original embedding function without a cache
+# _embed_nocache = embed
+# # memoise repeated windows within a doc
+# embed = lru_cache(maxsize=1024)(embed)
 
 
-# ---------------------------------------------------------------------------
-# Public sliding-window embedder
-# ---------------------------------------------------------------------------
-
+# Computes embeddings for sliding windows over each token sequence,
+# grouping by window size to minimize padding waste.
+#
+# Args:
+#     token_ids_list:  List of full-token-ID sequences.
+#     window_sizes:    List of window sizes (e.g. [8,32,128,512]).
+#     window_overlap:  Fractional overlap between 0.0 and <1.0.
+#     max_len:         Global max length (defaults to 512).
+#     role:            'doc' or 'query' for prefix selection.
+#
+# Returns:
+#     embeddings:  np.ndarray of shape (total_windows, hidden_dim)
+#     windows:     List of (seq_index, start_index, window_length)
+# 
 def embed_windows(
-    tokens: np.ndarray, window_size: int, stride: int | None = None
-) -> np.ndarray:
-    """Embed sliding windows of *tokens*.
+    token_ids_list: list[list[int]],
+    window_sizes: list[int] = DEFAULT_WINDOWS,
+    window_overlap: float = DEFAULT_OVERLAP,
+    max_len: int = MAX_SEQ_LEN,
+    role: str = "doc",
+) -> tuple[np.ndarray, list[tuple[int,int,int]]]:
+    assert role in {"doc", "query"}, "role must be 'doc' or 'query'"
+    assert 0 <= window_overlap < 1, "overlap must be in [0,1)"
+    # 1) generate a flat list of all windows and remember where they came from
+    windows_meta: list[tuple[int,int,int]] = []
+    by_size: dict[int, list[tuple[int, list[int]]]] = defaultdict(list)
+    for seq_i, ids in enumerate(token_ids_list):
+        N = len(ids)
+        for w in window_sizes:
+            if (w > N) and (w > window_sizes[0]):
+                continue
+            step = max(1, int(w * (1.0 - window_overlap)))
+            starts = list(range(0, max(1, N - w + 1), step))
+            tail = N - w
+            if tail > 0 and starts[-1] != tail:
+                starts.append(tail)
+            for s in starts:
+                idx = len(windows_meta)
+                window_ids = ids[s : s + w]
+                by_size[w].append((idx, window_ids))
+                windows_meta.append((seq_i, s, len(window_ids)))
+    # 2) allocate output array
+    total = len(windows_meta)
+    # run one dummy pass to get hidden_dim
+    dummy_out = embed([[0]], role=role)
+    hidden_dim = dummy_out.shape[1]
+    embeddings = np.zeros((total, hidden_dim), dtype=np.float32)
+    # 3) embed each size-group in its own batch
+    for w, bucket in by_size.items():
+        indices, windows = zip(*bucket)
+        # each call pads to exactly w + prefix + 2
+        batch_emb = embed(
+            list(windows),
+            role=role,
+        )
+        for i, idx in enumerate(indices):
+            embeddings[idx] = batch_emb[i]
+    return embeddings, windows_meta
 
-    Parameters
-    ----------
-    tokens:
-        Array ``(n,)`` of *Contriever* token ids.
-    window_size:
-        Number of tokens per window (<=512 to satisfy model maximum).
-    stride:
-        Defaults to ``window_size * STRIDE_FACTOR``.
-    """
-    if stride is None:
-        stride = max(1, int(window_size * STRIDE_FACTOR))
-    if tokens.size < window_size:
-        return np.empty((0, _MODEL.config.hidden_size), dtype=np.float32)
-
-    out: List[np.ndarray] = []
-    for start in range(0, tokens.size - window_size + 1, stride):
-        slice_ids = tuple(tokens[start : start + window_size].tolist())
-        out.append(_embed_window(slice_ids))
-
-    if not out:
-        return np.empty((0, _MODEL.config.hidden_size), dtype=np.float32)
-    return np.stack(out, dtype=np.float32)
 
 
-def embed_text(text: str, window_sizes=WINDOW_SIZES) -> Dict[int, np.ndarray]:
-    """Tokenise *text* and return dict ``{window_size: embeddings}``."""
-    tokens = tokenize(text)
-    emb: Dict[int, np.ndarray] = {}
-    for w in window_sizes:
-        emb[w] = embed_windows(tokens, w)
-    return emb
+if __name__ == "__main__":
+    # Testing texts.
+    texts = [
+        "",
+        "The Eiffel Tower is in Paris.",
+        "There is a tower monument in Paris that is famous.",
+        "dogs around san francisco rarely wear leashes!",
+        "Dogs around San Francisco rarely wear leashes.",
+    ]
 
+    # Generate tokens and print
+    tokens = tokenize(texts)
+    print("Tokens:")
+    for t in tokens:
+        print("", repr(detokenize([t])[0]))
+        print("", "", t)
+    print()
 
-__all__ = ["tokenize", "embed_text", "embed_windows"]
+    # Generate embeddings and print snippet
+    vecs = embed(tokens)
+    print("Embedding shape:", vecs.shape)
+    print()
+    for v in vecs:
+        norm = round(np.linalg.norm(v), 2)
+        head = [round(x, 2) for x in v[:10].tolist()]
+        print(f" {norm} -- {head}")
+    print()
+
+    # Use the windowed embedder.
+    vecs, windows_meta = embed_windows(tokens)
+    print(vecs.shape)
+    print(windows_meta)
+

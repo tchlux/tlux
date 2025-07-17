@@ -1,10 +1,10 @@
-"""Bit-array hash bit mask (Bloom filter) implementation.
+"""Bit-array value observer via hash bit mask (Bloom filter) implementation.
 
 This implementation is *pure-Python* and relies only on the standard
 library.  The hash family is produced via **double hashing** on the
 SHA-256 digest, which offers reproducible cross-platform behaviour while
 avoiding extra dependencies.  A convenience constructor
-:meth:`HashBitMask.create` picks a bit-array length and number of hash
+:meth:`ValueObserver.create` picks a bit-array length and number of hash
 functions from a desired capacity / target false-positive rate, matching
 the analytical optimum *k = m/n ln 2*.
 """
@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-__all__ = ["HashBitMask"]
+__all__ = ["ValueObserver"]
 
 
 @dataclass
-class HashBitMask:
+class ValueObserver:
     """Simple hash bit mask backed by a *bytearray* bit-array.
 
     Parameters
@@ -42,7 +42,7 @@ class HashBitMask:
     @classmethod
     def create(
         cls, capacity: int, fp_rate: float = 0.01, align: int = 8
-    ) -> "HashBitMask":
+    ) -> "ValueObserver":
         """Return a *new* filter sized for *capacity* and *fp_rate*.
 
         The bit-array length ``m`` is rounded *up* to the nearest multiple
@@ -69,7 +69,7 @@ class HashBitMask:
     def _hashes(self, item: bytes) -> Iterable[int]:
         """Yield *k* distinct hash bucket indices via double hashing."""
         if not isinstance(item, (bytes, bytearray, memoryview)):
-            raise TypeError("item for HashBitMask must be bytes-like")
+            raise TypeError("item for ValueObserver must be bytes-like")
         digest = hashlib.sha256(item).digest()
         h1 = int.from_bytes(digest[:16], "little")
         h2 = int.from_bytes(digest[16:], "little") or 1  # ensure non-zero
@@ -91,7 +91,7 @@ class HashBitMask:
         for idx in self._hashes(item):
             self._set_bit(idx)
 
-    def __contains__(self, item: bytes) -> bool:  # noqa: Dunder/magic-name
+    def __contains__(self, item: bytes) -> bool:
         """Return ``True`` if *item* **may** be present; ``False`` if *definitely not*."""
         return all(self._test_bit(idx) for idx in self._hashes(item))
 
@@ -103,9 +103,9 @@ class HashBitMask:
         return struct.pack("<H", self.hash_count) + bytes(self.bits)
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "HashBitMask":
+    def from_bytes(cls, data: bytes) -> "ValueObserver":
         """Re-create filter from :py:meth:`to_bytes` output."""
         if len(data) < 2:
-            raise ValueError("data too short for HashBitMask")
+            raise ValueError("data too short for ValueObserver")
         k = struct.unpack("<H", data[:2])[0]
         return cls(bits=bytearray(data[2:]), hash_count=k)
