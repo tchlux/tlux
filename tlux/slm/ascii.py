@@ -235,6 +235,25 @@ def report_directory(root: Path, exclusions: List[str], repl: Dict[str, str]) ->
 # Rewrite Mode                                                                #
 # --------------------------------------------------------------------------- #
 
+
+def rewrite_text(text: str, repl: Dict[str, str]) -> Tuple[bool, str]:
+    """Perform character replacement on text and return a copy after applying *repl* mapping.."""
+    new_text = []
+    changed = False
+    for ch in text:
+        code = ord(ch)
+        if code < 128:
+            new_text.append(ch)
+        else:
+            if ch in repl:
+                new_text.append(repl[ch])
+            else:
+                # Unmapped chars are simply dropped
+                continue
+            changed = True
+    return changed, new_text
+
+
 def rewrite_directory(root: Path, exclusions: List[str], repl: Dict[str, str], dry_run: bool) -> None:
     """Replace non-ASCII chars in-place using *repl* mapping."""
     total_files = total_changed = 0
@@ -247,6 +266,7 @@ def rewrite_directory(root: Path, exclusions: List[str], repl: Dict[str, str], d
             print(f"[skip] {path.relative_to(root)} ({exc})")
             continue
 
+        changed, new_text = rewrite_text(text, repl)
         new_text = []
         changed = False
         for ch in text:
