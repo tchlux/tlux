@@ -16,10 +16,10 @@ from .planner import parse_query
 #  Bloom-filter loader (LRU cached)                                  #
 # ------------------------------------------------------------------ #
 @lru_cache(maxsize=1024)
-def _load_bloom(path: str) -> HashBitMask:
+def _load_bloom(path: str) -> ValueObserver:
     with open(path, "rb") as f:
         data = f.read()
-    return BloomFilter.from_bytes(data)
+    return ValueObserver.loads(data)
 
 
 @dataclass

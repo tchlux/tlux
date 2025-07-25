@@ -14,9 +14,10 @@
 import os
 import argparse
 
-from ..fs import FileSystem
-from ..jobs import spawn_job
-    
+try:                from ..fs import FileSystem
+except ImportError: from tlux.search.hkm.fs import FileSystem
+try:                from ..jobs import spawn_job
+except ImportError: from tlux.search.hkm.jobs import spawn_job
 
 
 # Function to build the search index by orchestrating worker processes.
