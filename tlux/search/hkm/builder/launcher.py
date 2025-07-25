@@ -104,7 +104,7 @@ def main() -> None:
     args = parser.parse_args()
 
     fs = FileSystem()
-    build_hkm_tree(fs, args.docs_dir, args.index_root, args.workers)
+    build_search_index(fs, args.docs_dir, args.index_root, args.workers)
 
 
 if __name__ == "__main__":  # pragma: no cover

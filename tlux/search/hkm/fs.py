@@ -104,11 +104,12 @@ class FileSystem:
     # Raises:
     #   RuntimeError: If refusing to overwrite existing file.
     # 
-    def write(self, path: str, data: bytes, overwrite: bool = True) -> None:
+    def write(self, path: str, data: bytes, overwrite: bool = True, mkdir: bool = True) -> None:
         if not overwrite and os.path.exists(path):
             raise RuntimeError(
                 f"Refusing to overwrite existing contents at '{path}'."
             )
+        if mkdir: os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
 

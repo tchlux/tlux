@@ -59,6 +59,7 @@ EMBEDDING_INDEX_TYPE = np.dtype([
     ('window_size', np.uint32),
 ])
 
+
 # Class to buffer document data in memory before saving it to disk.
 # Manages tokens, embeddings, and metadata, writing them to a chunk file when the
 # size limit is reached.
@@ -189,6 +190,7 @@ class ChunkBuffer:
             writer.close()
         self._setup_new_buffers()
 
+
 # Function to process documents by tokenizing, embedding, and organizing them into chunks.
 # Handles everything in one pass, saving data to disk when chunks are full.
 # Parameters:
@@ -206,10 +208,6 @@ def process_documents(
     file_system = FileSystem()
     file_system.mkdir(output_directory, exist_ok=True)
 
-    # Count how many fields are categorical or numerical
-    categorical_field_count = sum(1 for (name, typ) in metadata_schema if typ is str)
-    numerical_field_count = sum(1 for (name, typ) in metadata_schema if typ is float)
-
     # Track categories and their frequencies globally
     category_ids: Dict[str, int] = {}
     category_counts: Dict[str, int] = {}
@@ -218,7 +216,7 @@ def process_documents(
 
     chunk_buffer = ChunkBuffer(file_system, output_directory, chunk_size_limit, metadata_schema)
     document_id = 0
-    ngram_counter = UniqueCounter()  # Placeholder for unique n-gram counting
+    ngram_counter = UniqueCounter()
 
     for texts, metadata_list in document_batches:
         for text, metadata in zip(texts, metadata_list):
@@ -274,9 +272,10 @@ def process_documents(
 def default_worker(
     document_directory: str,
     output_directory: str,
-    metadata_schema: str = "[]",
+    metadata_schema: str = "[('name', 'str'), ('num_bytes', 'int')]",
     worker_index: int = 0,
     total_workers: int = 1,
+    chunk_size_limit: int = 8 * 2**20,
 ):
     # Convert metadata schema from JSON
     schema = json.loads(metadata_schema)
@@ -294,7 +293,7 @@ def default_worker(
         for file in my_files:
             text = file.read_text(encoding='utf-8')
             # Simplified: no metadata; real use would include metadata here
-            yield [text], [[]]
+            yield [text], [(file.name, len(text))]
 
     process_documents(
         output_directory,
@@ -313,12 +312,12 @@ def main():
     parser.add_argument('output_directory', help='Folder to save chunk files')
     parser.add_argument('--metadata_schema', type=str, default='[]',
                         help='JSON list of [field_name, "str" or "float"] pairs')
-    parser.add_argument('--chunk_size_limit', type=int, default=8 * 2**20,
-                        help='Maximum chunk size in bytes')
     parser.add_argument('--worker_index', type=int, default=0,
                         help='Index of this worker (0-based)')
     parser.add_argument('--total_workers', type=int, default=1,
                         help='Number of workers running in parallel')
+    parser.add_argument('--chunk_size_limit', type=int, default=8 * 2**20,
+                        help='Maximum chunk size in bytes')
     args = parser.parse_args()
     default_worker(
         document_directory=args.document_directory,
@@ -326,6 +325,7 @@ def main():
         metadata_schema=args.metadata_schema,
         worker_index=args.worker_index,
         total_workers=args.total_workers,
+        chunk_size_limit=args.chunk_size_limit,
     )
 
 
