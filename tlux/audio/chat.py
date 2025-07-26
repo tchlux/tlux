@@ -8,10 +8,6 @@ from tts import speak, is_speaking, interrupt
 def audio_chat():
     # Configuration parameters
     temperature = 0.5  # Controls randomness in response generation
-    context_size = 2048  # Maximum context size for the language model
-
-    # Load the language model
-    lm = load_lm(n_ctx=context_size)
 
     # Initialize conversation history with a system message
     system_prompt = """
@@ -54,8 +50,6 @@ You are an interactive voice-driven agent. Your responses are converted to audio
         print("Assistant:", flush=True)
         response = ""
         for response_part, stop_reason in chat_complete(
-            lm,
-            n_ctx=context_size,
             temperature=temperature,
             stream=True,
             messages=messages,
@@ -68,7 +62,10 @@ You are an interactive voice-driven agent. Your responses are converted to audio
         messages.append(dict(role="assistant", content=response))
 
         # Speak the response
-        speak(response)
+        try:
+            speak(response)
+        except RuntimeError:
+            messages.eppnd(dict(role="system", content="The last message failed to be spoken to the user. They did not hear it."))
 
         # Monitor for user interruption while speaking
         while is_speaking():

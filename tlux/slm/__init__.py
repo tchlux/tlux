@@ -15,8 +15,8 @@ import sys
 import time
 
 
-# # Disable logs for diskcache.
-# logging.getLogger("diskcache").setLevel(logging.WARNING)
+# Disable logs for diskcache.
+logging.getLogger("diskcache").setLevel(logging.WARNING)
 
 # Models downloaded with LMStudio will be in a path such as:
 #    ~/.cache/lm-studio/models/...
@@ -29,8 +29,8 @@ CACHE_PATH = os.path.expanduser('~/.slm.cache')
 # CHAT_FORMAT = "gemma"  # Google models
 CHAT_FORMAT = "chatml"  # Devstral and Qwen models
 
-DEFAULT_CTX = 1024
-DEFAULT_TEMP = 0.2
+DEFAULT_CTX = 8192
+DEFAULT_TEMP = 0.4
 DEFAULT_N_THREADS = 8
 LM = None
 COMPLETION = None
@@ -38,12 +38,14 @@ COMPLETION = None
 # Log directory for the inspectable chat logs.
 LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
 
+
 # ------------------------------------------------------------------------------------
 # Define useful grammars to constrain the output.
 
 try:
     from llama_cpp.llama import Llama, LlamaGrammar
-    # from llama_cpp.llama_cache import LlamaDiskCache
+    from llama_cpp.llama_cache import LlamaDiskCache
+    # from llama_cpp.llama_cache import LlamaRAMCache
 
     # Grammar for stricly "yes" / "no" outputs.
     YES_NO = LlamaGrammar.from_string(r'''
@@ -88,19 +90,25 @@ class suppress_stderr:
 
 
 # Load the model.
-def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, num_gpu_layers=-1, chat_format=CHAT_FORMAT, n_threads=DEFAULT_N_THREADS):
+def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, n_gpu_layers=-1, chat_format=CHAT_FORMAT, n_threads=DEFAULT_N_THREADS, **llama_kwargs):
     model_path = os.path.expanduser(model_path)
-    with suppress_stderr():
-        model = Llama(
-            model_path,
-            n_ctx=n_ctx,
-            embedding=embedding,
-            verbose=verbose,
-            num_gpu_layers=num_gpu_layers,
-            chat_format=chat_format,
-            n_threads=n_threads,
-        )
-    # model.set_cache(LlamaDiskCache(CACHE_PATH))  # This appears to have fixed debug print statments, not ready yet.
+    cache = LlamaDiskCache(CACHE_PATH)
+    _load_model = lambda: Llama(
+        model_path,
+        n_ctx=n_ctx,
+        embedding=embedding,
+        verbose=verbose,
+        n_gpu_layers=n_gpu_layers,
+        chat_format=chat_format,
+        n_threads=n_threads,
+        cache=cache,
+        **llama_kwargs
+    )
+    if verbose:
+        model = _load_model()
+    else:
+        with suppress_stderr():
+            model = _load_model()
     # Cache the loaded model globally.
     global LM
     LM = model
@@ -116,7 +124,7 @@ def truncate(lm, text, n_ctx=DEFAULT_CTX):
 # Get the completion for a prompt. Return it and the stop reason.
 #   "min_tokens" is the minimum number of tokens that there will be
 #   room for in the response before "n_ctx" is exhausted.
-def complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, **kwargs):
+def complete(*, lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, **kwargs):
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -143,7 +151,7 @@ def complete(lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX
 
 
 # Get the completion for a prompt using chat formatting. Return it and the stop reason.
-def chat_complete(lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), system="", **kwargs):
+def chat_complete(*, lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), system="", **kwargs):
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -474,8 +482,8 @@ if __name__ == '__main__':
         while True:
             # Then generate the completion.
             for (token, stop_reason) in generate_response(
-                lm,
-                prompt,
+                lm=lm,
+                prompt=prompt,
                 min_tokens=min_tokens,
                 max_tokens=max_tokens,
                 n_ctx=context_size,

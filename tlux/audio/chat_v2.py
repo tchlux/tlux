@@ -38,7 +38,7 @@ import time
 from queue import Queue, Empty
 from typing import List, Dict
 
-from tlux.slm import load_lm, chat_complete  # type: ignore
+from tlux.slm import chat_complete  # type: ignore
 
 import stt  # local package
 import tts  # local package

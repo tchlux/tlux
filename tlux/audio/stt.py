@@ -45,8 +45,8 @@ PRE_ROLL_MS          = 320            # audio to keep *before* speech start
 MIN_SEGMENT_SEC      = 0.30           # min duration Whisper will see
 SILENCE_ANNOUNCE_SEC = 2.0            # silence notice timeout
 # WHISPER_MODEL        = "base.en"
-WHISPER_MODEL        = "large-v3"
-# WHISPER_MODEL        = "distil-large-v3"  # alternative model option
+# WHISPER_MODEL        = "large-v3"
+WHISPER_MODEL        = "distil-large-v3"  # alternative model option
 DEVICE               = "cuda" if torch.cuda.is_available() else "cpu"
 FINISHED_TRANSCRIBING = threading.Event()
 
