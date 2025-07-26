@@ -32,7 +32,7 @@ from typing import Iterable
 # 
 @dataclass(frozen=True)
 class FileSystem:
-    root: str = ""
+    root: str = "/tmp/hkm_index"
 
     # Join one or more path components with the root.
     #
@@ -129,6 +129,34 @@ class FileSystem:
         except (OSError, shutil.Error):
             return False
 
+    # Remove a file or directory at the specified path.
+    #
+    # Parameters:
+    #   path (str): Path to file or directory to remove.
+    #   recursive (bool): If True (default), remove directory trees recursively.
+    #
+    # Raises:
+    #   FileNotFoundError: If the path does not exist.
+    #   RuntimeError: If recursive is False and path is a non-empty directory.
+    #
+    def remove(self, path: str, recursive: bool = True) -> None:
+        # Validate that the path exists before attempting removal.
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Path '{path}' does not exist.")
+        # If path is a directory.
+        if os.path.isdir(path):
+            if recursive:
+                shutil.rmtree(path)
+            else:
+                # Only remove empty directory; otherwise, error.
+                try:
+                    os.rmdir(path)
+                except OSError as e:
+                    raise RuntimeError(
+                        f"Directory '{path}' is not empty or cannot be removed without recursive=True."
+                    ) from e
+        else:
+            os.remove(path)
 
 if __name__ == "__main__":
     # Sanity check: write-read-rename cycle
@@ -139,3 +167,5 @@ if __name__ == "__main__":
     _new_path = _fs.join("demo_renamed.txt")
     assert _fs.rename(_path, _new_path)
     assert _fs.exists(_new_path)
+    _fs.remove(_new_path)
+    assert not _fs.exists(_new_path)
