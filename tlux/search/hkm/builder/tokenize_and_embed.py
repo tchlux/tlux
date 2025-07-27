@@ -43,9 +43,15 @@ from pathlib import Path
 from typing import Iterable, Tuple, Union, List, Dict
 
 import numpy as np
-from ..fs import FileSystem
-from ..embedder import tokenize, embed_windows
-from ..tools.unique_count_estimator import UniqueCounter
+try:
+    from ..fs import FileSystem
+    from ..embedder import tokenize, embed_windows
+    from ..tools.unique_count_estimator import UniqueCounter
+except ImportError:
+    from tlux.search.hkm.fs import FileSystem
+    from tlux.search.hkm.embedder import tokenize, embed_windows
+    from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
+    
 
 # Type definitions for better readability
 DocumentBatch = Iterable[Tuple[List[str], List[List[Union[str, float]]]]]
@@ -332,3 +338,26 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# Process all .txt files in the current directory and write chunks to ./tests/index.
+# Metadata includes file name and text length (in bytes).
+if __name__ == "__main__":
+    from pathlib import Path
+    import os
+    from typing import List, Tuple
+    input_dir = Path(".")
+    output_dir = "./tests/index"
+    os.makedirs(output_dir, exist_ok=True)
+    files = sorted([f for f in input_dir.glob("*.txt") if f.is_file()])
+    metadata_schema = [("name", str), ("num_bytes", float)]
+    def doc_batches() -> Iterable[Tuple[List[str], List[List[object]]]]:
+        for file in files:
+            text = file.read_text(encoding="utf-8")
+            info = [file.name, float(len(text.encode("utf-8")))]
+            yield [text], [info]
+    process_documents(
+        output_directory=output_dir,
+        document_batches=doc_batches(),
+        metadata_schema=metadata_schema,
+    )

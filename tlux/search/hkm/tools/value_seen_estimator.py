@@ -33,39 +33,26 @@ from typing import Iterable
 # for generating hash functions.
 #
 # Attributes
-# ----------
-# bits : bytearray
-#     The bit-array where each bit represents a slot in the filter.
-# hash_count : int
-#     The number of hash functions used to map items to bit positions.
+#   bits (bytearray) - The bit-array where each bit represents a slot in the filter.
+#   hash_count (int) - The number of hash functions used to map items to bit positions.
 #
 @dataclass
 class ValueObserver:
     bits: bytearray
     hash_count: int
 
-    # create
-    # ------
-    #
     # Create a new ValueObserver sized for the given capacity and false-positive rate.
-    #
     # The bit-array length m is calculated using the formula m = -(n ln p) / (ln 2)^2
     # and rounded up to the nearest multiple of align bits (default 8).
     # The number of hash functions k is calculated as k = m/n ln 2.
     #
     # Parameters
-    # ----------
-    # capacity : int
-    #     The expected number of items to be added.
-    # fp_rate : float, optional
-    #     The desired false-positive rate (default 0.01).
-    # align : int, optional
-    #     The alignment in bits for the bit-array length (default 8).
+    #   capacity (int) - The expected number of items to be added.
+    #   fp_rate (float), optional - The desired false-positive rate (default 0.01).
+    #   align (int), optional - The alignment in bits for the bit-array length (default 8).
     #
     # Returns
-    # -------
-    # ValueObserver
-    #     A new ValueObserver instance.
+    #   (ValueObserver) - A new ValueObserver instance.
     #
     @classmethod
     def create(
@@ -107,77 +94,51 @@ class ValueObserver:
         # Test if the bit at index idx is set
         return bool(self.bits[idx >> 3] & (1 << (idx & 7)))
 
-    # add
-    # ---
-    #
-    # Add an item to the filter.
-    #
-    # This method sets the bits in the bit-array corresponding to the hash values of the item.
+    # Add an item to the filter. This method sets the bits in the
+    # bit-array corresponding to the hash values of the item.
     #
     # Parameters
-    # ----------
-    # item : bytes
-    #     The item to add.
+    #   item (bytes) - The item to add.
     #
     def add(self, item: bytes) -> None:
         for idx in self._hashes(item):
             self._set_bit(idx)
 
-    # __contains__
-    # ------------
-    #
     # Check if an item may be present in the filter.
     #
     # This method checks if all bits corresponding to the hash values of the item are set.
     # It may return false positives but never false negatives.
     #
     # Parameters
-    # ----------
-    # item : bytes
-    #     The item to check.
+    #   item (bytes) - The item to check.
     #
     # Returns
-    # -------
-    # bool
-    #     True if the item may be present, False if it is definitely not present.
+    #   (bool) - True if the item may be present, False if it is definitely not present.
     #
     def __contains__(self, item: bytes) -> bool:
         return all(self._test_bit(idx) for idx in self._hashes(item))
 
-    # to_bytes
-    # --------
-    #
     # Serialize the filter to a compact binary representation.
     #
     # The binary format consists of the hash_count as a 2-byte little-endian unsigned integer
     # followed by the bit-array bytes.
     #
     # Returns
-    # -------
-    # bytes
-    #     The binary representation of the filter.
+    #   (bytes) - The binary representation of the filter.
     #
     def to_bytes(self) -> bytes:
         return struct.pack("<H", self.hash_count) + bytes(self.bits)
 
-    # from_bytes
-    # ----------
-    #
     # Reconstruct a ValueObserver from its binary representation.
     #
     # Parameters
-    # ----------
-    # data : bytes
-    #     The binary data produced by to_bytes.
+    #   data (bytes) - The binary data produced by to_bytes.
     #
     # Returns
-    # -------
-    # ValueObserver
-    #     The reconstructed ValueObserver instance.
+    #   (ValueObserver) - The reconstructed ValueObserver instance.
     #
     # Raises
-    # ------
-    # ValueError
+    #   ValueError
     #     If the data is too short to contain the hash_count.
     #
     @classmethod
