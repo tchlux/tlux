@@ -1,32 +1,34 @@
 """
-RankEstimator – streaming additive-error rank sketch (Karnin-Lang-Liberty).
+RankEstimator - streaming additive-error rank sketch (Karnin-Lang-Liberty).
 
-Single-file, pure-Python implementation of the KLL algorithm for approximate
-rank estimation over a numeric data stream.  The sketch is merge-able and
-requires at most *k* live samples irrespective of the stream length *n*.  With
-*k ≈ 1.6 / ε* the estimator guarantees worst-case additive rank error
-**ε · n** with probability ≃ 0.99.
+Pure-Python, standard library and NumPy only. Implements the KLL algorithm
+for approximate rank estimation over numeric data streams. Maintains <= k
+live samples regardless of stream length n. With k ~= 2/eps, guarantees
+worst-case additive rank error eps*n with probability >= 0.99.
 
-Example usage:
-
+Example
   import random
   est = RankEstimator.create(error=0.01, seed=42)
   for _ in range(10_000):
-    est.insert(random.random())
+      est.insert(random.random())
   print(round(est.rank(0.5), 3))
-
 """
 
-# Standard library imports
 import math
 import random
+import struct
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import List, Optional
 
 __all__ = ["RankEstimator"]
 
-
-# _Item - Lightweight container storing a value and its weight within the sketch.
+# _Item
+# Lightweight container for a value and its weight in the sketch.
+#
+# Parameters
+#   value (float): Data value.
+#   weight (int): Weight of this value.
+#
 @dataclass
 class _Item:
     value: float
@@ -34,163 +36,233 @@ class _Item:
 
 
 # RankEstimator
-# 
-# KLL sketch supporting single-pass updates, rank queries and merge.
-# 
+#
+# KLL sketch supporting single-pass updates, quantile queries, and merge.
+#
 class RankEstimator:
-    # Public constructor choosing *k* automatically from a target additive
-    # error.  k ≈ 1.6 / ε is the constant derived in the KLL paper for 99 % success.
+    # Public constructor, computes k if not given, validates parameters.
     #
     # Parameters
-    #   error (float): Desired additive rank error ε ∈ (0, 1).
-    #   k (int, optional): Override automatic choice; must be ≥ 1.
-    #   seed (int, optional): Seed for reproducible random compaction.
-    # 
+    #   error (float): Desired additive rank error (eps) in (0,1).
+    #   k (int, optional): Override for sketch size. Must be >= 1.
+    #   seed (int, optional): Seed for reproducible randomness.
+    #
     # Returns
-    #   RankEstimator
-    # 
+    #   RankEstimator: New sketch instance.
+    #
     # Raises
-    #   ValueError: On invalid arguments.
+    #   ValueError: If parameters are invalid.
     #
     @classmethod
     def create(
         cls,
         *,
         error: float = 0.01,
-        k: int | None = None,
-        seed: int | None = None,
+        k: Optional[int] = None,
+        seed: Optional[int] = None
     ) -> "RankEstimator":
         if k is None:
             if not (0.0 < error < 1.0):
                 raise ValueError("error must be in (0,1)")
-            k = max(1, math.ceil(1.6 / error))
-        if k <= 0:
-            raise ValueError("k must be positive")
+            k = max(1, math.ceil(2.0 / error))
+        if k < 1:
+            raise ValueError("k must be >= 1")
         return cls(k=k, seed=seed)
 
-    # Internal constructor – prefer `create` for public use.
-    def __init__(self, *, k: int, seed: int | None = None) -> None:
+    # Internal constructor. Do not call directly; use create().
+    #
+    # Parameters
+    #   k (int): Sketch size.
+    #   seed (int, optional): Random seed.
+    #
+    def __init__(self, *, k: int, seed: Optional[int] = None) -> None:
         self._k: int = k
         self._rng: random.Random = random.Random(seed)
-        self._buffers: List[List[_Item]] = [[]]  # level 0 exists from start
-        self._count: int = 0  # total weighted count of inserted items
+        self._buffers: List[List[_Item]] = [[]]
+        self._count: int = 0
 
-    # Return capacity of *level* buffer according to geometric schedule.
-    def _capacity_for(self, level: int) -> int:
-        return self._k if level == 0 else max(1, self._k // (2 ** (level + 1)))
-
-    # Extend buffers list until *level* exists.
-    def _ensure_level(self, level: int) -> None:
-        while level >= len(self._buffers):
-            self._buffers.append([])
-
-    # Compact a single level and push it to the next level.
-    def _compact(self, level: int) -> None:
-        buffer = self._buffers[level]
-        if not buffer:
-            return  # nothing to compact
-        # Sort in-place by value.
-        buffer.sort(key=lambda item: item.value)
-        # Random offset 0/1 to keep unbiased rank.
-        offset = self._rng.randint(0, 1)
-        survivors: List[_Item] = buffer[offset::2]
-        # Double weight of survivors before promotion.
-        for item in survivors:
-            item.weight <<= 1  # multiply by 2
-        # Clear current level and push survivors upward.
-        buffer.clear()
-        next_level = level + 1
-        self._ensure_level(next_level)
-        self._buffers[next_level].extend(survivors)
-
-    # Insert *value* into the sketch.
-    # 
+    # Compact the buffer at start_level recursively if overflowed.
+    #
     # Parameters
-    #   value (float): Number to be observed.
-    # 
+    #   start_level (int): Buffer level to compact from.
+    #
     # Returns
     #   None
-    # 
+    #
+    def _compact(self, start_level: int = 0) -> None:
+        level: int = start_level
+        while True:
+            if len(self._buffers) <= level:
+                self._buffers.append([])
+            buf = self._buffers[level]
+            if len(buf) <= self._k:
+                break
+            buf.sort(key=lambda item: item.value)
+            offset: int = self._rng.randint(0, 1)
+            survivors: List[_Item] = buf[offset::2]
+            for item in survivors:
+                item.weight <<= 1
+            buf.clear()
+            if len(self._buffers) <= level + 1:
+                self._buffers.append([])
+            self._buffers[level + 1].extend(survivors)
+            level += 1
+
+    # Insert a value into the sketch.
+    #
+    # Parameters
+    #   value (float): Number to insert.
+    #
+    # Returns
+    #   None
+    #
     def insert(self, value: float) -> None:
         self._count += 1
-        level = 0
         self._buffers[0].append(_Item(value=value, weight=1))
-        # Cascade compactions while buffers overflow.
-        while len(self._buffers[level]) > self._capacity_for(level):
-            self._compact(level)
-            level += 1
-            self._ensure_level(level)
+        self._compact(0)
 
-    # Estimate the *q*-th rank (0 ≤ q ≤ 1).
-    # 
+    # Return the value at quantile q in [0,1].
+    #
     # Parameters
-    #   q (float): Desired rank fraction.
-    # 
+    #   q (float): Desired quantile.
+    #
     # Returns
-    #   float: Approximate q-rank value.
-    # 
+    #   float: Value at the approximate q-th quantile.
+    #
     # Raises
-    #   ValueError: If q is outside [0, 1] or sketch is empty.
-    # 
+    #   ValueError: If q is out of [0,1] or sketch is empty.
+    #
     def rank(self, q: float) -> float:
         if not (0.0 <= q <= 1.0):
             raise ValueError("q must be in [0,1]")
-        if self._count == 0:
-            raise ValueError("rank called on empty sketch")
-        # Gather all (value, weight) pairs.
         items: List[_Item] = [item for buf in self._buffers for item in buf]
-        # Global sort by value.
+        if not items:
+            raise ValueError("rank called on empty sketch")
         items.sort(key=lambda item: item.value)
-        # Target rank (1-based index).
-        target = math.ceil(q * self._count)
-        running = 0
+        total_weight: int = sum(item.weight for item in items)
+        target: int = math.ceil(q * total_weight)
+        running: int = 0
         for item in items:
             running += item.weight
             if running >= target:
                 return item.value
-        # Fallback for q == 1.0 with rounding errors.
-        return items[-1].value
+        return items[-1].value  # Only for q==1.0
 
-    # Merge *other* into *self* in-place.
-    # 
+    # Merge another compatible sketch into this one.
+    #
     # Parameters
-    #   other (RankEstimator): Another compatible sketch.
-    # 
+    #   other (RankEstimator): Another RankEstimator with same k.
+    #
     # Returns
     #   None
-    # 
+    #
     # Raises
-    #   ValueError: If k parameters differ.
-    # 
+    #   ValueError: If k values do not match.
+    #
     def merge(self, other: "RankEstimator") -> None:
         if self._k != other._k:
             raise ValueError("cannot merge sketches with different k values")
-        # Ensure capacity for all levels present in *other*.
-        for lvl, other_buf in enumerate(other._buffers):
-            self._ensure_level(lvl)
-            self._buffers[lvl].extend(other_buf)
-            # Compact current level if required; may cascade.
-            while len(self._buffers[lvl]) > self._capacity_for(lvl):
-                self._compact(lvl)
+        for level, other_buf in enumerate(other._buffers):
+            while len(self._buffers) <= level:
+                self._buffers.append([])
+            self._buffers[level].extend(other_buf)
+            self._compact(level)
         self._count += other._count
 
-    # Returns current number of stored items (not total count).
-    # This is useful for debugging memory footprint.
-    # 
+    # Return number of items stored in all buffers.
+    #
     # Returns
-    #   int: Number of live samples held across all buffers.
-    # 
+    #   int: Current live sample count.
+    #
     def size(self) -> int:
         return sum(len(buf) for buf in self._buffers)
 
+    # Serialize this sketch to bytes (deterministic, versioned).
+    #
+    # Returns
+    #   bytes: Serialized binary form.
+    #
+    def to_bytes(self) -> bytes:
+        parts: List[bytes] = []
+        # Header
+        parts.append(b"RKER")
+        # k (int32 LE)
+        parts.append(self._k.to_bytes(4, "little", signed=True))
+        # count (int64 LE)
+        parts.append(self._count.to_bytes(8, "little", signed=True))
+        # number of levels (uint32 LE)
+        num_levels = len(self._buffers)
+        parts.append(num_levels.to_bytes(4, "little", signed=False))
+        # For each level, write length then items
+        for buf in self._buffers:
+            parts.append(len(buf).to_bytes(4, "little", signed=False))
+            for item in buf:
+                parts.append(struct.pack("<d", item.value))
+                parts.append(item.weight.to_bytes(4, "little", signed=True))
+        # RNG state (use getstate, encode as repr ASCII)
+        rng_state = repr(self._rng.getstate()).encode("ascii")
+        parts.append(len(rng_state).to_bytes(4, "little", signed=False))
+        parts.append(rng_state)
+        return b"".join(parts)
+
+    # Deserialize sketch from bytes produced by to_bytes.
+    #
+    # Parameters
+    #   data (bytes): Output from to_bytes.
+    #
+    # Returns
+    #   RankEstimator: Restored sketch.
+    #
+    # Raises
+    #   ValueError: If header/version is wrong or data corrupt.
+    #
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "RankEstimator":
+        mv = memoryview(data)
+        pos = 0
+        # Header
+        if mv[:4].tobytes() != b"RKER":
+            raise ValueError("Invalid header")
+        pos += 4
+        k = int.from_bytes(mv[pos:pos+4], "little", signed=True)
+        pos += 4
+        count = int.from_bytes(mv[pos:pos+8], "little", signed=True)
+        pos += 8
+        num_levels = int.from_bytes(mv[pos:pos+4], "little", signed=False)
+        pos += 4
+        buffers: List[List[_Item]] = []
+        for _ in range(num_levels):
+            n_items = int.from_bytes(mv[pos:pos+4], "little", signed=False)
+            pos += 4
+            buf: List[_Item] = []
+            for _ in range(n_items):
+                value = struct.unpack("<d", mv[pos:pos+8])[0]
+                pos += 8
+                weight = int.from_bytes(mv[pos:pos+4], "little", signed=True)
+                pos += 4
+                buf.append(_Item(value=value, weight=weight))
+            buffers.append(buf)
+        rng_len = int.from_bytes(mv[pos:pos+4], "little", signed=False)
+        pos += 4
+        rng_state = eval(mv[pos:pos+rng_len].tobytes().decode("ascii"))
+        pos += rng_len
+        est = cls(k=k)
+        est._count = count
+        est._buffers = buffers
+        est._rng.setstate(rng_state)
+        return est
+
 
 if __name__ == "__main__":
-    # Demonstration – approximate median of deterministic stream.
-    est = RankEstimator.create(error=0.01, seed=1)
-
-    for x in range(10_000):  # 0,1,2,...
-        est.insert(float(x))
-
-    approx_median = est.rank(0.5)
-    print("Approx median:", approx_median)
-    # Expect ≈ 5000 within 2 % additive rank error ⇒ ±200 elements.
+    # Demonstration: estimate the 95th percentile of a deterministic stream.
+    n = 100_000
+    error = 1 / 1024
+    rank = 0.95
+    for seed in range(1, 11):
+        est = RankEstimator.create(error=error, seed=seed)
+        for x in range(n):
+            est.insert(float(x))
+        est = RankEstimator.from_bytes(est.to_bytes())
+        approx = est.rank(rank)
+        diff = round(approx - rank * n)
+        print(f"{approx} ({diff:+03d} : {100 * diff / n:+5.3f}%)")

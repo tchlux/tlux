@@ -1,21 +1,23 @@
-# Bit-array value observer via hash bit mask (Bloom filter) implementation.
-#
-# This implementation is pure-Python and relies only on the standard library.
-# The hash family is produced via double hashing on the SHA-256 digest, which
-# offers reproducible cross-platform behaviour while avoiding extra dependencies.
-# A convenience constructor `ValueObserver.create` picks a bit-array length and
-# number of hash functions from a desired capacity / target false-positive rate,
-# matching the analytical optimum k = m/n ln 2.
-#
-# Example usage:
-#     observer = ValueObserver.create(capacity=1000, fp_rate=0.01)
-#     observer.add(b"hello")
-#     observer.add(b"world")
-#     print(b"hello" in observer)  # True
-#     print(b"foo" in observer)    # False (probably)
-#
-# The `ValueObserver` class provides methods to add items and check for possible
-# membership, with a controlled false-positive rate.
+"""
+ValueObserver - Bit-array value observer via hash bit mask (Bloom filter) implementation.
+
+The `ValueObserver` class provides methods to add items and check for
+possible membership, with a controlled false-positive rate. This
+implementation is pure-Python and relies only on the standard library.
+The hash family is produced via double hashing on the SHA-256 digest,
+which offers reproducible cross-platform behaviour while avoiding
+extra dependencies. A convenience constructor `ValueObserver.create`
+picks a bit-array length and number of hash functions from a desired
+capacity / target false-positive rate, matching the analytical
+optimum k = m/n ln 2.
+
+Example
+  observer = ValueObserver.create(capacity=1000, fp_rate=0.01)
+  observer.add(b"hello")
+  observer.add(b"world")
+  print(b"hello" in observer)  # True
+  print(b"foo" in observer)    # False (probably)
+"""
 
 from __future__ import annotations
 
@@ -27,14 +29,13 @@ from typing import Iterable
 
 
 # ValueObserver
-# =============
 #
 # A Bloom filter that uses a bytearray as the underlying bit-array and double hashing
 # for generating hash functions.
 #
 # Attributes
-#   bits (bytearray) - The bit-array where each bit represents a slot in the filter.
-#   hash_count (int) - The number of hash functions used to map items to bit positions.
+#   bits (bytearray): The bit-array where each bit represents a slot in the filter.
+#   hash_count (int): The number of hash functions used to map items to bit positions.
 #
 @dataclass
 class ValueObserver:
@@ -47,12 +48,12 @@ class ValueObserver:
     # The number of hash functions k is calculated as k = m/n ln 2.
     #
     # Parameters
-    #   capacity (int) - The expected number of items to be added.
-    #   fp_rate (float), optional - The desired false-positive rate (default 0.01).
-    #   align (int), optional - The alignment in bits for the bit-array length (default 8).
+    #   capacity (int): The expected number of items to be added.
+    #   fp_rate (float, optional): The desired false-positive rate (default 0.01).
+    #   align (int, optional): The alignment in bits for the bit-array length (default 8).
     #
     # Returns
-    #   (ValueObserver) - A new ValueObserver instance.
+    #   (ValueObserver): A new ValueObserver instance.
     #
     @classmethod
     def create(
@@ -98,7 +99,7 @@ class ValueObserver:
     # bit-array corresponding to the hash values of the item.
     #
     # Parameters
-    #   item (bytes) - The item to add.
+    #   item (bytes): The item to add.
     #
     def add(self, item: bytes) -> None:
         for idx in self._hashes(item):
@@ -110,13 +111,33 @@ class ValueObserver:
     # It may return false positives but never false negatives.
     #
     # Parameters
-    #   item (bytes) - The item to check.
+    #   item (bytes): The item to check.
     #
     # Returns
-    #   (bool) - True if the item may be present, False if it is definitely not present.
+    #   (bool): True if the item may be present, False if it is definitely not present.
     #
     def __contains__(self, item: bytes) -> bool:
         return all(self._test_bit(idx) for idx in self._hashes(item))
+
+    # Merge another ValueObserver into this one in-place.
+    #
+    # Both observers must have the same bit-array length and hash_count.
+    # After merging, this filter will match any item present in either filter.
+    #
+    # Parameters
+    #   other (ValueObserver): Another ValueObserver to merge.
+    #
+    # Raises
+    #   ValueError: If bit-array lengths or hash_count differ.
+    #
+    def merge(self, other: "ValueObserver") -> None:
+        if self.hash_count != other.hash_count:
+            raise ValueError("hash_count mismatch: cannot merge")
+        if len(self.bits) != len(other.bits):
+            raise ValueError("bit-array size mismatch: cannot merge")
+        # Merge by bitwise-OR each byte.
+        for i in range(len(self.bits)):
+            self.bits[i] |= other.bits[i]
 
     # Serialize the filter to a compact binary representation.
     #
@@ -124,7 +145,7 @@ class ValueObserver:
     # followed by the bit-array bytes.
     #
     # Returns
-    #   (bytes) - The binary representation of the filter.
+    #   (bytes): The binary representation of the filter.
     #
     def to_bytes(self) -> bytes:
         return struct.pack("<H", self.hash_count) + bytes(self.bits)
@@ -132,10 +153,10 @@ class ValueObserver:
     # Reconstruct a ValueObserver from its binary representation.
     #
     # Parameters
-    #   data (bytes) - The binary data produced by to_bytes.
+    #   data (bytes): The binary data produced by to_bytes.
     #
     # Returns
-    #   (ValueObserver) - The reconstructed ValueObserver instance.
+    #   (ValueObserver): The reconstructed ValueObserver instance.
     #
     # Raises
     #   ValueError

@@ -107,6 +107,9 @@ DEFAULT_REPLACEMENTS = {
     "\uFF0B": "+",    # full-width plus
     "\uFF0D": "-",    # full-width hyphen
     "\uFF5E": "~",    # full-width tilde
+    "\u2208": "in",   # "in" mathematical symbol
+    "\u2243": "~",    # approx (only top squiggle)
+    "\u03b5": "eps",  # mathematical epsilon
 }
 SNIPPET_RADIUS = 30  # characters of context on each side when reporting
 
