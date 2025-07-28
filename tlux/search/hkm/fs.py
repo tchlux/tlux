@@ -34,6 +34,22 @@ from typing import Iterable
 class FileSystem:
     root: str = "/tmp/hkm_index"
 
+    # Resolve a user-supplied path to an absolute path within root.
+    # Raises ValueError if the resolved path escapes the root.
+    #
+    # Parameters:
+    #   path (str): Relative or joined path.
+    #
+    # Returns:
+    #   str: Absolute path within root.
+    #
+    def _resolve(self, path: str) -> str:
+        abs_path = os.path.abspath(os.path.join(self.root, path))
+        root_path = os.path.abspath(self.root)
+        if not abs_path.startswith(root_path + os.sep) and abs_path != root_path:
+            raise ValueError(f"Path '{path}' escapes root '{self.root}'.")
+        return abs_path
+
     # Join one or more path components with the root.
     #
     # Parameters:
@@ -43,7 +59,8 @@ class FileSystem:
     #   str: Joined path relative to root.
     # 
     def join(self, *parts: str) -> str:
-        return os.path.join(self.root, *parts)
+        rel_path = os.path.join(*parts)
+        return self._resolve(rel_path)
 
     # Create a directory at the specified path.
     #
@@ -55,7 +72,9 @@ class FileSystem:
     #   OSError: If creation fails.
     # 
     def mkdir(self, path: str, exist_ok: bool = False) -> None:
+        path = self._resolve(path)
         os.makedirs(path, exist_ok=exist_ok)
+        return path
 
     # Check whether the path exists.
     #
@@ -66,6 +85,7 @@ class FileSystem:
     #   bool: True if path exists.
     # 
     def exists(self, path: str) -> bool:
+        path = self._resolve(path)
         return os.path.exists(path)
 
     # List entries in a directory.
@@ -77,6 +97,7 @@ class FileSystem:
     #   Iterable[str]: List of entry names.
     # 
     def listdir(self, path: str) -> Iterable[str]:
+        path = self._resolve(path)
         return os.listdir(path)
 
     # Read the full contents of a file as bytes.
@@ -91,6 +112,7 @@ class FileSystem:
     #   IOError: If read fails.
     # 
     def read(self, path: str) -> bytes:
+        path = self._resolve(path)
         with open(path, "rb") as f:
             return f.read()
 
@@ -105,6 +127,7 @@ class FileSystem:
     #   RuntimeError: If refusing to overwrite existing file.
     # 
     def write(self, path: str, data: bytes, overwrite: bool = True, mkdir: bool = True) -> None:
+        path = self._resolve(path)
         if not overwrite and os.path.exists(path):
             raise RuntimeError(
                 f"Refusing to overwrite existing contents at '{path}'."
@@ -123,8 +146,10 @@ class FileSystem:
     #   bool: True on success, False on failure.
     # 
     def rename(self, source: str, destination: str) -> bool:
+        src_path = self._resolve(source)
+        dst_path = self._resolve(destination)
         try:
-            shutil.move(source, destination)
+            shutil.move(src_path, dst_path)
             return True
         except (OSError, shutil.Error):
             return False
@@ -140,6 +165,7 @@ class FileSystem:
     #   RuntimeError: If recursive is False and path is a non-empty directory.
     #
     def remove(self, path: str, recursive: bool = True) -> None:
+        path = self._resolve(path)
         # Validate that the path exists before attempting removal.
         if not os.path.exists(path):
             raise FileNotFoundError(f"Path '{path}' does not exist.")
@@ -160,7 +186,7 @@ class FileSystem:
 
 if __name__ == "__main__":
     # Sanity check: write-read-rename cycle
-    _fs = FileSystem("/tmp")
+    _fs = FileSystem("/tmp/test_fs")
     _path = _fs.join("demo.txt")
     _fs.write(_path, b"check")
     assert _fs.read(_path) == b"check"

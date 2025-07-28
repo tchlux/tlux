@@ -10,7 +10,7 @@ Example
   import random
   est = RankEstimator.create(error=0.01, seed=42)
   for _ in range(10_000):
-      est.insert(random.random())
+      est.add(random.random())
   print(round(est.rank(0.5), 3))
 """
 
@@ -53,11 +53,10 @@ class RankEstimator:
     # Raises
     #   ValueError: If parameters are invalid.
     #
-    @classmethod
-    def create(
-        cls,
+    def __init__(
+        self,
         *,
-        error: float = 0.01,
+        error: float = 1 / 1024,
         k: Optional[int] = None,
         seed: Optional[int] = None
     ) -> "RankEstimator":
@@ -67,15 +66,6 @@ class RankEstimator:
             k = max(1, math.ceil(2.0 / error))
         if k < 1:
             raise ValueError("k must be >= 1")
-        return cls(k=k, seed=seed)
-
-    # Internal constructor. Do not call directly; use create().
-    #
-    # Parameters
-    #   k (int): Sketch size.
-    #   seed (int, optional): Random seed.
-    #
-    def __init__(self, *, k: int, seed: Optional[int] = None) -> None:
         self._k: int = k
         self._rng: random.Random = random.Random(seed)
         self._buffers: List[List[_Item]] = [[]]
@@ -108,7 +98,7 @@ class RankEstimator:
             self._buffers[level + 1].extend(survivors)
             level += 1
 
-    # Insert a value into the sketch.
+    # Add a value into the sketch.
     #
     # Parameters
     #   value (float): Number to insert.
@@ -116,7 +106,7 @@ class RankEstimator:
     # Returns
     #   None
     #
-    def insert(self, value: float) -> None:
+    def add(self, value: float) -> None:
         self._count += 1
         self._buffers[0].append(_Item(value=value, weight=1))
         self._compact(0)
@@ -259,9 +249,9 @@ if __name__ == "__main__":
     error = 1 / 1024
     rank = 0.95
     for seed in range(1, 11):
-        est = RankEstimator.create(error=error, seed=seed)
+        est = RankEstimator(error=error, seed=seed)
         for x in range(n):
-            est.insert(float(x))
+            est.add(float(x))
         est = RankEstimator.from_bytes(est.to_bytes())
         approx = est.rank(rank)
         diff = round(approx - rank * n)
