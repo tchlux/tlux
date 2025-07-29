@@ -58,6 +58,7 @@ NUMBER_NULL = np.float32(np.nan)
 METADATA_NUMPY_DTYPES = {
     float: np.float32,
     int: np.int64,
+    bytes: None,  # blobs are handled specially
 }
 EMBEDDING_INDEX_TYPE = np.dtype([
     ('document_id', np.uint32),
@@ -79,19 +80,27 @@ class ChunkBuffer:
         self._document_count = 0
 
     def _reset(self) -> None:
+        # Tracking
+        self._total_bytes = 0
         self._min_document_id = float('inf')
         self._max_document_id = -1
-        self._total_bytes = 0
+        # Token data
         self._token_offsets: List[int] = []
         self._token_sizes: List[int] = []
         self._token_file = tempfile.TemporaryFile()
         self._token_writer = io.BufferedWriter(self._token_file, buffer_size=self._BUFFER_SIZE)
+        # Embedding data
         self._embedding_file = tempfile.TemporaryFile()
         self._embedding_writer = io.BufferedWriter(self._embedding_file, buffer_size=self._BUFFER_SIZE)
+        # Index data
         self._index_file = tempfile.TemporaryFile()
         self._index_writer = io.BufferedWriter(self._index_file, buffer_size=self._BUFFER_SIZE)
+        # Meta data
         self._metadata_file = tempfile.TemporaryFile()
         self._metadata_writer = io.BufferedWriter(self._metadata_file, buffer_size=self._BUFFER_SIZE)
+        # Blob data
+        self._blob_file = tempfile.TemporaryFile()
+        self._blob_writer = io.BufferedWriter(self._blob_file, buffer_size=self._BUFFER_SIZE)
 
     # Add document's token, embedding, and metadata to chunk.
     #
@@ -127,6 +136,7 @@ class ChunkBuffer:
             self._index_writer.write(index_entry)
             self._total_bytes += EMBEDDING_INDEX_TYPE.itemsize
         meta_bytes = bytearray()
+        blob_offsets_for_doc: List[Tuple[int, int]] = []
         for (field_name, field_type), value in zip(self._metadata_schema, metadata):
             if field_type is float:
                 v = float(value)
@@ -134,8 +144,19 @@ class ChunkBuffer:
                 if np.isnan(v):  # already null
                     arr[0] = NUMBER_NULL
                 meta_bytes += arr.tobytes()
+            elif field_type is bytes:
+                if value is None:
+                    meta_bytes += struct.pack("<QQ", 0, 0)  # Null: offset 0, size 0
+                    blob_offsets_for_doc.append((0, 0))
+                else:
+                    self._blob_writer.flush()
+                    offset = self._blob_file.tell()
+                    self._blob_writer.write(value)
+                    size = len(value)
+                    meta_bytes += struct.pack("<QQ", offset, size)
+                    blob_offsets_for_doc.append((offset, size))
+                    self._total_bytes += size
             else:
-                # Categorical: int64, use sentinel if value is None
                 v = int(value)
                 arr = np.array([v], dtype=np.uint64)
                 if v == CATEGORY_NULL:
@@ -163,6 +184,7 @@ class ChunkBuffer:
                 ("embeddings.mmap", self._embedding_file),
                 ("embed_index.mmap", self._index_file),
                 ("metadata.mmap", self._metadata_file),
+                ("blobs.mmap", self._blob_file),  # add blobs
             ]:
                 temp_file.seek(0)
                 data = temp_file.read()
@@ -173,7 +195,7 @@ class ChunkBuffer:
             os.path.join(self._output_directory, chunk_name),
             zip_buffer.getvalue()
         )
-        for writer in (self._token_writer, self._embedding_writer, self._index_writer, self._metadata_writer):
+        for writer in (self._token_writer, self._embedding_writer, self._index_writer, self._metadata_writer, self._blob_writer):
             writer.close()
         self._reset()
 
@@ -211,6 +233,7 @@ class ChunkReader:
             ('window_size', np.uint32),
         ]))
         self._load_array("metadata.mmap", dtype=self._metadata_row_dtype())
+        self._load_blob_data("blobs.mmap")
         self._chunk_metadata = self._extract_chunk_metadata()
 
     # Returns a compound dtype matching the metadata schema.
@@ -219,9 +242,19 @@ class ChunkReader:
         for field_name, field_type in self._metadata_schema:
             if field_type is float:
                 fields.append((field_name, np.float32))
+            elif field_type is bytes:
+                fields.append((field_name + "_blob_start", np.uint64))
+                fields.append((field_name + "_blob_size", np.uint64))
             else:
                 fields.append((field_name, np.uint64))
         return np.dtype(fields)
+
+    # Load blob data from the archive.
+    def _load_blob_data(self, filename: str) -> None:
+        if filename in self._zipfile.namelist():
+            self._blobs = self._zipfile.read(filename)
+        else:
+            self._blobs = b""
 
     # Loads offsets/sizes for per-document token files within the archive.
     def _load_token_index(self) -> None:
@@ -298,13 +331,21 @@ class ChunkReader:
         meta_row = self._arrays["metadata.mmap"][i]
         meta_values: List[Union[int, float, None]] = []
         for (field_name, field_type) in self._metadata_schema:
-            v = meta_row[field_name]
             if field_type is float:
+                v = meta_row[field_name]
                 if np.isnan(v) or v.tobytes() == np.float32(NUMBER_NULL).tobytes():
                     meta_values.append(None)
                 else:
                     meta_values.append(float(v))
+            elif field_type is bytes:
+                start = meta_row[field_name + "_blob_start"]
+                size = meta_row[field_name + "_blob_size"]
+                if size == 0:
+                    meta_values.append(None)
+                else:
+                    meta_values.append(self._blobs[start:start+size])
             else:
+                v = meta_row[field_name]
                 if v == CATEGORY_NULL:
                     meta_values.append(None)
                 else:
@@ -391,6 +432,9 @@ def process_documents(
                 if field_type is float:
                     value = float(value)
                     number_dists[field_name].add(value)
+                elif field_type is bytes:
+                    if type(value) is not bytes:
+                        raise(ValueError(f"Expected 'bytes' for field {repr(field_name)}, but got {type(value)}."))
                 else:
                     hash_value = int.from_bytes(
                         hashlib.sha256(str(value).encode("ascii")).digest()[:8], 'little'
@@ -465,7 +509,7 @@ def default_worker(
     chunk_size_limit: int = 8 * 2**20,
 ) -> None:
     schema = json.loads(metadata_schema)
-    parsed_schema = [(name, str if typ == 'str' else float) for name, typ in schema]
+    parsed_schema = [(name, str if typ == 'str' else float if typ == 'float' else bytes) for name, typ in schema]
     all_files = sorted(Path(document_directory).glob('*'))
     my_files = [file for i, file in enumerate(all_files) if i % total_workers == worker_index]
 
@@ -498,9 +542,11 @@ def doc_chunk_dict(
     schema = chunk_reader._metadata_schema
     cat_fields = [i for i, (_, typ) in enumerate(schema) if typ is not float]
     num_fields = [i for i, (_, typ) in enumerate(schema) if typ is float]
+    blob_fields = [i for i, (_, typ) in enumerate(schema) if typ is bytes]
     cat_names = [schema[i][0] for i in cat_fields]
     num_names = [schema[i][0] for i in num_fields]
-
+    blob_names = [schema[i][0] for i in blob_fields]
+    
     embed_index = chunk_reader._arrays["embed_index.mmap"]
     embeddings = chunk_reader._arrays["embeddings.mmap"]
     n_embeddings = embed_index.shape[0]
@@ -516,6 +562,8 @@ def doc_chunk_dict(
     for name in cat_names:
         out[name] = []
     for name in num_names:
+        out[name] = []
+    for name in blob_names:
         out[name] = []
 
     # Preload all tokens to avoid repeated ZIP reads
@@ -546,10 +594,15 @@ def doc_chunk_dict(
         # Add metadata for this embedding/document
         meta_row = chunk_reader._arrays["metadata.mmap"][doc_idx]
         for (field_name, field_type) in schema:
-            v = meta_row[field_name]
             if field_type is float:
+                v = meta_row[field_name]
                 value = None if np.isnan(v) or v.tobytes() == np.float32(NUMBER_NULL).tobytes() else float(v)
+            elif field_type is bytes:
+                start = meta_row[field_name + "_blob_start"]
+                size = meta_row[field_name + "_blob_size"]
+                value = None if size == 0 else chunk_reader._blobs[start:start+size]
             else:
+                v = meta_row[field_name]
                 value = None if v == CATEGORY_NULL else int(v)
                 # Optionally decode category
                 if field_name in category_map and value is not None:
@@ -566,12 +619,12 @@ if __name__ == "__main__":
     output_dir = "tokenized"
     os.makedirs(output_dir, exist_ok=True)
     files = sorted([f for f in input_dir.glob("*.*") if f.is_file()])
-    metadata_schema = [("name", str), ("num_bytes", float)]
+    metadata_schema = [("name", str), ("num_bytes", float)] # , ("contents", bytes)]
 
-    def doc_batches() -> Iterable[Tuple[List[str], List[List[Union[str, float]]]]]:
+    def doc_batches() -> Iterable[Tuple[List[str], List[List[Union[str, float, bytes]]]]]:
         for file in files:
             text = file.read_text(encoding="utf-8")
-            info = [file.name, float(len(text.encode("utf-8")))]
+            info = [file.name, float(len(text.encode("utf-8")))] # , text.encode()]
             yield [text], [info]
 
     document_output_dir, summary_output_dir = process_documents(
@@ -594,10 +647,10 @@ if __name__ == "__main__":
         print(f"  Min ID: {chunk_info['min_document_id']}, Max ID: {chunk_info['max_document_id']}")
         for i in range(reader.document_count):
             tokens, embeddings, embedding_meta, meta_values = reader[i]
-            print(f"    Document {i}:")
+            print(f"    Document {i+1}:")
             print(f"      Token count: {len(tokens)}")
             print(f"      Embeddings: shape {getattr(embeddings, 'shape', None)}")
-            print(f"      Metadata: {meta_values}")
+            print(f"      Metadata: {[repr(v)[:42] for v in meta_values]}")
 
         print()
         print("-"*100)
