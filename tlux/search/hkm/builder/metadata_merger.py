@@ -1,70 +1,186 @@
-# Worker that reads all metadata from shards in provided docs directory
-# and writes a unified metadata file to the current directory.
-# 
-# Overview:
-# - Scans all `worker_*` directories under `docs_root`.
-# - Reads all `.meta.npy` files within each worker directory.
-# - Concatenates their contents into a single array.
-# - Writes the merged array to `out_path` using np.memmap.
-# 
-# Example usage:
-#   $ python merge_metadata.py ./docs ./merged.meta.npy
-# 
+"""
+Merges all summary/statistics files (n-gram, categorical, numeric, category maps)
+from multiple worker output subdirectories under a shared summary directory,
+producing a unified set of merged summary files.
 
-import argparse
-import logging
+Overview:
+- Finds all per-worker summary subdirectories under the given root.
+- Merges all `n_gram_counter.bytes` using UniqueCounter, all
+  `categorical-dist.*.bytes` and `category_map.json` into a unified
+  category map and counts, and all `numeric-dist.*.bytes` using RankEstimator.
+- Writes outputs in the same format to the specified output directory.
+- Ensures deterministic, minimal, and clear merging. Reports contract violations.
+
+Example usage:
+    python metadata_merger.py --summary-root ./summaries --output-dir ./summary_merged
+
+"""
+
+import os
+import sys
+import json
+import struct
 from pathlib import Path
+from typing import Dict, List, Set, Tuple, Optional
 
 import numpy as np
 
-from ..fs import FileSystem
-from ..schema import DOC_META_DTYPE
-
+try:
+    from ..tools.unique_count_estimator import UniqueCounter
+    from ..tools.rank_estimator import RankEstimator
+except ImportError:
+    from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
+    from tlux.search.hkm.tools.rank_estimator import RankEstimator
 
 # Description:
-#   Merge all .meta.npy arrays under subdirectories of a given root
-#   and save a unified metadata file using memory mapping.
+#   Merges all summary statistics files from per-worker subdirectories
+#   under summary_root, and writes merged versions to output_dir.
 #
 # Parameters:
-#   docs_root (str): Path to the root directory containing worker subdirectories.
-#   out_path (str): Path to save the merged metadata file.
+#   summary_root (str): Directory containing all worker summary subdirectories.
+#   output_dir (str): Directory where merged summary files are written.
 #
 # Raises:
-#   ValueError: If docs_root does not exist or contains no metadata files.
-def merge_metadata(docs_root: str, out_path: str) -> None:
-    fs = FileSystem()
-    metadata_dir = docs_root + "/metadata"
-    # Validate inputs early
-    if not fs.exists(docs_root):
-        raise ValueError(f"docs_root does not exist: {docs_root}")
-    if not fs.exists(metadata_dir):
-        raise ValueError(f"docs_root metadata directory does not exist: {metadata_dir}")
+#   ValueError: If summary_root is missing or contains no worker directories.
+#   RuntimeError: If inconsistent category mappings are detected.
+#
+def merge_summaries(summary_root: str, output_dir: str) -> None:
+    # Validate input directories
+    if not os.path.isdir(summary_root):
+        raise ValueError(f"summary_root does not exist: {summary_root}")
+    os.makedirs(output_dir, exist_ok=True)
 
-    all_meta = []
+    # Discover all worker summary subdirs (must be directories, not files)
+    subdirs = sorted([
+        d for d in (Path(summary_root).iterdir())
+        if d.is_dir()
+    ])
+    if not subdirs:
+        raise ValueError(f"No worker summary subdirectories found in: {summary_root}")
 
-    # Collect all .meta.npy files within this worker directory
-    for meta_file in fs.listdir(metadata_dir ):
-        arr = np.load(str(meta_file), mmap_mode="r")
-        all_meta.append(arr)
+    # Find all summary files by type
+    ngram_files: List[Path] = []
+    category_map_files: List[Path] = []
+    categorical_files: Dict[str, List[Path]] = {}
+    numeric_files: Dict[str, List[Path]] = {}
 
-    # Concatenate all metadata arrays (empty array fallback)
-    if all_meta:
-        merged = np.concatenate(all_meta, axis=0)
+    for subdir in subdirs:
+        for f in subdir.glob("*"):
+            if f.name == "n_gram_counter.bytes":
+                ngram_files.append(f)
+            elif f.name == "category_map.json":
+                category_map_files.append(f)
+            elif f.name.startswith("categorical-dist.") and f.name.endswith(".bytes"):
+                field = f.name[len("categorical-dist."):-len(".bytes")]
+                categorical_files.setdefault(field, []).append(f)
+            elif f.name.startswith("numeric-dist.") and f.name.endswith(".bytes"):
+                field = f.name[len("numeric-dist."):-len(".bytes")]
+                numeric_files.setdefault(field, []).append(f)
+
+    # --- Merge n_gram_counter.bytes ---
+    if ngram_files:
+        counter = None
+        for path in ngram_files:
+            uc = UniqueCounter.load_bytes(path.read_bytes())
+            if counter is None:
+                counter = uc
+            else:
+                counter.merge(uc)
+        with open(os.path.join(output_dir, "n_gram_counter.bytes"), "wb") as f:
+            f.write(counter.to_bytes())
     else:
-        merged = np.empty((0,), dtype=DOC_META_DTYPE)
+        # Write empty counter if missing
+        counter = UniqueCounter()
+        with open(os.path.join(output_dir, "n_gram_counter.bytes"), "wb") as f:
+            f.write(counter.to_bytes())
 
-    # Write the result using memory-mapped I/O
-    mm = np.memmap(out_path, dtype=DOC_META_DTYPE, shape=merged.shape, mode="w+")
-    mm[:] = merged
-    mm.flush()
+    # --- Merge category_map.json ---
+    # Merges all worker maps to a unified map: {field: {str: int}}
+    unified_category_map: Dict[str, Dict[str, int]] = {}
+    for path in category_map_files:
+        with open(path, "r", encoding="ascii") as f:
+            cm = json.load(f)
+        for field, str2id in cm.items():
+            if field not in unified_category_map:
+                unified_category_map[field] = dict(str2id)
+            else:
+                # Check for string->id consistency
+                for s, i in str2id.items():
+                    if s in unified_category_map[field]:
+                        if unified_category_map[field][s] != i:
+                            raise RuntimeError(f"Conflicting category mapping for {field!r} value {s!r}: {unified_category_map[field][s]} vs {i}")
+                    else:
+                        unified_category_map[field][s] = i
+    # Write merged category_map.json
+    with open(os.path.join(output_dir, "category_map.json"), "w", encoding="ascii") as f:
+        json.dump(unified_category_map, f, indent=2)
 
+    # --- Merge categorical-dist.*.bytes ---
+    for field, file_list in categorical_files.items():
+        cat_counts: Dict[int, int] = {}
+        for path in file_list:
+            with open(path, "rb") as f:
+                buf = f.read()
+            if len(buf) < 8:
+                continue
+            n_cat = struct.unpack_from("<Q", buf, 0)[0]
+            offset = 8
+            for _ in range(n_cat):
+                cat_id = struct.unpack_from("<Q", buf, offset)[0]
+                offset += 8
+                count = struct.unpack_from("<Q", buf, offset)[0]
+                offset += 8
+                cat_counts[cat_id] = cat_counts.get(cat_id, 0) + count
+        # Write merged result
+        out_buf = bytearray()
+        out_buf.extend(struct.pack("<Q", len(cat_counts)))
+        for cat_id, count in sorted(cat_counts.items()):
+            out_buf.extend(struct.pack("<Q", cat_id))
+            out_buf.extend(struct.pack("<Q", count))
+        with open(os.path.join(output_dir, f"categorical-dist.{field}.bytes"), "wb") as f:
+            f.write(bytes(out_buf))
 
+    # --- Merge numeric-dist.*.bytes ---
+    for field, file_list in numeric_files.items():
+        estimator = None
+        for path in file_list:
+            re = RankEstimator.load_bytes(path.read_bytes())
+            if estimator is None:
+                estimator = re
+            else:
+                estimator.merge(re)
+        with open(os.path.join(output_dir, f"numeric-dist.{field}.bytes"), "wb") as f:
+            f.write(estimator.to_bytes())
+
+# CLI & demo entrypoint (no side effects on import)
 if __name__ == "__main__":
+    # Description:
+    #   Merge summary/statistics files from all subdirectories under --summary-root,
+    #   outputting merged files to --output-dir.
+    #
+    # Example:
+    #   python metadata_merger.py --summary-root ./summaries --output-dir ./summary_merged
+    #
+    import argparse
+
     parser = argparse.ArgumentParser(
-        description="Merge all per-shard metadata into one file."
+        description="Merge all summary/statistics files from worker summary directories."
     )
-    parser.add_argument("docs_root", type=str, help="Directory containing worker_* subdirectories")
-    parser.add_argument("out_path", type=str, help="Path to write merged metadata file")
+    parser.add_argument(
+        "--summary-root",
+        type=str,
+        required=True,
+        help="Parent directory containing all per-worker summary subdirectories"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory to write merged summary files"
+    )
     args = parser.parse_args()
 
-    merge_metadata(args.docs_root, args.out_path)
+    merge_summaries(
+        summary_root=args.summary_root,
+        output_dir=args.output_dir,
+    )
