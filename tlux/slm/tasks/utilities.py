@@ -3,9 +3,9 @@
 import os
 import re
 import subprocess
-# from tlux.slm import chat_complete as base_chat_complete
+from tlux.slm import chat_complete as base_chat_complete
 # from tlux.slm import server_chat_complete as base_chat_complete
-from tlux.slm import logged_server_chat_complete as base_chat_complete
+# from tlux.slm import logged_server_chat_complete as base_chat_complete
 from tlux.decorators import cache
 
 
@@ -13,7 +13,7 @@ from tlux.decorators import cache
 def chat_complete(*args, reasoning=False, retries=2, **kwargs):
     assert (len(args) <= 0), f"Chat completions only support keyword arguments for sake of long term code reliability."
 
-    # # If raesoning is explicitly disabled, then pass the necessary string to stop it.
+    # # If reasoning is explicitly disabled, then pass the necessary string to stop it.
     # if not reasoning:
     #     if "prompt" in kwargs:
     #         kwargs["prompt"] += " /nothink"
