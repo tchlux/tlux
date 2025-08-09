@@ -27,7 +27,8 @@ CACHE_PATH = os.path.expanduser('~/.slm.cache')
 
 # CHAT_FORMAT = "llama-3"  # Meta models
 # CHAT_FORMAT = "gemma"  # Google models
-CHAT_FORMAT = "chatml"  # Devstral and Qwen models
+# CHAT_FORMAT = "chatml"  # Devstral and Qwen models
+CHAT_FORMAT = None
 
 DEFAULT_CTX = 8192
 DEFAULT_TEMP = 0.4
@@ -151,7 +152,21 @@ def complete(*, lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_
 
 
 # Get the completion for a prompt using chat formatting. Return it and the stop reason.
-def chat_complete(*, lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, messages=(), system="", **kwargs):
+def chat_complete(
+    *,
+    lm=None,
+    prompt=None,
+    max_tokens=-1,
+    min_tokens=64,
+    n_ctx=DEFAULT_CTX,
+    temperature=DEFAULT_TEMP,
+    grammar=None,
+    stream=False,
+    messages=(),
+    system="",
+    reasoning_stop="<|start|>assistant<|channel|>final<|message|>",
+    **kwargs
+):
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -186,12 +201,26 @@ def chat_complete(*, lm=None, prompt=None, max_tokens=-1, min_tokens=64, n_ctx=D
     )
     # Return a generator of [(text, reason) ...] if streaming is wanted.
     if (stream):
-        generator = ((token.get('choices',[{}])[0].get('delta',{}).get('content',''), token.get('choices',[{}])[0].get('finish_reason',None)) for token in response)
-        return generator
+        def generator():
+            buff = ""
+            for token in response:
+                text = token.get('choices',[{}])[0].get('delta',{}).get('content','')
+                stop_reason = token.get('choices', [{}])[0].get('finish_reason', None)
+                buff += text
+                if buff.endswith(reasoning_stop):
+                    break
+            for token in response:
+                text = token.get('choices',[{}])[0].get('delta',{}).get('content','')
+                stop_reason = token.get('choices', [{}])[0].get('finish_reason', None)
+                yield text, stop_reason
+        return generator()
     # Otherwise just return the response.
     else:
         response = response.get('choices', [{}])[0]
-        return response.get('message',{}).get('content',''), response.get('finish_reason', None)
+        text = response.get('message',{}).get('content','')
+        stop_reason = response.get('finish_reason', None)
+        text = text[text.index(reasoning_stop)+len(reasoning_stop):]
+        return text, stop_reason
 
 
 # A minimal wrapper to interact with a local LM Studio server via direct HTTP requests.
@@ -470,7 +499,7 @@ if __name__ == '__main__':
             generate_response = chat_complete
             print(flush=True)
             if (prompt.strip() == ""):
-                prompt = "When you are ready, please say 'Hello.'"
+                prompt = "This is a plain text conversation in a terminal. There is no markdown rendering, so use easy to read and concise repsonses. When you are ready, please say 'Hello.'"
             # kwargs["messages"].append(dict(role="system", content="An expert polymath with lots of scientific and technical knowledge and strong communication skills is helping a person solve problems. The expert replies in markdown format. Following are questions and requests written by the person and high quality responses from the expert."))
         else:
             generate_response = complete
