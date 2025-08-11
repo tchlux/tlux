@@ -280,3 +280,4 @@ if __name__ == "__main__":
     print(f"\nEstimate: {est:,.0f} unique. [{lo:,.0f}, {hi:,.0f}] @ 95% CI")
     print(f"Processed {n / (t1 - t0):,.0f}/sec\n")
     print(uc)
+    print("", len(uc.to_bytes()), "bytes")

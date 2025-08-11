@@ -183,4 +183,14 @@ if __name__ == "__main__":
         print(f"False positive: {non_present} reported as present")
     else:
         print(f"{non_present} correctly reported as not present")
-
+    print()
+    for capacity in (2**10, 2**20, 2**30):
+        fp = 0.01
+        observer = ValueObserver.create(capacity=capacity, fp_rate=fp)
+        size = len(observer.to_bytes())
+        print()
+        print(f" With capacity {capacity} at {100*fp:.1f}% false positives,")
+        if size > 2**20:
+            print(f"  is {size / 2**20:.1f} MB")
+        else:
+            print(f"  is {size} bytes")

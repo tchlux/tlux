@@ -24,7 +24,7 @@ __all__ = ["RankEstimator"]
 
 # In the paper this number is 1.7 but here we adjust it to ensure
 #  the probabilities work as expected (on monotonic and random sequences).
-ERROR_CONSTANT: float = 6.0
+ERROR_CONSTANT: float = 2.0
 
 # _Item
 # Lightweight container for a value and its weight in the sketch.
@@ -104,7 +104,7 @@ class RankEstimator:
     # Raises
     #   ValueError: If parameters are invalid.
     #
-    def __init__(self, *, max_size: int = 2**12, c: float = 2 / 3, seed: Optional[int] = None) -> "RankEstimator":
+    def __init__(self, *, max_size: int = 801, c: float = 2 / 3, seed: Optional[int] = None) -> "RankEstimator":
         # Parameter validation.
         if not (isinstance(max_size, int) and max_size >= 1):
             raise ValueError("max_size must be an integer >= 1")
@@ -114,11 +114,12 @@ class RankEstimator:
         k = max(1, int(math.floor(max_size * (1.0 - c))))
         self._k: int = k
         self._c: float = c
+        self._seed: Optional[int] = seed
         self._rng: random.Random = random.Random(seed)
         self._buffers: List[List[_Item]] = [[] for _ in range(num_levels(self._k, self._c))]
         self._count: int = 0
-        self._min: Optional[_Item] = None
-        self._max: Optional[_Item] = None
+        self._min: _Item = _Item(value=float('inf'), weight=0)
+        self._max: _Item = _Item(value=-float('inf'), weight=0)
 
     # Compute the maximum allowed items for a given level.
     def _capacity(self, level: int) -> int:
@@ -178,14 +179,10 @@ class RankEstimator:
         new_item: _Item = _Item(value=value, weight=1)
         self._buffers[0].append(new_item)
         self._compact(0)
-        if (self._count == 1):
+        if value < self._min.value:
             self._min = new_item
+        if value > self._max.value:
             self._max = new_item
-        else:
-            if value < self._min.value:
-                self._min = new_item
-            if value > self._max.value:
-                self._max = new_item
 
     # Return the value at quantile q in [0,1].
     #
@@ -380,26 +377,26 @@ class RankEstimator:
         # number of levels (uint32 LE)
         num_levels = len(self._buffers)
         parts.append(num_levels.to_bytes(4, "little", signed=False))
-        # minval (float64 LE)
-        parts.append(struct.pack("<d", self._min.value))
-        # maxval (float64 LE)
-        parts.append(struct.pack("<d", self._max.value))
+        # minval (float32 LE)
+        parts.append(struct.pack("<f", self._min.value))
+        # maxval (float32 LE)
+        parts.append(struct.pack("<f", self._max.value))
         # For each level, write length then items
-        for buf in self._buffers:
+        for l, buf in enumerate(self._buffers):
+            cap = self._capacity(l)
+            parts.append(cap.to_bytes(4, "little", signed=False))
             parts.append(len(buf).to_bytes(4, "little", signed=False))
             for item in buf:
-                parts.append(struct.pack("<d", item.value))
-                parts.append(item.weight.to_bytes(4, "little", signed=True))
-        # RNG state (use getstate, encode as repr ASCII)
-        rng_state = repr(self._rng.getstate()).encode("ascii")
-        parts.append(len(rng_state).to_bytes(4, "little", signed=False))
-        parts.append(rng_state)
+                parts.append(struct.pack("<f", item.value))
+                parts.append(item.weight.to_bytes(6, "little", signed=True))
+            parts.append(bytes(10 * (cap - len(buf))))
         return b"".join(parts)
 
     # Deserialize sketch from bytes produced by to_bytes.
     #
     # Parameters
     #   data (bytes): Output from to_bytes.
+    #   seed (int, optional): Seed for newly loaded estimator.
     #
     # Returns
     #   RankEstimator: Restored sketch.
@@ -408,47 +405,53 @@ class RankEstimator:
     #   ValueError: If header/version is wrong or data corrupt.
     #
     @classmethod
-    def from_bytes(cls, data: bytes) -> "RankEstimator":
+    def from_bytes(cls, data: bytes, seed: Optional[int] = None) -> "RankEstimator":
         mv = memoryview(data)
         pos = 0
-        # Header
+        # header
         if mv[:4].tobytes() != b"RKER":
             raise ValueError("Invalid header")
         pos += 4
+        # k
         k = int.from_bytes(mv[pos:pos+4], "little", signed=True)
         pos += 4
+        # c
         c = struct.unpack("<d", mv[pos:pos+8])[0]
         pos += 8
+        # count
         count = int.from_bytes(mv[pos:pos+8], "little", signed=True)
         pos += 8
+        # num levels
         num_levels = int.from_bytes(mv[pos:pos+4], "little", signed=False)
         pos += 4
-        minval = struct.unpack("<d", mv[pos:pos+8])[0]
-        pos += 8
-        maxval = struct.unpack("<d", mv[pos:pos+8])[0]
-        pos += 8
+        # min val
+        minval = struct.unpack("<f", mv[pos:pos+4])[0]
+        pos += 4
+        # max val
+        maxval = struct.unpack("<f", mv[pos:pos+4])[0]
+        pos += 4
+        # buffers
         buffers: List[List[_Item]] = []
         for _ in range(num_levels):
+            cap = int.from_bytes(mv[pos:pos+4], "little", signed=False)
+            pos += 4
             n_items = int.from_bytes(mv[pos:pos+4], "little", signed=False)
             pos += 4
             buf: List[_Item] = []
             for _ in range(n_items):
-                value = struct.unpack("<d", mv[pos:pos+8])[0]
-                pos += 8
-                weight = int.from_bytes(mv[pos:pos+4], "little", signed=True)
+                value = struct.unpack("<f", mv[pos:pos+4])[0]
                 pos += 4
+                weight = int.from_bytes(mv[pos:pos+6], "little", signed=True)
+                pos += 6
                 buf.append(_Item(value=value, weight=weight))
             buffers.append(buf)
-        rng_len = int.from_bytes(mv[pos:pos+4], "little", signed=False)
-        pos += 4
-        rng_state = eval(mv[pos:pos+rng_len].tobytes().decode("ascii"))
-        pos += rng_len
-        est = cls(max_size=int(math.ceil(k / (1.0 - c))), c=c)
+            pos += 10 * (cap - len(buf))
+        # create new estimator
+        est = cls(max_size=int(math.ceil(k / (1.0 - c))), c=c, seed=seed)
         est._count = count
         est._buffers = buffers
-        est._rng.setstate(rng_state)
-        est._min = _Item(value=minval, weight=1)
-        est._max = _Item(value=maxval, weight=1)
+        est._min = _Item(value=minval, weight=(1 if minval <  float('inf') else 0))
+        est._max = _Item(value=maxval, weight=(1 if maxval > -float('inf') else 0))
         return est
 
 
@@ -463,6 +466,7 @@ if __name__ == "__main__":
 
     print()
     print(f"N = {n}")
+    print(f" {len(RankEstimator().to_bytes())} bytes")
     print()
     print("Rnk -- Estmt  (abs err:  rel % )  |  size   k     c   max-size")
     import random
@@ -473,15 +477,22 @@ if __name__ == "__main__":
         for x in random_range(n):
         # for x in range(n):
             est.add(float(x))
-        est = RankEstimator.from_bytes(est.to_bytes())
+        est_bytes = est.to_bytes()
+        est = RankEstimator.from_bytes(est_bytes)
         rank = seed / (ntest+1)
         approx = round(est.rank(rank))
         diff = round(approx - rank * n)
         print(f"{100*rank:3.0f} -- {approx:6.0f} ({diff:+6d} : {100 * diff / n:+5.3f}%)  |  {est.size()} {est._k} {est._c:.4f} {est.max_size()}")
         lo, hi = est.rank_bounds(rank, delta)
         if lo < (rank * n) < hi:
-            mark = "✅"
+            mark = "  "
         else:
-            mark = "❌"
-        print(f"      {mark} [{lo:.6g}, {hi:.6g}] {100*(1-delta):.1f}% CI")
+            mark = "**"
+            print(f"     {mark} [{lo:.6g}, {hi:.6g}] {100*(1-delta):.1f}% CI")
     print()
+
+    edf_x, edf_y = est.edf_points()
+    from tlux.plot import Plot
+    p = Plot()
+    p.add("EDF", edf_x, edf_y, color=1)
+    p.show()
