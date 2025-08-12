@@ -171,6 +171,9 @@ class ValueObserver:
 
 
 if __name__ == "__main__":
+    print()
+    print("-"*100)
+    print()
     # Demonstration of ValueObserver usage
     observer = ValueObserver.create(capacity=10, fp_rate=0.1)
     items = [b"apple", b"banana", b"cherry"]
@@ -184,13 +187,41 @@ if __name__ == "__main__":
     else:
         print(f"{non_present} correctly reported as not present")
     print()
-    for capacity in (2**10, 2**20, 2**30):
-        fp = 0.01
+    print("-"*100)
+    print()
+
+    fp = 0.001
+    print("Checking capacity byte sizes with {100*fp:.2f}% false positive rate..")
+    for capacity in (2**10, 2**16, 2**20, 2**30):
         observer = ValueObserver.create(capacity=capacity, fp_rate=fp)
         size = len(observer.to_bytes())
         print()
         print(f" With capacity {capacity} at {100*fp:.1f}% false positives,")
-        if size > 2**20:
+        if size > 2**10:
+            print(f"  is {size / 2**10:.1f} KB")
+        elif size > 2**20:
             print(f"  is {size / 2**20:.1f} MB")
         else:
             print(f"  is {size} bytes")
+
+    # Quick false positive rate demo
+    cap = 2**12
+    print()
+    print("-"*100)
+    print()
+    print(f"Checking actual false positive rate with {cap} insertions..")
+    observer = ValueObserver.create(capacity=cap, fp_rate=fp)
+    # Insert odd numbers
+    for x in range(1, 2 * cap, 2):
+        observer.add(str(x).encode("ascii"))
+    # Query even numbers
+    queries = 100_000_0
+    false_pos = 0
+    for x in range(0, queries, 2):
+        if str(x).encode("ascii") in observer:
+            false_pos += 1
+    print()
+    print(f"Empirical false positive rate: {false_pos / queries:.6f}")
+    print()
+    print("-"*100)
+    print()
