@@ -14,6 +14,7 @@ import requests
 import sys
 import time
 
+from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Optional, Tuple
 
 # Attempt to load a key for calling a remote completions endpoint.
@@ -67,7 +68,6 @@ PRESETS = {
         "min_p": 0.0,
         "typical_p": 1.0,
         "repeat_penalty": 1.0,
-        # "repeat_last_n": 64,
     },
     "reliable": {
         "temperature": 0.65,
@@ -76,7 +76,6 @@ PRESETS = {
         "min_p": 0.0,
         "typical_p": 1.0,
         "repeat_penalty": 1.05,
-        # "repeat_last_n": 128,
     },
     "creative": {
         "temperature": 1.1,
@@ -85,7 +84,6 @@ PRESETS = {
         "min_p": 0.05,
         "typical_p": 1.0,
         "repeat_penalty": 1.0,
-        # "repeat_last_n": 64,
     },
     "deterministic": {
         "temperature": 0.0,
@@ -94,11 +92,82 @@ PRESETS = {
         "min_p": 0.0,
         "typical_p": 1.0,
         "repeat_penalty": 1.0,
-        # "repeat_last_n": 64,
     },
 }
 
 DEFAULT_PRESET: Optional[str] = "reliable"
+
+
+@dataclass
+class Completion:
+    raw: str
+    partial: str
+    stop_reason: Optional[str] = None
+    channel: Optional[str] = None
+
+
+_CHANNEL_MARKER = "<|channel|>"
+_MESSAGE_MARKER = "<|message|>"
+_START_MARKER = "<|start|>"
+_ROLE_MARKER = "<|role|>"
+_ITALIC_ON = "\x1b[3m"
+_ITALIC_OFF = "\x1b[0m"
+
+
+@dataclass
+class _ChannelTracker:
+    channel: Optional[str] = None
+    _buffer: str = ""
+    _awaiting_channel: bool = False
+
+    def consume(self, text: str) -> Tuple[str, Optional[str], bool]:
+        self._buffer += text
+        visible = ""
+        channel_before = self.channel
+        while self._buffer:
+            if self._buffer.startswith(_START_MARKER):
+                self._buffer = self._buffer[len(_START_MARKER):]
+                self._awaiting_channel = True
+                continue
+            if self._buffer.startswith(_ROLE_MARKER):
+                self._buffer = self._buffer[len(_ROLE_MARKER):]
+                self._awaiting_channel = True
+                continue
+            if self._awaiting_channel:
+                channel_index = self._buffer.find(_CHANNEL_MARKER)
+                if channel_index == -1:
+                    self._buffer = ""
+                    break
+                if channel_index > 0:
+                    self._buffer = self._buffer[channel_index:]
+                else:
+                    message_index = self._buffer.find(_MESSAGE_MARKER)
+                    if message_index == -1:
+                        break
+                    channel_name = self._buffer[len(_CHANNEL_MARKER):message_index].strip()
+                    self.channel = channel_name or self.channel
+                    self._buffer = self._buffer[message_index + len(_MESSAGE_MARKER):]
+                    self._awaiting_channel = False
+                continue
+            if self._buffer.startswith(_CHANNEL_MARKER):
+                message_index = self._buffer.find(_MESSAGE_MARKER)
+                if message_index == -1:
+                    break
+                channel_name = self._buffer[len(_CHANNEL_MARKER):message_index].strip()
+                self.channel = channel_name or self.channel
+                self._buffer = self._buffer[message_index + len(_MESSAGE_MARKER):]
+                self._awaiting_channel = False
+                continue
+            next_marker = self._buffer.find(_CHANNEL_MARKER)
+            if next_marker == -1:
+                visible += self._buffer
+                self._buffer = ""
+            else:
+                visible += self._buffer[:next_marker]
+                self._buffer = self._buffer[next_marker:]
+        channel_changed = self.channel != channel_before
+        emit_channel = channel_before if channel_changed and not visible else self.channel
+        return visible, emit_channel, channel_changed
 
 
 # ------------------------------------------------------------------------------------
@@ -183,7 +252,7 @@ def truncate(lm, text, n_ctx=DEFAULT_CTX):
     return lm.detokenize(lm.tokenize(text.encode())[-n_ctx+1:]).decode()
 
 
-# Get the completion for a prompt. Return it and the stop reason.
+# Stream completions for a prompt.
 #   "min_tokens" is the minimum number of tokens that there will be
 #   room for in the response before "n_ctx" is exhausted.
 def complete(
@@ -197,7 +266,7 @@ def complete(
     stream: bool = True,
     preset: Optional[str] = DEFAULT_PRESET,
     **kwargs: Any,
-) -> Iterator[Tuple[str, Optional[str]]]:
+) -> Iterator[Completion]:
     if not stream:
         raise ValueError("Streaming is required.")
     if preset:
@@ -219,13 +288,24 @@ def complete(
         stream=True,
         **kwargs
     )
-    return (
-        (token["choices"][0].get("text", ""), token["choices"][0].get("finish_reason"))
-        for token in response
-    )
+    raw = ""
+    tracker = _ChannelTracker()
+    for token in response:
+        choice = token.get("choices", [{}])[0]
+        text = choice.get("text", "") or ""
+        stop_reason = choice.get("finish_reason")
+        if text:
+            raw += text
+            visible, channel, changed = tracker.consume(text)
+            if visible or changed or text:
+                yield Completion(raw=raw, partial=visible, channel=channel)
+        if stop_reason:
+            _, channel, _ = tracker.consume("")
+            yield Completion(raw=raw, partial="", stop_reason=stop_reason, channel=channel)
+            break
 
 
-# Get the completion for a prompt using chat formatting. Return it and the stop reason.
+# Stream chat-formatted completions.
 def chat_complete(
     *,
     lm: Any = None,
@@ -238,9 +318,8 @@ def chat_complete(
     preset: Optional[str] = DEFAULT_PRESET,
     messages: Iterable[Any] = (),
     system: str = "",
-    reasoning_stop: str = "<|start|>assistant<|channel|>final<|message|>",
     **kwargs: Any,
-) -> Iterator[Tuple[str, Optional[str]]]:
+) -> Iterator[Completion]:
     if not stream:
         raise ValueError("Streaming is required.")
     if preset:
@@ -278,31 +357,22 @@ def chat_complete(
         stream=True,
         **kwargs
     )
-    def generator() -> Iterator[Tuple[str, Optional[str]]]:
-        buffer = ""
-        streaming = False
+    def generator() -> Iterator[Completion]:
+        raw = ""
+        tracker = _ChannelTracker()
         for token in response:
             choice = token.get("choices", [{}])[0]
             delta = choice.get("delta", {})
-            text = delta.get("content", "")
+            text = delta.get("content", "") or ""
             stop_reason = choice.get("finish_reason")
             if text:
-                buffer += text
-                if not streaming:
-                    marker_index = buffer.find(reasoning_stop)
-                    if marker_index != -1:
-                        streaming = True
-                        remainder = buffer[marker_index + len(reasoning_stop):]
-                        if remainder:
-                            yield remainder, None
-                        buffer = ""
-                else:
-                    yield text, None
+                raw += text
+                visible, channel, changed = tracker.consume(text)
+                if visible or changed or text:
+                    yield Completion(raw=raw, partial=visible, channel=channel)
             if stop_reason:
-                if (not streaming) and buffer:
-                    streaming = True
-                    yield buffer, None
-                yield "", stop_reason
+                _, channel, _ = tracker.consume("")
+                yield Completion(raw=raw, partial="", stop_reason=stop_reason, channel=channel)
                 break
     return generator()
 
@@ -319,7 +389,7 @@ def chat_complete(
 #     **kwargs: Additional parameters to pass to the API.
 # 
 # Returns:
-#     generator yielding (token, finish_reason) tuples.
+#     generator yielding Completion objects.
 # 
 def server_chat_complete(
     prompt: Optional[str] = None,
@@ -330,7 +400,7 @@ def server_chat_complete(
     model: str = "default",
     url: str = LOCAL_COMPLETIONS_URL,
     **kwargs: Any,
-) -> Iterator[Tuple[str, Optional[str]]]:
+) -> Iterator[Completion]:
     if not stream:
         raise ValueError("Streaming is required.")
     # Convert messages to proper format
@@ -363,32 +433,41 @@ def server_chat_complete(
     }
     response = requests.post(url, headers=headers, json=data, stream=True)
     response.raise_for_status()
-    def stream_generator() -> Iterator[Tuple[str, Optional[str]]]:
+    def stream_generator() -> Iterator[Completion]:
+        raw = ""
+        tracker = _ChannelTracker()
         finish_reason: Optional[str] = None
         for line in response.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
             payload = line[6:]
             if payload == "[DONE]":
-                yield "", finish_reason or "stop"
+                if raw or finish_reason:
+                    _, channel, _ = tracker.consume("")
+                    yield Completion(raw=raw, partial="", stop_reason=finish_reason or "stop", channel=channel)
                 return
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
                 continue
             choice = chunk.get("choices", [{}])[0]
-            token = choice.get("delta", {}).get("content", "")
-            if token:
-                yield token, None
+            token_text = choice.get("delta", {}).get("content", "") or ""
+            if token_text:
+                raw += token_text
+                visible, channel, changed = tracker.consume(token_text)
+                if visible or changed or token_text:
+                    yield Completion(raw=raw, partial=visible, channel=channel)
             finish = choice.get("finish_reason")
             if finish:
                 finish_reason = finish
-        yield "", finish_reason or "stop"
+        if raw or finish_reason:
+            _, channel, _ = tracker.consume("")
+            yield Completion(raw=raw, partial="", stop_reason=finish_reason or "stop", channel=channel)
     return stream_generator()
 
 
 # Chat completion with logging to LM Studio conversations folder (so that it is easy to inspect).
-def logged_server_chat_complete(log_dir: str = LOG_DIR, **kwargs: Any) -> Iterator[Tuple[str, Optional[str]]]:
+def logged_server_chat_complete(log_dir: str = LOG_DIR, **kwargs: Any) -> Iterator[Completion]:
     # Ensure logs directory exists
     now = time.strftime("%Y-%m-%d_%H.%M.%S")
     timestamp = len(os.listdir(log_dir))
@@ -526,15 +605,14 @@ def logged_server_chat_complete(log_dir: str = LOG_DIR, **kwargs: Any) -> Iterat
         chat_log_path = os.path.join(log_dir, f"{timestamp}.conversation.json")
         with open(chat_log_path, "w") as f:
             json.dump(json_data, f, indent=2)
-    def generator() -> Iterator[Tuple[str, Optional[str]]]:
-        collected: list[str] = []
+    def generator() -> Iterator[Completion]:
+        latest_raw = ""
         try:
-            for token, reason in stream:
-                if token:
-                    collected.append(token)
-                yield token, reason
+            for completion in stream:
+                latest_raw = completion.raw
+                yield completion
         finally:
-            finalize_log("".join(collected))
+            finalize_log(latest_raw)
     return generator()
 
 
@@ -567,7 +645,7 @@ if __name__ == '__main__':
     preset: Optional[str] = args.preset
 
     # Local variables for tracking execution (in chat mode).
-    response: str = ""
+    response_raw: str = ""
     kwargs = dict(messages=[])
     if preset:
         kwargs["preset"] = preset
@@ -598,8 +676,9 @@ if __name__ == '__main__':
 
         # Store messages and prompts in case this is a chat.
         while True:
-            # Then generate the completion.
-            for (token, stop_reason) in generate_response(
+            analysis_open = False
+            assistant_text = ""
+            for completion in generate_response(
                 lm=lm,
                 prompt=prompt,
                 min_tokens=min_tokens,
@@ -610,20 +689,41 @@ if __name__ == '__main__':
                 # Add the grammar constraint
                 **({} if (not json) else dict(grammar=JSON_ARRAY_GRAMMAR)),
             ):
-                response += token
-                print(token, end='', flush=True)
+                channel = completion.channel or ""
+                if channel == "analysis":
+                    if completion.partial:
+                        if not analysis_open:
+                            print(_ITALIC_ON, end='', flush=True)
+                            analysis_open = True
+                        print(completion.partial, end='', flush=True)
+                    if completion.stop_reason and analysis_open:
+                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                        analysis_open = False
+                elif channel == "final":
+                    if analysis_open:
+                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                        analysis_open = False
+                    if completion.partial:
+                        assistant_text += completion.partial
+                        print(completion.partial, end='', flush=True)
+                response_raw = completion.raw
+                if completion.stop_reason:
+                    if analysis_open:
+                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                        analysis_open = False
+                    break
 
             # If this a chat, then listen and loop.
             if chat:
                 # Get a new message.
                 kwargs['messages'].extend([
                     dict(role="user", content=prompt),
-                    dict(role="assistant", content=response)
+                    dict(role="assistant", content=assistant_text or response_raw)
                 ])
                 print("\n", flush=True)
                 try: prompt = input()
                 except (KeyboardInterrupt, EOFError): break
                 print(flush=True)
-                response = ""
+                response_raw = ""
             else:
                 break
