@@ -14,6 +14,13 @@ import requests
 import sys
 import time
 
+from typing import Any, Iterable, Iterator, Optional, Tuple
+
+# Attempt to load a key for calling a remote completions endpoint.
+try:
+    from local_auth import COMPLETIONS_KEY, COMPLETIONS_URL
+except:
+    COMPLETIONS_KEY = ""
 
 # Disable logs for diskcache.
 logging.getLogger("diskcache").setLevel(logging.WARNING)
@@ -35,6 +42,8 @@ DEFAULT_TEMP = 0.4
 DEFAULT_N_THREADS = 8
 LM = None
 COMPLETION = None
+LOCAL_COMPLETIONS_URL = "http://127.0.0.1:3544/v1/chat/completions"
+REMOTE_COMPLETIONS_URL = COMPLETIONS_URL
 
 # Log directory for the inspectable chat logs.
 LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
@@ -125,7 +134,20 @@ def truncate(lm, text, n_ctx=DEFAULT_CTX):
 # Get the completion for a prompt. Return it and the stop reason.
 #   "min_tokens" is the minimum number of tokens that there will be
 #   room for in the response before "n_ctx" is exhausted.
-def complete(*, lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_CTX, temperature=DEFAULT_TEMP, grammar=None, stream=False, **kwargs):
+def complete(
+    *,
+    lm: Any = None,
+    prompt: str = "",
+    max_tokens: int = -1,
+    min_tokens: int = 64,
+    n_ctx: int = DEFAULT_CTX,
+    temperature: float = DEFAULT_TEMP,
+    grammar: Optional[Any] = None,
+    stream: bool = True,
+    **kwargs: Any,
+) -> Iterator[Tuple[str, Optional[str]]]:
+    if not stream:
+        raise ValueError("Streaming is required.")
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -139,34 +161,33 @@ def complete(*, lm=None, prompt="", max_tokens=-1, min_tokens=64, n_ctx=DEFAULT_
         grammar=grammar,
         max_tokens=max_tokens,
         temperature=temperature,
-        stream=stream,
+        stream=True,
         **kwargs
     )
-    # Return a generator of [(text, reason) ...] if streaming is wanted.
-    if (stream):
-        generator = ((token['choices'][0]['text'], token['choices'][0]['finish_reason']) for token in response)
-        return generator
-    # Otherwise just return the response.
-    else:
-        return response['choices'][0]['text'], response['choices'][0]['finish_reason']
+    return (
+        (token["choices"][0].get("text", ""), token["choices"][0].get("finish_reason"))
+        for token in response
+    )
 
 
 # Get the completion for a prompt using chat formatting. Return it and the stop reason.
 def chat_complete(
     *,
-    lm=None,
-    prompt=None,
-    max_tokens=-1,
-    min_tokens=64,
-    n_ctx=DEFAULT_CTX,
-    temperature=DEFAULT_TEMP,
-    grammar=None,
-    stream=False,
-    messages=(),
-    system="",
-    reasoning_stop="<|start|>assistant<|channel|>final<|message|>",
-    **kwargs
-):
+    lm: Any = None,
+    prompt: Optional[str] = None,
+    max_tokens: int = -1,
+    min_tokens: int = 64,
+    n_ctx: int = DEFAULT_CTX,
+    temperature: float = DEFAULT_TEMP,
+    grammar: Optional[Any] = None,
+    stream: bool = True,
+    messages: Iterable[Any] = (),
+    system: str = "",
+    reasoning_stop: str = "<|start|>assistant<|channel|>final<|message|>",
+    **kwargs: Any,
+) -> Iterator[Tuple[str, Optional[str]]]:
+    if not stream:
+        raise ValueError("Streaming is required.")
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -196,31 +217,36 @@ def chat_complete(
         grammar=grammar,
         max_tokens=max_tokens,
         temperature=temperature,
-        stream=stream,
+        stream=True,
         **kwargs
     )
-    # Return a generator of [(text, reason) ...] if streaming is wanted.
-    if (stream):
-        def generator():
-            buff = ""
-            for token in response:
-                text = token.get('choices',[{}])[0].get('delta',{}).get('content','')
-                stop_reason = token.get('choices', [{}])[0].get('finish_reason', None)
-                buff += text
-                if buff.endswith(reasoning_stop):
-                    break
-            for token in response:
-                text = token.get('choices',[{}])[0].get('delta',{}).get('content','')
-                stop_reason = token.get('choices', [{}])[0].get('finish_reason', None)
-                yield text, stop_reason
-        return generator()
-    # Otherwise just return the response.
-    else:
-        response = response.get('choices', [{}])[0]
-        text = response.get('message',{}).get('content','')
-        stop_reason = response.get('finish_reason', None)
-        text = text[text.index(reasoning_stop)+len(reasoning_stop):]
-        return text, stop_reason
+    def generator() -> Iterator[Tuple[str, Optional[str]]]:
+        buffer = ""
+        streaming = False
+        for token in response:
+            choice = token.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
+            text = delta.get("content", "")
+            stop_reason = choice.get("finish_reason")
+            if text:
+                buffer += text
+                if not streaming:
+                    marker_index = buffer.find(reasoning_stop)
+                    if marker_index != -1:
+                        streaming = True
+                        remainder = buffer[marker_index + len(reasoning_stop):]
+                        if remainder:
+                            yield remainder, None
+                        buffer = ""
+                else:
+                    yield text, None
+            if stop_reason:
+                if (not streaming) and buffer:
+                    streaming = True
+                    yield buffer, None
+                yield "", stop_reason
+                break
+    return generator()
 
 
 # A minimal wrapper to interact with a local LM Studio server via direct HTTP requests.
@@ -229,16 +255,28 @@ def chat_complete(
 #     prompt (str): The user prompt to send.
 #     max_tokens (int): Maximum tokens to generate (-1 for no limit).
 #     temperature (float): Sampling temperature (default: 0.1).
-#     stream (bool): Whether to stream the response (default: False).
+#     stream (bool): Must remain True; streaming is always enabled.
 #     messages (list): Previous conversation messages (strings or dicts).
 #     system (str): System prompt (default: "").
-#     base_url (str): Server base URL (default: "http://127.0.0.1:3544/v1").
+#     url (str): Server completions URL (default: "http://127.0.0.1:1234/v1/chat/completions").
 #     **kwargs: Additional parameters to pass to the API.
 # 
 # Returns:
-#     tuple: (text, finish_reason) for non-streaming, or generator yielding (token, finish_reason) for streaming.
+#     generator yielding (token, finish_reason) tuples.
 # 
-def server_chat_complete(prompt=None, max_tokens=-1, temperature=0.1, stream=False, messages=(), system="", base_url="http://127.0.0.1:3544/v1", **kwargs):
+def server_chat_complete(
+    prompt: Optional[str] = None,
+    max_tokens: int = -1,
+    temperature: float = 0.1,
+    stream: bool = True,
+    messages: Iterable[Any] = (),
+    system: str = "",
+    model: str = "default",
+    url: str = LOCAL_COMPLETIONS_URL,
+    **kwargs: Any,
+) -> Iterator[Tuple[str, Optional[str]]]:
+    if not stream:
+        raise ValueError("Streaming is required.")
     # Convert messages to proper format
     if len(messages) > 0:
         messages = [
@@ -255,7 +293,7 @@ def server_chat_complete(prompt=None, max_tokens=-1, temperature=0.1, stream=Fal
     
     # Build request body
     data = {
-        "model": "default",  # Adjust this based on your LM Studio model
+        "model": model,
         "messages": full_messages,
         "temperature": temperature,
         "stream": stream,
@@ -264,46 +302,39 @@ def server_chat_complete(prompt=None, max_tokens=-1, temperature=0.1, stream=Fal
     if max_tokens != -1:
         data["max_tokens"] = max_tokens
     
-    # Set headers (no Authorization)
-    headers = {"Content-Type": "application/json"}
-    url = f"{base_url}/chat/completions"
-    
-    if stream:
-        # Streaming request
-        response = requests.post(url, headers=headers, json=data, stream=True)
-        response.raise_for_status()
-        
-        def stream_generator():
-            for line in response.iter_lines():
-                if line:
-                    if line.startswith(b"data: "):
-                        event_data = line[6:].decode("utf-8")
-                        if event_data == "[DONE]":
-                            yield "", "stop"
-                        else:
-                            try:
-                                chunk = json.loads(event_data)
-                                choice = chunk["choices"][0]
-                                token = choice.get("delta", {}).get("content", "")
-                                finish_reason = choice.get("finish_reason")
-                                yield token, finish_reason
-                            except json.JSONDecodeError:
-                                continue
-        
-        return stream_generator()
-    else:
-        # Non-streaming request
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        choice = result["choices"][0]
-        text = choice["message"]["content"]
-        finish_reason = choice.get("finish_reason", "stop")
-        return text, finish_reason
+    # Set headers
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {COMPLETIONS_KEY}",
+    }
+    response = requests.post(url, headers=headers, json=data, stream=True)
+    response.raise_for_status()
+    def stream_generator() -> Iterator[Tuple[str, Optional[str]]]:
+        finish_reason: Optional[str] = None
+        for line in response.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                yield "", finish_reason or "stop"
+                return
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            choice = chunk.get("choices", [{}])[0]
+            token = choice.get("delta", {}).get("content", "")
+            if token:
+                yield token, None
+            finish = choice.get("finish_reason")
+            if finish:
+                finish_reason = finish
+        yield "", finish_reason or "stop"
+    return stream_generator()
 
 
 # Chat completion with logging to LM Studio conversations folder (so that it is easy to inspect).
-def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
+def logged_server_chat_complete(log_dir: str = LOG_DIR, **kwargs: Any) -> Iterator[Tuple[str, Optional[str]]]:
     # Ensure logs directory exists
     now = time.strftime("%Y-%m-%d_%H.%M.%S")
     timestamp = len(os.listdir(log_dir))
@@ -315,10 +346,8 @@ def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
         message_count += len(list(kwargs["messages"]))
     if "prompt" in kwargs:
         message_count += 1
-    # Create a chat name.
     chat_log_name = f"{message_count:02d}-messages ({now})"
-    # Generate the response
-    response, stop_reason = server_chat_complete(**kwargs)
+    stream = server_chat_complete(stream=True, **kwargs)
     # Initialize JSON structure
     json_data = {
         "name": chat_log_name,
@@ -405,50 +434,54 @@ def logged_server_chat_complete(log_dir=LOG_DIR, **kwargs):
             "currentlySelected": 0
         })
 
-    # Thinking blocks need to be extracted and look like this.
-    steps = []
-    if ("<think>" in response) and ("</think>" in response):
-        thoughts = response[
-            response.index("<think>") + len("<think>") :
-            response.index("</think>")
-        ]
-        response = response[response.index("</think>") + len("</think>"):]
-        steps = [{
-            "type": "contentBlock",
-            "stepIdentifier": "",
-            "content": [{"type": "text", "text": thoughts, "tokensCount": len(thoughts)}],
-            "defaultShouldIncludeInContext": True,
-            "shouldIncludeInContext": True,
-            "style": {"type": "thinking", "ended": True, "title": ""},
-            "prefix": "<think>",
-            "suffix": "</think>"
-        }]
-    # Add the response from the bot as the final message.
-    token_count += len(response)
-    messages.append({
-        "versions": [{
-            "type": "multiStep",
-            "role": "assistant",
-            "steps": steps + [{
+    def finalize_log(response_text: str) -> None:
+        steps = []
+        if ("<think>" in response_text) and ("</think>" in response_text):
+            thoughts = response_text[
+                response_text.index("<think>") + len("<think>") :
+                response_text.index("</think>")
+            ]
+            response_text = response_text[response_text.index("</think>") + len("</think>"):]
+            steps = [{
                 "type": "contentBlock",
                 "stepIdentifier": "",
-                "content": [{"type": "text", "text": response}],
+                "content": [{"type": "text", "text": thoughts, "tokensCount": len(thoughts)}],
                 "defaultShouldIncludeInContext": True,
-                "shouldIncludeInContext": True
+                "shouldIncludeInContext": True,
+                "style": {"type": "thinking", "ended": True, "title": ""},
+                "prefix": "<think>",
+                "suffix": "</think>"
             }]
-        }],
-        "currentlySelected": 0
-    })
-    # Update the token count.
-    json_data["tokenCount"] = token_count
-    # Update the messages.
-    json_data["messages"] = messages
-    # Write JSON log
-    chat_log_name = os.path.join(log_dir, f"{timestamp}.conversation.json")
-    with open(chat_log_name, "w") as f:
-        json.dump(json_data, f, indent=2)
-    # Return original results
-    return response, stop_reason
+        token_count_local = token_count + len(response_text)
+        messages.append({
+            "versions": [{
+                "type": "multiStep",
+                "role": "assistant",
+                "steps": steps + [{
+                    "type": "contentBlock",
+                    "stepIdentifier": "",
+                    "content": [{"type": "text", "text": response_text}],
+                    "defaultShouldIncludeInContext": True,
+                    "shouldIncludeInContext": True
+                }]
+            }],
+            "currentlySelected": 0
+        })
+        json_data["tokenCount"] = token_count_local
+        json_data["messages"] = messages
+        chat_log_path = os.path.join(log_dir, f"{timestamp}.conversation.json")
+        with open(chat_log_path, "w") as f:
+            json.dump(json_data, f, indent=2)
+    def generator() -> Iterator[Tuple[str, Optional[str]]]:
+        collected: list[str] = []
+        try:
+            for token, reason in stream:
+                if token:
+                    collected.append(token)
+                yield token, reason
+        finally:
+            finalize_log("".join(collected))
+    return generator()
 
 
 
