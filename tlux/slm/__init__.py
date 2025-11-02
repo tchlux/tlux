@@ -38,7 +38,6 @@ CACHE_PATH = os.path.expanduser('~/.slm.cache')
 CHAT_FORMAT = None
 
 DEFAULT_CTX = 8192
-DEFAULT_TEMP = 0.4
 DEFAULT_N_THREADS = 8
 LM = None
 COMPLETION = None
@@ -47,6 +46,59 @@ REMOTE_COMPLETIONS_URL = COMPLETIONS_URL
 
 # Log directory for the inspectable chat logs.
 LOG_DIR = os.path.expanduser("~/.cache/lm-studio/conversations/Logs/")
+
+# llama-cpp-python and gpt-oss-20b configuration presets for macOS (M-series, Metal)
+# All values are ASCII-safe and follow community-verified + author-endorsed defaults.
+BASE_CONFIG = {
+    "model_path": "gpt-oss-20b.Q5_K_M.gguf",
+    "n_ctx": 0,
+    "n_gpu_layers": -1,
+    "n_threads": -1,
+    "flash_attn": True,
+    "seed": 0,
+    "max_tokens": -1,
+}
+
+PRESETS = {
+    "openai": {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 40,
+        "min_p": 0.0,
+        "typical_p": 1.0,
+        "repeat_penalty": 1.0,
+        # "repeat_last_n": 64,
+    },
+    "reliable": {
+        "temperature": 0.65,
+        "top_p": 1.0,
+        "top_k": 40,
+        "min_p": 0.0,
+        "typical_p": 1.0,
+        "repeat_penalty": 1.05,
+        # "repeat_last_n": 128,
+    },
+    "creative": {
+        "temperature": 1.1,
+        "top_p": 0.9,
+        "top_k": 60,
+        "min_p": 0.05,
+        "typical_p": 1.0,
+        "repeat_penalty": 1.0,
+        # "repeat_last_n": 64,
+    },
+    "deterministic": {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 1,
+        "min_p": 0.0,
+        "typical_p": 1.0,
+        "repeat_penalty": 1.0,
+        # "repeat_last_n": 64,
+    },
+}
+
+DEFAULT_PRESET: Optional[str] = "reliable"
 
 
 # ------------------------------------------------------------------------------------
@@ -141,13 +193,17 @@ def complete(
     max_tokens: int = -1,
     min_tokens: int = 64,
     n_ctx: int = DEFAULT_CTX,
-    temperature: float = DEFAULT_TEMP,
     grammar: Optional[Any] = None,
     stream: bool = True,
+    preset: Optional[str] = DEFAULT_PRESET,
     **kwargs: Any,
 ) -> Iterator[Tuple[str, Optional[str]]]:
     if not stream:
         raise ValueError("Streaming is required.")
+    if preset:
+        if preset not in PRESETS:
+            raise ValueError(f"Unknown preset: {preset}")
+        kwargs = {**PRESETS[preset], **kwargs}
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -160,7 +216,6 @@ def complete(
         prompt,
         grammar=grammar,
         max_tokens=max_tokens,
-        temperature=temperature,
         stream=True,
         **kwargs
     )
@@ -178,9 +233,9 @@ def chat_complete(
     max_tokens: int = -1,
     min_tokens: int = 64,
     n_ctx: int = DEFAULT_CTX,
-    temperature: float = DEFAULT_TEMP,
     grammar: Optional[Any] = None,
     stream: bool = True,
+    preset: Optional[str] = DEFAULT_PRESET,
     messages: Iterable[Any] = (),
     system: str = "",
     reasoning_stop: str = "<|start|>assistant<|channel|>final<|message|>",
@@ -188,6 +243,10 @@ def chat_complete(
 ) -> Iterator[Tuple[str, Optional[str]]]:
     if not stream:
         raise ValueError("Streaming is required.")
+    if preset:
+        if preset not in PRESETS:
+            raise ValueError(f"Unknown preset: {preset}")
+        kwargs = {**PRESETS[preset], **kwargs}
     if (lm is None):
         if (LM is None):
             load_lm()
@@ -216,7 +275,6 @@ def chat_complete(
         messages=system + list(messages) + [dict(role='user', content=prompt)],
         grammar=grammar,
         max_tokens=max_tokens,
-        temperature=temperature,
         stream=True,
         **kwargs
     )
@@ -254,7 +312,6 @@ def chat_complete(
 # Args:
 #     prompt (str): The user prompt to send.
 #     max_tokens (int): Maximum tokens to generate (-1 for no limit).
-#     temperature (float): Sampling temperature (default: 0.1).
 #     stream (bool): Must remain True; streaming is always enabled.
 #     messages (list): Previous conversation messages (strings or dicts).
 #     system (str): System prompt (default: "").
@@ -267,7 +324,6 @@ def chat_complete(
 def server_chat_complete(
     prompt: Optional[str] = None,
     max_tokens: int = -1,
-    temperature: float = 0.1,
     stream: bool = True,
     messages: Iterable[Any] = (),
     system: str = "",
@@ -290,12 +346,10 @@ def server_chat_complete(
         messages += [{"role": "user", "content": prompt}]
     # Construct the full conversation.
     full_messages = ([{"role": "system", "content": system}] if system else []) + messages
-    
     # Build request body
     data = {
         "model": model,
         "messages": full_messages,
-        "temperature": temperature,
         "stream": stream,
         **kwargs
     }
@@ -495,8 +549,8 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--min_tokens', type=int, default=1, help='The minimum number of tokens to produce.')
     parser.add_argument('-n', '--max_tokens', type=int, default=-1, help='The maximum number of tokens to produce.')
     parser.add_argument('-c', '--context_size', type=int, default=DEFAULT_CTX, help='The upper limit in prompt size before the head is truncated.')
-    parser.add_argument('-t', '--temperature', type=float, default=DEFAULT_TEMP, help='The temperature used in response generation.')
     parser.add_argument('-p', '--prompt', type=str, default="", help='The prompt to pass to the model.')
+    parser.add_argument('--preset', choices=tuple(PRESETS.keys()), help='Sampling preset to apply.', default=DEFAULT_PRESET)
 
     # Parse the command line arguments.
     args = parser.parse_args()
@@ -508,13 +562,15 @@ if __name__ == '__main__':
     max_tokens: int = args.max_tokens
     context_size: int = args.context_size
     prompt: str = args.prompt
-    temperature: float = args.temperature
     echo_prompt: bool = not args.no_echo
     chat: bool = args.chat
+    preset: Optional[str] = args.preset
 
     # Local variables for tracking execution (in chat mode).
     response: str = ""
     kwargs = dict(messages=[])
+    if preset:
+        kwargs["preset"] = preset
 
     # Ensure viable context size is set, re-initialize model if larger context is needed.
     context_size = max(context_size, min_tokens)
@@ -549,7 +605,6 @@ if __name__ == '__main__':
                 min_tokens=min_tokens,
                 max_tokens=max_tokens,
                 n_ctx=context_size,
-                temperature=temperature,
                 stream=True,
                 **kwargs,
                 # Add the grammar constraint
