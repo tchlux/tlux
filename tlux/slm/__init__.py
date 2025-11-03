@@ -689,29 +689,32 @@ if __name__ == '__main__':
                 # Add the grammar constraint
                 **({} if (not json) else dict(grammar=JSON_ARRAY_GRAMMAR)),
             ):
-                channel = completion.channel or ""
-                if channel == "analysis":
-                    if completion.partial:
-                        if not analysis_open:
-                            print(_ITALIC_ON, end='', flush=True)
-                            analysis_open = True
-                        print(completion.partial, end='', flush=True)
-                    if completion.stop_reason and analysis_open:
-                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
-                        analysis_open = False
-                elif channel == "final":
-                    if analysis_open:
-                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
-                        analysis_open = False
-                    if completion.partial:
-                        assistant_text += completion.partial
-                        print(completion.partial, end='', flush=True)
-                response_raw = completion.raw
-                if completion.stop_reason:
-                    if analysis_open:
-                        print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
-                        analysis_open = False
-                    break
+                if chat:
+                    channel = completion.channel or ""
+                    if channel == "analysis":
+                        if completion.partial:
+                            if not analysis_open:
+                                print(_ITALIC_ON, end='', flush=True)
+                                analysis_open = True
+                            print(completion.partial, end='', flush=True)
+                        if completion.stop_reason and analysis_open:
+                            print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                            analysis_open = False
+                    elif channel == "final":
+                        if analysis_open:
+                            print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                            analysis_open = False
+                        if completion.partial:
+                            assistant_text += completion.partial
+                            print(completion.partial, end='', flush=True)
+                    response_raw = completion.raw
+                    if completion.stop_reason:
+                        if analysis_open:
+                            print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
+                            analysis_open = False
+                        break
+                elif completion.partial:
+                    print(completion.partial, end="", flush=True)
 
             # If this a chat, then listen and loop.
             if chat:
