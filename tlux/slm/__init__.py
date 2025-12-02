@@ -42,6 +42,7 @@ DEFAULT_CTX = 8192
 DEFAULT_N_THREADS = 8
 LM = None
 COMPLETION = None
+# Default to the newer (OpenAI-style) completions endpoint instead of chat/completions.
 LOCAL_COMPLETIONS_URL = "http://127.0.0.1:3544/v1/chat/completions"
 REMOTE_COMPLETIONS_URL = COMPLETIONS_URL
 
@@ -377,7 +378,8 @@ def chat_complete(
     return generator()
 
 
-# A minimal wrapper to interact with a local LM Studio server via direct HTTP requests.
+# Stream chat completions using the `/v1/chat/completions` endpoint (OpenAI-compatible).
+# Works with LM Studio and remote servers that expose the Chat Completions API.
 # 
 # Args:
 #     prompt (str): The user prompt to send.
@@ -385,6 +387,7 @@ def chat_complete(
 #     stream (bool): Must remain True; streaming is always enabled.
 #     messages (list): Previous conversation messages (strings or dicts).
 #     system (str): System prompt (default: "").
+#     model (str): Model to generate the completion.
 #     url (str): Server completions URL (default: "http://127.0.0.1:1234/v1/chat/completions").
 #     **kwargs: Additional parameters to pass to the API.
 # 
@@ -392,6 +395,7 @@ def chat_complete(
 #     generator yielding Completion objects.
 # 
 def server_chat_complete(
+    *,
     prompt: Optional[str] = None,
     max_tokens: int = -1,
     stream: bool = True,
@@ -403,7 +407,8 @@ def server_chat_complete(
 ) -> Iterator[Completion]:
     if not stream:
         raise ValueError("Streaming is required.")
-    # Convert messages to proper format
+
+    # Normalize messages to role/content dictionaries.
     if len(messages) > 0:
         messages = [
             m if isinstance(m, dict) else {'role': 'user' if i % 2 == 0 else 'assistant', 'content': m}
@@ -411,21 +416,20 @@ def server_chat_complete(
         ]
     else:
         messages = []
-    # Push the prompt to the back of the messages.
+    # Append the latest user prompt as the final turn.
     if prompt is not None:
         messages += [{"role": "user", "content": prompt}]
-    # Construct the full conversation.
+    # Construct the full conversation payload.
     full_messages = ([{"role": "system", "content": system}] if system else []) + messages
-    # Build request body
+    # Build request body for the chat completions endpoint.
     data = {
         "model": model,
         "messages": full_messages,
         "stream": stream,
-        **kwargs
+        **kwargs,
     }
     if max_tokens != -1:
         data["max_tokens"] = max_tokens
-    
     # Set headers
     headers = {
         "Content-Type": "application/json",
@@ -451,7 +455,8 @@ def server_chat_complete(
             except json.JSONDecodeError:
                 continue
             choice = chunk.get("choices", [{}])[0]
-            token_text = choice.get("delta", {}).get("content", "") or ""
+            # Chat completions stream content under delta; some servers may still emit `text`.
+            token_text = choice.get("delta", {}).get("content", "") or choice.get("text", "") or ""
             if token_text:
                 raw += token_text
                 visible, channel, changed = tracker.consume(token_text)
@@ -467,9 +472,10 @@ def server_chat_complete(
 
 
 # Chat completion with logging to LM Studio conversations folder (so that it is easy to inspect).
-def logged_server_chat_complete(log_dir: str = LOG_DIR, **kwargs: Any) -> Iterator[Completion]:
+def logged_server_chat_complete(*, log_dir: str = LOG_DIR, **kwargs: Any) -> Iterator[Completion]:
     # Ensure logs directory exists
     now = time.strftime("%Y-%m-%d_%H.%M.%S")
+    os.makedirs(log_dir, exist_ok=True)
     timestamp = len(os.listdir(log_dir))
     # Count all messages.
     message_count = 0
