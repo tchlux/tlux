@@ -490,6 +490,38 @@ def spawn_job(
     )
 
 
+# Lightweight inline execution for serial workflows and tests.
+# Runs the job function immediately in-process, bypassing subprocess and watcher.
+class InlineJob:
+    def __init__(self, job_id: str = "inline") -> None:
+        self.id = job_id
+        self.status = "FINISHED"
+        self.exit_code = 0
+
+    def is_done(self) -> bool:
+        return True
+
+    def is_running(self) -> bool:
+        return False
+
+
+# Execute a job function immediately and return an InlineJob.
+# 
+# Parameters:
+#   command (str): Dotted import path to function.
+#   *args, **kwargs: Passed through to the function.
+# 
+# Returns:
+#   InlineJob: The completed job object.
+# 
+def spawn_job_inline(command: str, *args: Any, **kwargs: Any) -> InlineJob:
+    mod_path, func_name = command.rsplit(".", 1)
+    mod = __import__(mod_path, fromlist=[func_name])
+    func = getattr(mod, func_name)
+    func(*args, **kwargs)
+    return InlineJob()
+
+
 # Host-local maintenance loop.
 # 
 # Every *scan_interval* seconds this function:

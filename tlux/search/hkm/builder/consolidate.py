@@ -27,7 +27,7 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
                 continue
             reader = ChunkReader(str(chunk_dir), metadata_schema=[])
             for local_idx in range(reader.document_count):
-                doc_id = reader.chunk_metadata().get("min_document_id", 0) + local_idx
+                doc_id = (reader.chunk_metadata().get("min_document_id", 0) or 0) + local_idx
                 row = np.array((doc_id, worker_id, shard_id, local_idx), dtype=DOC_INDEX_DTYPE)
                 rows.append(row)
             # rename to shard naming

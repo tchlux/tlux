@@ -15,14 +15,12 @@ import os
 import json
 import argparse
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 try:                from ..fs import FileSystem
 except ImportError: from tlux.search.hkm.fs import FileSystem
-try:                from ..jobs import spawn_job
-except ImportError: from tlux.search.hkm.jobs import spawn_job
-try:                from .consolidate import run_consolidate
-except ImportError: from tlux.search.hkm.builder.consolidate import run_consolidate
+try:                from ..jobs import spawn_job, spawn_job_inline
+except ImportError: from tlux.search.hkm.jobs import spawn_job, spawn_job_inline
 
 
 # Function to build the search index by orchestrating worker processes.
@@ -168,15 +166,11 @@ def build_search_index_inline(
         )
 
     # Consolidate
-    from .consolidate import consolidate
+    spawn_job_inline("hkm.builder.consolidate.run_consolidate", index_root, fs_root=index_root)
 
-    fs = FileSystem(root=index_root)
-    consolidate(fs, index_root)
-
-    # Build HKM tree
-    from .recursive_index_builder import build_cluster_index
-
-    build_cluster_index(
+    # Build HKM tree inline
+    spawn_job_inline(
+        "hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
         leaf_doc_limit=leaf_doc_limit,
