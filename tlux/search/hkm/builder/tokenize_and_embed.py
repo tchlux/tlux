@@ -20,12 +20,10 @@ import numpy as np
 
 try:
     from ..fs import FileSystem
-    from ..embedder import tokenize, embed_windows
     from ..tools.unique_count_estimator import UniqueCounter
     from ..tools.rank_estimator import RankEstimator
 except ImportError:  # pragma: no cover
     from tlux.search.hkm.fs import FileSystem
-    from tlux.search.hkm.embedder import tokenize, embed_windows
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
     from tlux.search.hkm.tools.rank_estimator import RankEstimator
 
@@ -33,11 +31,39 @@ from .chunk_io import (
     CATEGORY_NULL,
     NUMBER_NULL,
     ChunkReader,
-    ChunkWriter,
+ChunkWriter,
 )
 
 DocumentBatch = Iterable[Tuple[List[str], List[List[Union[str, float]]]]]
 MetadataSchema = List[Tuple[str, type]]
+
+
+def _load_embedder():
+    import os
+
+    if os.getenv("HKM_FAKE_EMBEDDER") == "1":
+        def _tok(texts: List[str]) -> List[List[int]]:
+            return [[int(t) for t in txt.split() if t.isdigit()] for txt in texts]
+
+        def _emb(tok_lists: List[List[int]]):
+            metas = []
+            all_vecs = []
+            for toks in tok_lists:
+                if len(toks) == 0:
+                    toks = [0]
+                vec = np.zeros((1, 4), dtype=np.float32)
+                all_vecs.append(vec)
+                metas.append((0, len(toks), len(toks)))
+            embeddings = np.vstack(all_vecs)
+            return embeddings, metas
+
+        return _tok, _emb
+
+    try:
+        from ..embedder import tokenize, embed_windows  # type: ignore
+    except Exception:
+        from tlux.search.hkm.embedder import tokenize, embed_windows  # type: ignore
+    return tokenize, embed_windows
 
 
 def process_documents(
@@ -49,6 +75,7 @@ def process_documents(
     n_gram: int = 3,
     fs_root: Optional[str] = None,
 ) -> Tuple[str, str]:
+    tokenize, embed_windows = _load_embedder()
     """Tokenize + embed batches, emit chunk directories and summary stats."""
     file_system = FileSystem() if fs_root is None else FileSystem(root=fs_root)
     document_output_directory = file_system.mkdir(document_output_directory, exist_ok=True)
@@ -61,7 +88,13 @@ def process_documents(
         name: RankEstimator() for (name, typ) in metadata_schema if typ is float
     }
 
-    chunk_writer = ChunkWriter(file_system, document_output_directory, chunk_size_limit, metadata_schema)
+    chunk_writer = ChunkWriter(
+        file_system,
+        document_output_directory,
+        chunk_size_limit,
+        metadata_schema,
+        emit_worker_stats=True,
+    )
     document_id = 0
 
     for texts, metadata_list in document_batches:
@@ -101,6 +134,7 @@ def process_documents(
             chunk_writer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
 
     chunk_writer.save_chunk()
+    chunk_writer.finalize_worker()
 
     file_system.write(
         file_system.join(summary_output_directory, "n_gram_counter.bytes"),

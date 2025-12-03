@@ -28,10 +28,12 @@ try:
     from ..fs import FileSystem
     from ..tools.value_seen_estimator import ValueObserver
     from ..tools.unique_count_estimator import UniqueCounter
+    from ..tools.rank_estimator import RankEstimator
 except ImportError:  # pragma: no cover
     from tlux.search.hkm.fs import FileSystem
     from tlux.search.hkm.tools.value_seen_estimator import ValueObserver
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
+    from tlux.search.hkm.tools.rank_estimator import RankEstimator
 
 MetadataSchema = List[Tuple[str, type]]
 
@@ -97,6 +99,7 @@ class ChunkWriter:
         chunk_size_limit: int,
         metadata_schema: MetadataSchema,
         n_gram: int = 3,
+        emit_worker_stats: bool = False,
     ):
         self._fs = file_system
         self._output_directory = output_directory
@@ -104,6 +107,16 @@ class ChunkWriter:
         self._metadata_schema = metadata_schema
         self._iterable_fields = [name for (name, typ) in metadata_schema if typ in (list, dict, tuple)]
         self._n_gram = max(1, int(n_gram))
+        self._emit_worker_stats = emit_worker_stats
+        # worker-level aggregates (preserved across chunks)
+        self._worker_rank: Dict[str, RankEstimator] = {} if emit_worker_stats else {}
+        self._worker_cat_counts: Dict[str, Dict[int, int]] = {} if emit_worker_stats else {}
+        self._worker_cat_map: Dict[str, Dict[str, int]] = {} if emit_worker_stats else {}
+        self._worker_ngram = UniqueCounter(precision=UNIQUE_PRECISION) if emit_worker_stats else None
+        self._worker_iterable_uniques = (
+            {name: UniqueCounter(precision=UNIQUE_PRECISION) for name in self._iterable_fields}
+            if emit_worker_stats else {}
+        )
         self._reset()
 
     def _reset(self) -> None:
@@ -132,9 +145,7 @@ class ChunkWriter:
         self._iterable_observers = {
             name: ValueObserver.create(OBSERVER_CAPACITY) for name in self._iterable_fields
         }
-        self._iterable_uniques = {
-            name: UniqueCounter(precision=UNIQUE_PRECISION) for name in self._iterable_fields
-        }
+        self._iterable_uniques = {name: UniqueCounter(precision=UNIQUE_PRECISION) for name in self._iterable_fields}
         self._ngram_counter = UniqueCounter(precision=UNIQUE_PRECISION)
 
     def _metadata_dtype(self) -> np.dtype:
@@ -175,6 +186,8 @@ class ChunkWriter:
             for i in range(len(tokens) - n + 1):
                 ngram_bytes = b"".join(int(tok).to_bytes(4, "little") for tok in tokens[i : i + n])
                 self._ngram_counter.add(ngram_bytes)
+                if self._emit_worker_stats and self._worker_ngram is not None:
+                    self._worker_ngram.add(ngram_bytes)
 
         for i, (start, end, window_size) in enumerate(embedding_windows):
             embedding_row = embeddings[i]
@@ -192,6 +205,12 @@ class ChunkWriter:
         for (field_name, field_type), value in zip(self._metadata_schema, metadata):
             if field_type is float:
                 meta_bytes += NUMBER_NULL.tobytes() if value is None else np.float32(float(value)).tobytes()
+                # worker-level rank estimator
+                if self._emit_worker_stats:
+                    if field_name not in self._worker_rank:
+                        self._worker_rank[field_name] = RankEstimator()
+                    if value is not None:
+                        self._worker_rank[field_name].add(float(value))
             elif field_type is bytes:
                 if value is None:
                     meta_bytes += struct.pack("<QQ", 0, 0)
@@ -210,9 +229,21 @@ class ChunkWriter:
                             self._iterable_uniques[field_name].add(
                                 _encode_observation(path, val)
                             )
+                            if self._emit_worker_stats:
+                                self._worker_iterable_uniques[field_name].add(
+                                    _encode_observation(path, val)
+                                )
                 meta_bytes += struct.pack("<QQ", 0, 0)
             else:
                 meta_bytes += CATEGORY_NULL.tobytes() if value is None else np.uint64(int(value)).tobytes()
+                if self._emit_worker_stats:
+                    if field_name not in self._worker_cat_map:
+                        self._worker_cat_map[field_name] = {}
+                        self._worker_cat_counts[field_name] = {}
+                    cat_map = self._worker_cat_map[field_name]
+                    cat_counts = self._worker_cat_counts[field_name]
+                    if value is not None:
+                        cat_counts[int(value)] = cat_counts.get(int(value), 0) + 1
         self._metadata_writer.write(meta_bytes)
         self._total_bytes += len(meta_bytes)
 
@@ -268,7 +299,9 @@ class ChunkWriter:
         meta_bytes = self._metadata_file.read()
         if meta_bytes:
             meta_arr = np.frombuffer(meta_bytes, dtype=self._metadata_dtype())
-            np.save(os.path.join(chunk_dir, "metadata.npy"), meta_arr)
+        else:
+            meta_arr = np.zeros((len(self._token_offsets),), dtype=self._metadata_dtype())
+        np.save(os.path.join(chunk_dir, "metadata.npy"), meta_arr)
 
         # blobs
         self._blob_file.seek(0)
@@ -307,6 +340,33 @@ class ChunkWriter:
         ):
             writer.close()
         self._reset()
+
+    def finalize_worker(self) -> None:
+        """Write worker-level summary stats if enabled."""
+        if not self._emit_worker_stats:
+            return
+        summary_dir = os.path.join(self._output_directory, "summary")
+        os.makedirs(summary_dir, exist_ok=True)
+        for field_name, counts in self._worker_cat_counts.items():
+            buf = bytearray()
+            buf.extend(struct.pack("<Q", len(counts)))
+            for cat_id, count in sorted(counts.items()):
+                buf.extend(struct.pack("<Q", cat_id))
+                buf.extend(struct.pack("<Q", count))
+            with open(os.path.join(summary_dir, f"categorical-dist.{field_name}.bytes"), "wb") as f_cat:
+                f_cat.write(bytes(buf))
+        if self._worker_cat_map:
+            with open(os.path.join(summary_dir, "category_map.json"), "w", encoding="ascii") as f_cm:
+                json.dump(self._worker_cat_map, f_cm, separators=(",", ":"))
+        for field_name, ranker in self._worker_rank.items():
+            with open(os.path.join(summary_dir, f"numeric-dist.{field_name}.bytes"), "wb") as f_num:
+                f_num.write(ranker.to_bytes())
+        if self._worker_ngram is not None:
+            with open(os.path.join(summary_dir, "n_gram_counter.bytes"), "wb") as f_ngw:
+                f_ngw.write(self._worker_ngram.to_bytes())
+        for field_name, counter in self._worker_iterable_uniques.items():
+            with open(os.path.join(summary_dir, f"unique.{field_name}.bytes"), "wb") as f_uc:
+                f_uc.write(counter.to_bytes())
 
 
 class ChunkReader:

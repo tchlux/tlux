@@ -1,86 +1,62 @@
-"""Top-level search facade."""
+"""Token n-gram searcher over directory chunks."""
+
+from __future__ import annotations
 
 import json
+import os
 import struct
+from collections import defaultdict
 from dataclasses import dataclass
-from functools import lru_cache
-from typing import List
+from typing import Dict, List, Tuple
 
-from ..tools.value_seen_estimator import ValueObserver
+import numpy as np
+
 from ..fs import FileSystem
-from ..schema import Hit, SearchResult, QuerySpec
+from ..schema import Hit, QuerySpec, SearchResult, DOC_INDEX_DTYPE
+from ..builder.chunk_io import ChunkReader
 from .planner import parse_query
 
 
-# ------------------------------------------------------------------ #
-#  Bloom-filter loader (LRU cached)                                  #
-# ------------------------------------------------------------------ #
-@lru_cache(maxsize=1024)
-def _load_bloom(path: str) -> ValueObserver:
-    with open(path, "rb") as f:
-        data = f.read()
-    return ValueObserver.loads(data)
+def _seq_to_bytes(seq: List[int]) -> bytes:
+    return struct.pack("<" + "I" * len(seq), *[int(x) for x in seq])
 
 
 @dataclass
 class Searcher:
-    """Simple searcher that performs substring search on stored docs."""
-
     fs: FileSystem
     docs_root: str
-    hkm_root: str
+    hkm_root: str = ""
 
-    def _load_manifest(self) -> List[dict]:
-        manifest_path = self.fs.join(self.hkm_root, "manifest.jsonl")
-        if not self.fs.exists(manifest_path):
-            return []
-        with self.fs.open(manifest_path) as f:
-            return [json.loads(line) for line in f]
+    def _load_doc_index(self) -> np.ndarray:
+        path = self.fs.join(self.docs_root, "doc_index.npy")
+        return np.load(path)
 
-
-    @staticmethod
-    def _ngrams_to_le_bytes(tokens: List[int]) -> List[bytes]:
-        """Return packed 1- to 3-grams from tokens as little-endian byte sequences."""
-        out = []
-        for i in range(len(tokens)):
-            for j in range(i + 1, min(len(tokens) + 1, i + 4)):
-                out.append(struct.pack("<" + "I" * (j - i), *(int(t) for t in tokens[i:j])))
-        return out
-
+    def _group_by_shard(self, doc_index: np.ndarray) -> Dict[Tuple[int, int], List[Tuple[int, int]]]:
+        groups: Dict[Tuple[int, int], List[Tuple[int, int]]] = defaultdict(list)
+        for row in doc_index:
+            groups[(int(row["worker"]), int(row["shard"]))].append((int(row["doc_id"]), int(row["idx"])))
+        return groups
 
     def search(self, query_dict) -> SearchResult:
-        # Normalise input
-        spec = (
-            parse_query(json.dumps(query_dict))
-            if isinstance(query_dict, dict)
-            else query_dict
-        )
+        spec = parse_query(json.dumps(query_dict)) if isinstance(query_dict, dict) else query_dict
+        if not spec.token_sequence:
+            return SearchResult(docs=[])
+
+        target = _seq_to_bytes(spec.token_sequence)
+        doc_index = self._load_doc_index()
+        groups = self._group_by_shard(doc_index)
+
         hits: List[Hit] = []
-        manifest = self._load_manifest()
-        # Decide search mode
-        if spec.text:
-            query_bytes = spec.text.lower().encode("utf-8")
-            for entry in manifest:
-                with self.fs.open(entry["path"], "rb") as f:
-                    data = f.read().lower()
-                pos = data.find(query_bytes)
+        for (worker, shard), entries in groups.items():
+            chunk_path = self.fs.join(self.docs_root, f"worker_{worker:04d}", f"shard_{shard:08d}.hkmchunk")
+            reader = ChunkReader(chunk_path, metadata_schema=[])
+            for doc_id, local_idx in entries:
+                tokens, _, _, _ = reader[local_idx]
+                tok_bytes = tokens.tobytes()
+                pos = tok_bytes.find(target)
                 if pos != -1:
-                    hits.append(Hit(entry["doc_id"], 1.0, (pos, pos + len(query_bytes))))
+                    hit_pos = pos // 4
+                    hits.append(Hit(doc_id, 1.0, (hit_pos, hit_pos + len(spec.token_sequence))))
                     if len(hits) >= spec.top_k:
-                        break
-        elif spec.token_sequence:
-            ngrams = self._ngrams_to_le_bytes(spec.token_sequence)
-            for entry in manifest:
-                bloom_path = entry.get("bloom")
-                if bloom_path:  # quick reject if Bloom says impossible
-                    bf = _load_bloom(bloom_path)
-                    if any(ngram not in bf for ngram in ngrams):
-                        continue  # definitely absent, skip I/O
-                with self.fs.open(entry["path"], "rb") as f:
-                    data = f.read()
-                pos = data.find(seq_bytes)
-                if pos != -1:
-                    hits.append(Hit(entry["doc_id"], 1.0, (pos, pos + len(seq_bytes))))
-                    if len(hits) >= spec.top_k:
-                        break
+                        return SearchResult(docs=hits)
         return SearchResult(docs=hits)
