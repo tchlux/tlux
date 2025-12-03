@@ -111,7 +111,7 @@ def _launch_worker(fs: FileSystem, job_dir: str, module_path: str = MODULE_PATH)
         raise exc
 
 
-# Wrapper for a single job stored on disk.
+# Wrapper for a single job stored in the FileSystem.
 #
 # Parameters:
 #   fs (FileSystem): File-system abstraction.
@@ -407,13 +407,13 @@ def create_new_job(fs: FileSystem, command: str, *,
     # Returns:
     #   str: Reserved job ID.
     # 
-    def _reserve_id(fs: FileSystem) -> str:
+    def _reserve_id(fs: FileSystem) -> Tuple[str, str]:
         while True:
             tick = int(time.time() * 10_000)
             candidate = f"{tick % 10 ** ID_WIDTH:0{ID_WIDTH}d}"
             try:
-                fs.mkdir(fs.join("ids", candidate), exist_ok=False)
-                return candidate
+                candidate_dir = fs.mkdir(fs.join("ids", candidate), exist_ok=False)
+                return candidate, candidate_dir
             except OSError:
                 time.sleep(0.0001)
 
@@ -421,14 +421,16 @@ def create_new_job(fs: FileSystem, command: str, *,
     kwargs = dict(kwargs or {})
     resource_config = dict(resource_config or {})
 
-    job_id = _reserve_id(fs)
+    job_id, job_id_dir = _reserve_id(fs)
+    job_temp_dir = fs.join(job_id_dir, job_id)
+    fs.mkdir(job_temp_dir, exist_ok=False)
+    # Set the job directory (where this will move once populated).
     has_deps = bool(dependencies)
     bucket = "queued" if has_deps else "running"
     job_dir = fs.join(bucket, job_id)
-    fs.mkdir(job_dir, exist_ok=False)
 
-    fs.write(fs.join(job_dir, "exec_function"), command.encode(), overwrite=True)
-    fs.write(fs.join(job_dir, "exec_args"), pickle.dumps({"args": args, "kwargs": kwargs}), overwrite=True)
+    fs.write(fs.join(job_temp_dir, "exec_function"), command.encode(), overwrite=True)
+    fs.write(fs.join(job_temp_dir, "exec_args"), pickle.dumps({"args": args, "kwargs": kwargs}), overwrite=True)
 
     now_ts = time.time()
     cfg: Dict[str, Any] = {
@@ -442,18 +444,20 @@ def create_new_job(fs: FileSystem, command: str, *,
         "hostname": None,
         "pid": None,
     }
-    fs.write(fs.join(job_dir, "job_config"), json.dumps(cfg).encode(), overwrite=True)
+    fs.write(fs.join(job_temp_dir, "job_config"), json.dumps(cfg).encode(), overwrite=True)
 
     if has_deps:
-        up_root = fs.join(job_dir, "upstream_jobs")
+        up_root = fs.join(job_temp_dir, "upstream_jobs")
         fs.mkdir(up_root, exist_ok=True)
         for dep in dependencies:
             fs.mkdir(fs.join(up_root, dep.id), exist_ok=True)
             next_root = fs.join("next", dep.id)
             fs.mkdir(next_root, exist_ok=True)
             fs.mkdir(fs.join(next_root, job_id), exist_ok=True)
+        fs.rename(job_temp_dir, job_dir)
         return Job(fs=fs, path=job_dir)
     else:
+        fs.rename(job_temp_dir, job_dir)
         return _launch_worker(fs=fs, job_dir=job_dir)
 
     # return Job(fs, path=job_dir, active_job=active_job)
@@ -577,7 +581,7 @@ def watcher(fs: FileSystem, scan_interval: float = 10.0) -> None:
 
 
 # Run *job* in a subprocess, monitor resources, finalize state, trigger deps.
-def worker(fs: FileSystem, job: Job) -> None:
+def worker(fs: FileSystem, job: Job) -> Job:
     # --- launch target -------------------------------------------------------
     args, kwargs = job.arguments
     payload_hex = pickle.dumps({"args": args, "kwargs": kwargs}).hex()

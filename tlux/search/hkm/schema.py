@@ -7,7 +7,7 @@ from typing import List, Dict, Tuple
 # ---------------------------------------------------------------------------
 # Configuration constants
 LEAF_MAX_CHUNKS = 256_000
-PREVIEW_CHUNKS = 128  # 64 random + 64 diverse
+PREVIEW_CHUNKS = 1024  # 512 random + 512 diverse
 WINDOW_SIZES = (8, 32, 128, 512)
 STRIDE_FACTOR = 0.5
 HASHBITMASK_FP_RATE = 0.01

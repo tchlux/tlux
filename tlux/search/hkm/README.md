@@ -112,73 +112,44 @@ Directory structure (fixed):
       config.json             # Search index config, column names, size, ...
       summary/
         centroids.npy         # (<= 4096 x 1024 float32)
-        stats.json            # category counts, numeric histograms
         preview_random.npy    # (512 x uint64 chunk_id, 512-token doc preview, embedding)
         preview_diverse.npy   # (512 x uint64 chunk_id, 512-token doc preview, embedding)
-        category_counter.bin  # optional unique-value counters for all categories in this node
-        hashbitmask.bin       # optional token n-gram presence hash bit mask for all docs in this node
-      docs/                   # randomized docs broken up by number of workers
-        meta/
-          worker_0000_counters.bin  # All unique-value counters for categories from workers
+        category_map.json     # maps categorical values to hashed integers
+        categorical-dist.<name>.bytes # per-field categorical frequency tables
+        numeric-dist.<name>.bytes     # per-field numeric value distributions
+        n_gram_counter.bytes  # total unique n-gram counter
+        hashbitmask.bin       # [optional] token n-gram presence hash bit mask for all docs in this node
+        part_0000/            # summary for a part of the data (before having been merged above)
+          category_map.json # maps categorical values to hashed integers
+          categorical-dist.<name>.bytes  # per-field categorical frequency tables
+          numeric-dist.<name>.bytes      # per-field numeric value distributions
+          n_gram_counter.bytes # total unique n-gram counter
+        part_0001/
           ...
-        worker_0000/
-          doc_index.npy            # sorted table (DOC_INDEX_DTYPE)
-          shard_00000000.bin       # (<= 8 MB tokenized text)
-          shard_00000000.meta.npy  # DOC_META_DTYPE rows (one per doc)
+      data/                   # randomized data broken up by number of workers
+        part_0000/
+          chunk_00000000_00000042.hkmchunk  # ZIP archive (min doc ID, max doc ID) of
+          chunk_00000043_00000099.hkmchunk  #  embeddings, tokens, and metadata.
           ...
-        ...
-      embeddings/
-        worker_0000_batch_000000.npy  # (<= 8 MB, 256 k x 1024 x 4 B)
         ...
       cluster_0000/     # recursively structured subdirectories
         summary/
           ...
-        docs/
-          ...
-        embeddings/
+        data/
           ...
         cluster_0000/
           summary/
             ...
-          docs/
-            ...
-          embeddings/
+          data/
             ...
         ...
       ...
 
-Binary format: little-endian NumPy `.npy` v2.
+Binary format: `.hkmchunk` custom ZIP archive.
 
-Structured dtypes
+Structured dtypes:
 
-  DOC_META_DTYPE (stored inside each docs/ shard)
-
-        [('doc_id',   uint64),
-         ('cat0',     uint32), ... up to 32 cols ...,
-         ('num0',     float32), ... up to 32 cols ...,
-         ('text_off', uint64),
-         ('text_len', uint32)]
-
-  CHUNK_META_DTYPE (stored in leaf)
-
-        [('chunk_id', uint64),
-         ('doc_id',   uint64),
-         ('tok_off',  uint32),
-         ('tok_len',  uint32),
-         ('win_size', uint16),
-         padding ... to 64 B]
-
-`stats.json` schema (per node)
-
-    {
-      "doc_id_min"    : 123,
-      "doc_id_max"    : 456,
-      "labels_bitset" : "<hex>",
-      "numeric_min"   : [...],
-      "numeric_max"   : [...],
-      "labels_count"  : {"lang:en": 31231, ...},
-      "numeric_hist"  : {"year": [[1900,1950,12], ...]}
-    }
+  TO DO (based on code in `/build`)
 
 All per-node files are <= 8 MB.
 

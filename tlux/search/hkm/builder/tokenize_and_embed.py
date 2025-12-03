@@ -43,11 +43,13 @@ try:
     from ..embedder import tokenize, embed_windows
     from ..tools.unique_count_estimator import UniqueCounter
     from ..tools.rank_estimator import RankEstimator
+    from ...tools.value_seen_estimator import ValueObserver
 except ImportError:
     from tlux.search.hkm.fs import FileSystem
     from tlux.search.hkm.embedder import tokenize, embed_windows
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
     from tlux.search.hkm.tools.rank_estimator import RankEstimator
+    from tlux.search.hkm.tools.value_seen_estimator import ValueObserver
 
 # Type aliases for clarity
 DocumentBatch = Iterable[Tuple[List[str], List[List[Union[str, float]]]]]
@@ -60,6 +62,13 @@ METADATA_NUMPY_DTYPES = {
     int: np.int64,
     bytes: None,  # blobs are handled specially
 }
+# TODO: 
+#  - Support iterables (unique counter + rank estimator)
+#     dictionaries - bytes(key, value)
+#     lists - bytes(item)
+#  - Keep tokens + blobs (source docs), separate from embeddings + start + len, separate from metadata
+#  - Create generic embedding (captures average "bytes" content via 3-gram value observer). PCA reduction over the bit vector.
+
 EMBEDDING_INDEX_TYPE = np.dtype([
     ('document_id', np.uint32),
     ('token_start', np.uint32),
@@ -67,17 +76,93 @@ EMBEDDING_INDEX_TYPE = np.dtype([
     ('window_size', np.uint32),
 ])
 
-# ChunkBuffer: Buffers token, embedding, and metadata for documents, flushing to disk as a .hkmchunk when full.
-class ChunkBuffer:
-    _BUFFER_SIZE = 8 * 1024  # 8KB
+
+# JSON-path flattening for lists/dicts/tuples with scalar leaves.
+#
+# Parameters:
+#   obj (Any): JSON-like Python object: dict/list/tuple/scalars.
+#   prefix (str): Current path prefix ("" at root).
+#
+# Yields:
+#   (str, Any): (json_path, scalar_value)
+#
+def _flatten_json_pairs(obj: Any, prefix: str = "") -> Iterable[Tuple[str, Any]]:
+    # Normalize tuples as lists.
+    if isinstance(obj, tuple):
+        obj = list(obj)
+    # List recursion.
+    if isinstance(obj, list):
+        for i, v in enumerate(obj):
+            path = f"{prefix}.{i}" if prefix else f"{i}"
+            # Recurse or emit
+            if isinstance(v, (list, dict, tuple)):
+                yield from _flatten_json_pairs(v, path)
+            else:
+                yield (path, v)
+    # Dict recursion.
+    elif isinstance(obj, dict):
+        # Keys are converted to strings and joined with '.'
+        for k, v in obj.items():
+            k_str = str(k)
+            path = f"{prefix}.{k_str}" if prefix else k_str
+            if isinstance(v, (list, dict, tuple)):
+                yield from _flatten_json_pairs(v, path)
+            else:
+                yield (path, v)
+    # Scalar values.
+    else:
+        # Scalar at the root
+        yield (prefix if prefix else "", obj)
+
+
+# Encode one (path, value) pair to bytes for ValueObserver.add(...).
+# Deterministic, binary-safe: [u32 path_len][path_bytes][u32 val_len][val_bytes]
+#
+# Parameters:
+#   path (str)
+#   value (Any): JSON-serializable scalar
+#
+# Returns:
+#   bytes
+#
+def _encode_observation(path: str, value: Any) -> bytes:
+    path_b = path.encode("utf-8")
+    # Canonical JSON scalar encoding
+    val_b = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
+    return struct.pack("<I", len(path_b)) + path_b + struct.pack("<I", len(val_b)) + val_b
+
+
+# Observe all (path, value) pairs from a JSON input into a ValueObserver.
+#
+# Parameters:
+#   observer (ValueObserver)
+#   json_input (Union[str, bytes, Any]): JSON string/bytes or already-parsed object
+#
+def _observe_iterable(observer: "ValueObserver", json_input: Any) -> None:
+    if isinstance(json_input, (str, bytes, bytearray)):
+        obj = json.loads(json_input)
+    else:
+        obj = json_input
+    for path, val in _flatten_json_pairs(obj):
+        # Require only scalar leaves
+        if isinstance(val, (type(None), bool, int, float, str)):
+            observer.add(_encode_observation(path, val))
+        else:
+            raise ValueError("Iterable JSON contains non-scalar leaf; only None, bool, int, float, str are allowed.")
+
+
+# ChunkWriter: Buffers token, embedding, and metadata for documents, flushing to disk as a .hkmchunk when full.
+class ChunkWriter:
+    _BUFFER_SIZE = 8 * 2**10  # 8KB
 
     def __init__(self, file_system: FileSystem, output_directory: str, chunk_size_limit: int, metadata_schema: MetadataSchema):
+        self._document_count = 0
         self._file_system = file_system
         self._output_directory = output_directory
         self._chunk_size_limit = chunk_size_limit
         self._metadata_schema = metadata_schema
+        self._iterable_fields = [name for (name, typ) in metadata_schema if typ in (list, dict, tuple)]
         self._reset()
-        self._document_count = 0
 
     def _reset(self) -> None:
         # Tracking
@@ -101,6 +186,8 @@ class ChunkBuffer:
         # Blob data
         self._blob_file = tempfile.TemporaryFile()
         self._blob_writer = io.BufferedWriter(self._blob_file, buffer_size=self._BUFFER_SIZE)
+        # JSON data
+        self._iterable_observers = {name: ValueObserver() for name in self._iterable_fields}
 
     # Add document's token, embedding, and metadata to chunk.
     #
@@ -138,14 +225,15 @@ class ChunkBuffer:
         meta_bytes = bytearray()
         blob_offsets_for_doc: List[Tuple[int, int]] = []
         for (field_name, field_type), value in zip(self._metadata_schema, metadata):
+            # Number metadata (rank estimated).
             if field_type is float:
-                v = float(value)
-                arr = np.array([v], dtype=np.float32)
-                if np.isnan(v):  # already null
-                    arr[0] = NUMBER_NULL
-                meta_bytes += arr.tobytes()
+                if (value is None):
+                    meta_bytes += NUMBER_NULL.tobytes()
+                else:
+                    meta_bytes += np.float32(float(value)).tobytes()
+            # Blob metadata (pack and store blob offsets).
             elif field_type is bytes:
-                if value is None:
+                if (value is None):
                     meta_bytes += struct.pack("<QQ", 0, 0)  # Null: offset 0, size 0
                     blob_offsets_for_doc.append((0, 0))
                 else:
@@ -156,12 +244,22 @@ class ChunkBuffer:
                     meta_bytes += struct.pack("<QQ", offset, size)
                     blob_offsets_for_doc.append((offset, size))
                     self._total_bytes += size
+            # JSON style columns.
+            elif field_type in (list, dict, tuple):
+                # Expect JSON (str/bytes) or already-parsed object
+                if value is None:
+                    # No observations; still write two zero placeholders
+                    meta_bytes += struct.pack("<QQ", 0, 0)
+                else:
+                    _observe_iterable(self._iterable_observers[field_name], value)
+                    # Per-row placeholder to keep dtype consistent
+                    meta_bytes += struct.pack("<QQ", 0, 0)
+            # Categorical metadata (unique estimated) already hashed to int64.
             else:
-                v = int(value)
-                arr = np.array([v], dtype=np.uint64)
-                if v == CATEGORY_NULL:
-                    arr[0] = CATEGORY_NULL
-                meta_bytes += arr.tobytes()
+                if (value is None):
+                    meta_bytes += CATEGORY_NULL.tobytes()
+                else:
+                    meta_bytes += np.uint64(int(value)).tobytes()
         self._metadata_writer.write(meta_bytes)
         self._total_bytes += len(meta_bytes)
         if self._total_bytes >= self._chunk_size_limit:
@@ -184,12 +282,17 @@ class ChunkBuffer:
                 ("embeddings.mmap", self._embedding_file),
                 ("embed_index.mmap", self._index_file),
                 ("metadata.mmap", self._metadata_file),
-                ("blobs.mmap", self._blob_file),  # add blobs
+                ("blobs.mmap", self._blob_file),
             ]:
                 temp_file.seek(0)
                 data = temp_file.read()
                 if data:
                     zip_file.writestr(filename, data)
+            # Persist iterable observers once per chunk
+            for field_name, observer in self._iterable_observers.items():
+                obs_bytes = observer.to_bytes()
+                if obs_bytes:
+                    zip_file.writestr(f"observer.{field_name}.bytes", obs_bytes)
         chunk_name = f"chunk_{int(self._min_document_id):08d}_{int(self._max_document_id):08d}.hkmchunk"
         self._file_system.write(
             os.path.join(self._output_directory, chunk_name),
@@ -245,6 +348,9 @@ class ChunkReader:
             elif field_type is bytes:
                 fields.append((field_name + "_blob_start", np.uint64))
                 fields.append((field_name + "_blob_size", np.uint64))
+            elif field_type in (list, dict, tuple):
+                fields.append((field_name + "_json_pad0", np.uint64))
+                fields.append((field_name + "_json_pad1", np.uint64))
             else:
                 fields.append((field_name, np.uint64))
         return np.dtype(fields)
@@ -311,6 +417,7 @@ class ChunkReader:
     #
     # Raises:
     #   IndexError: if i out of range
+    # 
     def __getitem__(self, i: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Union[int, float]]]:
         if not (0 <= i < self.document_count):
             raise IndexError(f"Document index {i} out of range [0, {self.document_count})")
@@ -357,6 +464,7 @@ class ChunkReader:
     #
     # Returns:
     #   Dict[str, Any]: keys are array names.
+    # 
     def arrays(self) -> Dict[str, Any]:
         result = dict(self._arrays)
         result["tokens"] = [self._zipfile.read(fname) for fname in self._token_file_names]
@@ -406,10 +514,10 @@ def process_documents(
     ngram_counter = UniqueCounter()
     category_ids: Dict[str, Dict[str, int]] = {}
     category_counts: Dict[str, Dict[int, int]] = {}
-    number_dists: Dist[str, RankEstimator] = {name: RankEstimator() for (name, typ) in metadata_schema if typ is float}
+    number_dists: Dict[str, RankEstimator] = {name: RankEstimator() for (name, typ) in metadata_schema if typ is float}
 
     # Buffered chunk writer.
-    chunk_buffer = ChunkBuffer(file_system, document_output_directory, chunk_size_limit, metadata_schema)
+    chunk_writer = ChunkWriter(file_system, document_output_directory, chunk_size_limit, metadata_schema)
     document_id = 0
 
     for texts, metadata_list in document_batches:
@@ -454,10 +562,10 @@ def process_documents(
                 # Add to the metadata list.
                 doc_metadata.append(value)
             # Add this document, its tokens, embeddings, and metadata into the buffered writer.
-            chunk_buffer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
+            chunk_writer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
 
     # Make sure the chunks are all written.
-    chunk_buffer.save_chunk()
+    chunk_writer.save_chunk()
     # Write the summary data.
     #   n-gram unique count
     file_system.write(
@@ -509,7 +617,14 @@ def default_worker(
     chunk_size_limit: int = 8 * 2**20,
 ) -> None:
     schema = json.loads(metadata_schema)
-    parsed_schema = [(name, str if typ == 'str' else float if typ == 'float' else bytes) for name, typ in schema]
+    # in default_worker(...)
+    type_map = {
+        "str": str,
+        "float": float,
+        "json": dict,
+        "bytes": bytes,
+    }
+    parsed_schema = [(name, type_map.get(typ, str)) for name, typ in schema]
     all_files = sorted(Path(document_directory).glob('*'))
     my_files = [file for i, file in enumerate(all_files) if i % total_workers == worker_index]
 
@@ -669,4 +784,3 @@ if __name__ == "__main__":
         print("df.columns: ", df.columns, flush=True)
         print("df.shape: ", df.shape, flush=True)
         print(df)
-
