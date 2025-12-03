@@ -1,20 +1,41 @@
 #!/usr/bin/env python3
-"""Command line stub for building an index."""
+"""Build an HKM index (inline or via jobs)."""
 
 import argparse
-from ..fs import FileSystem
-from ..schema import BuildConfig
-from ..builder.index_builder import IndexBuilder
+import os
+
+from tlux.search.hkm.fs import FileSystem
+from tlux.search.hkm.builder.launcher import build_search_index_inline, build_search_index
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build HKM index")
-    parser.add_argument("index_root")
-    parser.add_argument("docs", nargs="+")
+    parser.add_argument("index_root", help="Output index root directory")
+    parser.add_argument("docs_dir", help="Directory of input documents")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 4, help="Worker count (default: cpu count)")
+    parser.add_argument("--inline", action="store_true", help="Run inline (single process) instead of job queue")
+    parser.add_argument("--max-k", type=int, default=8, help="Max clusters per level")
+    parser.add_argument("--leaf-doc-limit", type=int, default=1024, help="Docs per leaf")
     args = parser.parse_args()
+
     fs = FileSystem()
-    cfg = BuildConfig(index_root=args.index_root, raw_paths=args.docs)
-    IndexBuilder(fs, cfg).run()
+    if args.inline:
+        build_search_index_inline(
+            docs_dir=args.docs_dir,
+            index_root=args.index_root,
+            num_workers=args.workers,
+            max_k=args.max_k,
+            leaf_doc_limit=args.leaf_doc_limit,
+        )
+    else:
+        build_search_index(
+            fs,
+            docs_dir=args.docs_dir,
+            index_root=args.index_root,
+            num_workers=args.workers,
+            max_k=args.max_k,
+            leaf_doc_limit=args.leaf_doc_limit,
+        )
 
 
 if __name__ == "__main__":

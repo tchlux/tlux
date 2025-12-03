@@ -109,10 +109,13 @@ def build_search_index(
     spawn_job(
         "hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
-        max_k,
-        leaf_doc_limit,
-        seed,
-        "/",
+        max_cluster_count=max_k,
+        leaf_doc_limit=leaf_doc_limit,
+        seed=seed,
+        fs_root="/",
+        run_inline=True,
+        max_depth=3,
+        depth=0,
         dependencies=[consolidate_job],
     )
 

@@ -181,6 +181,18 @@ Quick-start (local, single process):
     - bin-packs files by byte size across workers  
     - tokenizes/embeds -> consolidates -> builds HKM inline (no external scheduler)
 
+Jobs-based builds:  
+  *  Use `build_search_index` to enqueue tokenize/embed -> consolidate -> HKM build via the filesystem-backed `jobs/` queue.  
+  *  For purely serial runs, `spawn_job_inline` executes job functions in-process but retains the same interface.
+
+Configuration knobs (common):  
+  * `max_k`: max clusters per level (default 8)  
+  * `leaf_doc_limit`: max docs before stopping recursion (default 1024)  
+  * `num_workers`: tokenize/embed workers (bin-packed by bytes)  
+  * `max_depth`: recursion limit (default 3 in inline builder)  
+  * `chunk_size_limit`: bytes per chunk (default 8 MiB)  
+  * `seed`: RNG seed for sampling/k-means  
+
 All writes are "write-temp -> rename" for crash safety.
 
 ===============================================================================

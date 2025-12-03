@@ -9,6 +9,7 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
+import heapq
 
 import numpy as np
 
@@ -71,7 +72,8 @@ class Searcher:
         return SearchResult(docs=hits)
 
     def _search_embeddings(self, query_emb: np.ndarray, top_k: int) -> List[Hit]:
-        hits: List[Tuple[float, int]] = []
+        heap: List[Tuple[float, int]] = []
+        seen: set[int] = set()
 
         def _search_node(node_dir: str) -> None:
             cluster_dirs = sorted(Path(node_dir).glob("cluster_*"))
@@ -95,17 +97,13 @@ class Searcher:
                 embed_idx = reader.embed_index
                 for dist, meta in zip(dists, embed_idx):
                     doc_id = int(meta["document_id"])
-                    hits.append((float(dist), doc_id))
+                    if doc_id in seen:
+                        continue
+                    heapq.heappush(heap, (-float(dist), doc_id))
+                    if len(heap) > top_k:
+                        heapq.heappop(heap)
+                    seen.add(doc_id)
 
         _search_node(self.hkm_root if self.hkm_root else self.docs_root)
-        hits.sort(key=lambda x: x[0])
-        out: List[Hit] = []
-        seen: set[int] = set()
-        for dist, doc_id in hits:
-            if doc_id in seen:
-                continue
-            seen.add(doc_id)
-            out.append(Hit(doc_id, -dist, (0, 0)))
-            if len(out) >= top_k:
-                break
-        return out
+        results = sorted(heap, key=lambda x: x[0], reverse=True)
+        return [Hit(doc_id, score, (0, 0)) for score, doc_id in results]

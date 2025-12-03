@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 from pathlib import Path
 from typing import Iterable, Tuple
@@ -10,16 +9,16 @@ from typing import Iterable, Tuple
 import numpy as np
 
 from .chunk_io import ChunkReader
-from ..fs import FileSystem
 from ..tools.preview import select_random, select_diverse
 
 
 def iter_doc_embeddings(chunk_path: Path) -> Iterable[np.ndarray]:
     reader = ChunkReader(str(chunk_path), metadata_schema=[])
     for i in range(reader.document_count):
-        tokens, emb, _, _ = reader[i]
+        _, emb, _, _ = reader[i]
         if emb.size > 0:
-            yield emb[0]  # representative per doc
+            for row in emb:
+                yield row
 
 
 def sample_embeddings(docs_root: str, target: int = 256_000, seed: int = 42) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

@@ -15,14 +15,14 @@ from ..tools.preview import select_random, select_diverse
 
 
 def _doc_assignment(reader: ChunkReader, centroids: np.ndarray) -> Dict[int, list]:
-    """Assign each doc to nearest centroid based on first embedding."""
+    """Assign each doc to nearest centroid based on nearest embedding window."""
     assignments: Dict[int, list] = {i: [] for i in range(centroids.shape[0])}
     for i in range(reader.document_count):
         tokens, emb, emb_meta, _ = reader[i]
         if emb.size == 0:
             continue
-        dist = np.linalg.norm(centroids - emb[0], axis=1)
-        cid = int(np.argmin(dist))
+        dist = np.linalg.norm(centroids[None, :, :] - emb[:, None, :], axis=2)
+        cid = int(np.argmin(dist.mean(axis=0)))  # average per cluster for stability
         assignments[cid].append((i, tokens, emb, emb_meta))
     return assignments
 
@@ -35,6 +35,7 @@ def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int
     # prepare writers per cluster
     writers: Dict[int, ChunkWriter] = {}
     cluster_embeddings: Dict[int, List[np.ndarray]] = {i: [] for i in range(cluster_count)}
+    cluster_doc_counts: Dict[int, int] = {i: 0 for i in range(cluster_count)}
 
     for chunk_path in Path(docs_dir).rglob("*.hkmchunk"):
         reader = ChunkReader(str(chunk_path), metadata_schema=[])
@@ -61,6 +62,7 @@ def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int
                 ]
                 writer.add_document(doc_id, tokens.tolist(), emb, emb_windows, [])
                 cluster_embeddings[cid].append(emb)
+                cluster_doc_counts[cid] += 1
 
     # close writers and write cluster stats
     for cid, writer in writers.items():
@@ -75,7 +77,10 @@ def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int
             np.save(cluster_dir / "preview_random.npy", all_emb[rnd_idx])
             np.save(cluster_dir / "preview_diverse.npy", all_emb[div_idx])
 
-        stats = {"doc_count": int(all_emb.shape[0]) if all_emb.size else 0}
+        stats = {
+            "doc_count": int(cluster_doc_counts[cid]),
+            "emb_count": int(all_emb.shape[0]) if all_emb.size else 0,
+        }
         stats_path = cluster_dir / "stats.json"
         with open(stats_path, "w", encoding="ascii") as f:
             json.dump(stats, f)
