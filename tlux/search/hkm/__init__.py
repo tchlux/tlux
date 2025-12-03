@@ -1,11 +1,10 @@
-"""Hierarchical embedding search library."""
+"""Hierarchical embedding + token search toolkit."""
 
-# All imports should be lazy. They are not done here.
+# All imports are lazy.
 '''
 from .fs import FileSystem
 from .schema import BuildConfig, QuerySpec, SearchResult, Hit
-from .builder.launcher import build_search_index
-from .embedder import tokenize, embed_windows
+from .builder.launcher import build_search_index, build_search_index_inline
 from .search.searcher import Searcher
 
 __all__ = [
@@ -14,9 +13,8 @@ __all__ = [
     "QuerySpec",
     "SearchResult",
     "Hit",
-    "IndexBuilder",
+    "build_search_index",
+    "build_search_index_inline",
     "Searcher",
-    "tokenize",
-    "embed_windows",
 ]
 '''

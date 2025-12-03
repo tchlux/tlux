@@ -27,8 +27,8 @@ def _doc_assignment(reader: ChunkReader, centroids: np.ndarray) -> Dict[int, lis
     return assignments
 
 
-def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int = 42) -> None:
-    fs = FileSystem()
+def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int = 42, file_system: FileSystem | None = None, force_balance: bool = False) -> None:
+    fs = file_system or FileSystem()
     centroids = np.load(centroids_path)
     cluster_count = centroids.shape[0]
 
@@ -36,14 +36,21 @@ def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int
     writers: Dict[int, ChunkWriter] = {}
     cluster_embeddings: Dict[int, List[np.ndarray]] = {i: [] for i in range(cluster_count)}
 
-    for chunk_path in Path(docs_dir).rglob("chunk_*.hkmchunk"):
+    for chunk_path in Path(docs_dir).rglob("*.hkmchunk"):
         reader = ChunkReader(str(chunk_path), metadata_schema=[])
         doc_assign = _doc_assignment(reader, centroids)
+        if force_balance:
+            all_docs = []
+            for docs in doc_assign.values():
+                all_docs.extend(docs)
+            doc_assign = {i: [] for i in range(cluster_count)}
+            for idx, item in enumerate(all_docs):
+                doc_assign[idx % cluster_count].append(item)
         for cid, docs in doc_assign.items():
             if not docs:
                 continue
             if cid not in writers:
-                cluster_dir = fs.join(hkm_dir, f"cluster_{cid:04d}", "data", "worker_0000")
+                cluster_dir = os.path.join(hkm_dir, f"cluster_{cid:04d}", "data", "worker_0000")
                 os.makedirs(cluster_dir, exist_ok=True)
                 writers[cid] = ChunkWriter(fs, cluster_dir, chunk_size_limit=8 * 2**20, metadata_schema=[], emit_worker_stats=True)
             writer = writers[cid]
@@ -59,7 +66,7 @@ def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int
     for cid, writer in writers.items():
         writer.save_chunk()
         writer.finalize_worker()
-        cluster_dir = Path(fs.join(hkm_dir, f"cluster_{cid:04d}"))
+        cluster_dir = Path(os.path.join(hkm_dir, f"cluster_{cid:04d}"))
         all_emb = np.concatenate(cluster_embeddings[cid], axis=0) if cluster_embeddings[cid] else np.empty((0, 0))
         k = min(512, all_emb.shape[0]) if all_emb.size else 0
         rnd_idx = np.array(select_random(range(all_emb.shape[0]), k, seed=seed), dtype=int) if k else np.empty((0,), dtype=int)

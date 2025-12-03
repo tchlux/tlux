@@ -43,7 +43,17 @@ def _load_embedder():
 
     if os.getenv("HKM_FAKE_EMBEDDER") == "1":
         def _tok(texts: List[str]) -> List[List[int]]:
-            return [[int(t) for t in txt.split() if t.isdigit()] for txt in texts]
+            out: List[List[int]] = []
+            for txt in texts:
+                toks: List[int] = []
+                for t in txt.split():
+                    try:
+                        val = int(t)
+                    except Exception:
+                        continue
+                    toks.append(val & 0xFFFFFFFF)
+                out.append(toks)
+            return out
 
         def _emb(tok_lists: List[List[int]]):
             metas = []
@@ -51,7 +61,9 @@ def _load_embedder():
             for toks in tok_lists:
                 if len(toks) == 0:
                     toks = [0]
-                vec = np.zeros((1, 4), dtype=np.float32)
+                mean_val = float(sum(toks)) / float(len(toks))
+                span = float(max(toks) - min(toks)) if toks else 0.0
+                vec = np.array([[mean_val, float(len(toks)), span, float(toks[0])]], dtype=np.float32)
                 all_vecs.append(vec)
                 metas.append((0, len(toks), len(toks)))
             embeddings = np.vstack(all_vecs)
@@ -101,9 +113,11 @@ def process_documents(
         for text, metadata in zip(texts, metadata_list):
             document_id += 1
             tokens = tokenize([text])[0]
+            if len(tokens) == 0:
+                tokens = [0]
             for n in range(1, n_gram + 1):
                 for i in range(len(tokens) - n + 1):
-                    ngram_bytes = b"".join(token.to_bytes(4, "little") for token in tokens[i : i + n])
+                    ngram_bytes = b"".join(int(token & 0xFFFFFFFF).to_bytes(4, "little") for token in tokens[i : i + n])
                     ngram_counter.add(ngram_bytes)
             embeddings, embedding_windows = embed_windows([tokens])
             doc_metadata: List[Union[int, float]] = []
@@ -170,18 +184,48 @@ def default_worker(
     worker_index: int = 0,
     total_workers: int = 1,
     chunk_size_limit: int = 8 * 2**20,
+    manifest_path: str | None = None,
+    fs_root: str | None = None,
 ) -> None:
-    """Process a shard of files in document_directory."""
-    schema = json.loads(metadata_schema)
-    type_map = {"str": str, "float": float, "json": dict, "bytes": bytes}
+    """Process a shard of files in document_directory or an explicit manifest."""
+    try:
+        schema = json.loads(metadata_schema)
+    except Exception:
+        import ast
+        schema = ast.literal_eval(metadata_schema)
+    type_map = {"str": str, "float": float, "int": int, "json": dict, "bytes": bytes, "list": list, "dict": dict}
     parsed_schema = [(name, type_map.get(typ, str)) for name, typ in schema]
-    all_files = sorted(Path(document_directory).glob("*"))
-    my_files = [file for i, file in enumerate(all_files) if i % total_workers == worker_index]
+
+    if manifest_path is not None:
+        with open(manifest_path, "r", encoding="utf-8") as f_manifest:
+            all_files = [Path(p) for p in json.load(f_manifest)]
+    else:
+        all_files = sorted(Path(document_directory).rglob("*"))
+        all_files = [p for p in all_files if p.is_file()]
+    # simple byte-balanced selection when manifest not provided falls back to modulo
+    my_files = [file for i, file in enumerate(all_files) if (manifest_path is not None) or (i % total_workers == worker_index)]
 
     def get_document_batches() -> Iterable[Tuple[List[str], List[List[Union[str, float]]]]]:
         for file in my_files:
-            text = file.read_text(encoding="utf-8")
-            yield [text], [(file.name, float(len(text.encode("utf-8"))))]
+            try:
+                text = file.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            size_bytes = len(text.encode("utf-8"))
+            tags = [file.suffix or "none", str(size_bytes % 5)]
+            attrs = {"ext": file.suffix or "none", "depth": len(file.parents), "size": size_bytes}
+            value_map = {
+                "path": file.name,
+                "name": file.name,
+                "num_bytes": float(size_bytes),
+                "file_kind": file.suffix or "none",
+                "tags": tags,
+                "attrs": attrs,
+            }
+            metadata_row: List[Union[str, float]] = []
+            for field_name, _field_type in parsed_schema:
+                metadata_row.append(value_map.get(field_name))
+            yield [text], [metadata_row]
 
     process_documents(
         output_directory,
@@ -189,6 +233,7 @@ def default_worker(
         get_document_batches(),
         parsed_schema,
         chunk_size_limit=chunk_size_limit,
+        fs_root=fs_root,
     )
 
 

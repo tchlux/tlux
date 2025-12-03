@@ -22,6 +22,9 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
         worker_id = int(worker_path.name.split("_")[-1])
         shard_id = 0
         for chunk_dir in sorted(worker_path.glob("chunk_*.hkmchunk")):
+            tokens_path = chunk_dir / "tokens.bin"
+            if tokens_path.exists() and tokens_path.stat().st_size == 0:
+                continue
             reader = ChunkReader(str(chunk_dir), metadata_schema=[])
             for local_idx in range(reader.document_count):
                 doc_id = reader.chunk_metadata().get("min_document_id", 0) + local_idx
@@ -38,6 +41,12 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
         doc_index = np.stack(rows).astype(DOC_INDEX_DTYPE, copy=False)
         doc_index.sort(order="doc_id")
         np.save(fs.join(docs_root, "doc_index.npy"), doc_index)
+
+
+def run_consolidate(index_root: str, fs_root: str | None = None) -> None:
+    """Entry point for job execution."""
+    fs = FileSystem() if fs_root is None else FileSystem(root=fs_root)
+    consolidate(fs, index_root)
 
 
 if __name__ == "__main__":  # pragma: no cover

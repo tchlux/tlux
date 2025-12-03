@@ -176,6 +176,11 @@ PHASE C - HKM Builder (parallel by subtree)
       `chunk_meta.npy`.  
   6.  Append node path to `manifest.jsonl`.
 
+Quick-start (local, single process):  
+  *  ``build_search_index_inline(docs_dir="data/raw", index_root="idx", num_workers=8, max_k=8, leaf_doc_limit=1024)``  
+    - bin-packs files by byte size across workers  
+    - tokenizes/embeds -> consolidates -> builds HKM inline (no external scheduler)
+
 All writes are "write-temp -> rename" for crash safety.
 
 ===============================================================================
@@ -198,17 +203,20 @@ All writes are "write-temp -> rename" for crash safety.
 7.  PUBLIC PYTHON API (HIGH-LEVEL)
 ===============================================================================
 
-    from tlux.search.hkm import FileSystem, IndexBuilder, Searcher
+    from tlux.search.hkm import FileSystem, build_search_index_inline, Searcher
 
-    # Build
-    fs   = FileSystem()                  # Local file system by default
-    cfg  = BuildConfig(index_root="idx", raw_paths=[...])
-    IndexBuilder(fs, cfg).run()
+    # Build (one call, local)
+    fs   = FileSystem()
+    build_search_index_inline(
+        docs_dir="data/raw_docs",
+        index_root="idx",
+        num_workers=8,
+    )
 
-    # Search
+    # Search (token + embedding)
     searcher = Searcher(fs, "idx/docs", "idx/hkm")
     hits     = searcher.search({
-                 "embeddings"     : [q32, q128],
+                 "embeddings"     : [[...]],  # list of vectors
                  "token_sequence" : [101, 202, 303],
                  "label_include"  : {"lang": ["en"]},
                  "numeric_range"  : {"year": [2010, 2022]},

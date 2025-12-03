@@ -24,7 +24,7 @@ def iter_doc_embeddings(chunk_path: Path) -> Iterable[np.ndarray]:
 
 def sample_embeddings(docs_root: str, target: int = 256_000, seed: int = 42) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     random.seed(seed)
-    paths = sorted(Path(docs_root).rglob("chunk_*.hkmchunk"))
+    paths = sorted(Path(docs_root).rglob("*.hkmchunk"))
     reservoir = []
     count = 0
     for p in paths:

@@ -68,10 +68,13 @@ class FileSystem:
     #   path (str): Directory path.
     #   exist_ok (bool): Allow existing directory without error.
     #
+    # Returns:
+    #   str: Path to created directory.
+    # 
     # Raises:
     #   OSError: If creation fails.
     # 
-    def mkdir(self, path: str, exist_ok: bool = False) -> None:
+    def mkdir(self, path: str, exist_ok: bool = False) -> str:
         path = self._resolve(path)
         os.makedirs(path, exist_ok=exist_ok)
         return path

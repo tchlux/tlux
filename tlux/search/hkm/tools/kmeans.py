@@ -23,15 +23,17 @@ def _kmeans_pp_init(
     centroids[0] = data[rng.integers(0, n)]
 
     # Squared distance of every point to its nearest centroid so far
-    dist2 = np.linalg.norm(data - centroids[0], axis=1, dtype=np.float32) ** 2
+    dist2 = np.linalg.norm(data - centroids[0], axis=1) ** 2
 
     for i in range(1, k):
-        probs = dist2 / dist2.sum(dtype=np.float32)
-        next_idx = rng.choice(n, p=probs)
+        denom = dist2.sum(dtype=np.float32)
+        if denom == 0:
+            next_idx = rng.integers(0, n)
+        else:
+            probs = dist2 / denom
+            next_idx = rng.choice(n, p=probs)
         centroids[i] = data[next_idx]
-        new_dist2 = np.linalg.norm(
-            data - centroids[i], axis=1, dtype=np.float32
-        ) ** 2
+        new_dist2 = np.linalg.norm(data - centroids[i], axis=1) ** 2
         dist2 = np.minimum(dist2, new_dist2)
 
     return centroids

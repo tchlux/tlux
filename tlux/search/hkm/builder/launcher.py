@@ -12,14 +12,17 @@
 
 
 import os
+import json
 import argparse
+from pathlib import Path
+from typing import List, Tuple
 
 try:                from ..fs import FileSystem
 except ImportError: from tlux.search.hkm.fs import FileSystem
 try:                from ..jobs import spawn_job
 except ImportError: from tlux.search.hkm.jobs import spawn_job
-try:                from .consolidate import consolidate
-except ImportError: from tlux.search.hkm.builder.consolidate import consolidate
+try:                from .consolidate import run_consolidate
+except ImportError: from tlux.search.hkm.builder.consolidate import run_consolidate
 
 
 # Function to build the search index by orchestrating worker processes.
@@ -40,49 +43,148 @@ except ImportError: from tlux.search.hkm.builder.consolidate import consolidate
 # Raises:
 #   ValueError: If docs_dir does not exist or num_workers is not a positive integer.
 # 
+def _bin_pack(paths: List[Path], target_bins: int) -> List[List[Path]]:
+    bins: List[List[Path]] = [[] for _ in range(target_bins)]
+    bin_sizes = [0] * target_bins
+    for p in sorted(paths, key=lambda x: x.stat().st_size, reverse=True):
+        idx = min(range(target_bins), key=lambda i: bin_sizes[i])
+        bins[idx].append(p)
+        bin_sizes[idx] += p.stat().st_size
+    return bins
+
+
 def build_search_index(
     fs: FileSystem,
     docs_dir: str,
     index_root: str,
     num_workers: int,
-    tokenizer_main: str = "hkm.builder.tokenize_and_embed.default_worker"
+    tokenizer_main: str = "hkm.builder.tokenize_and_embed.default_worker",
+    max_k: int = 2,
+    leaf_doc_limit: int = 2,
+    seed: int = 42,
 ) -> None:
     # Validate input parameters
-    if not fs.exists(docs_dir):
+    if not os.path.exists(docs_dir):
         raise ValueError(f"docs_dir '{docs_dir}' does not exist")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
 
-    # Create subdirectories for document shards and HKM tree
-    docs_root_out = fs.join(index_root, "docs")
-    fs.mkdir(docs_root_out, exist_ok=True)
-    hkm_root = fs.join(index_root, "hkm")
-    fs.mkdir(hkm_root, exist_ok=True)
+    docs_dir_path = Path(docs_dir)
+    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file()]
+    if not all_files:
+        raise ValueError("No documents found to index.")
 
-    # Launch worker processes to tokenize and embed documents
+    docs_root_out = os.path.join(index_root, "docs")
+    os.makedirs(docs_root_out, exist_ok=True)
+    hkm_root = os.path.join(index_root, "hkm")
+    os.makedirs(hkm_root, exist_ok=True)
+
+    # bin-pack files by size across workers
+    bins = _bin_pack(all_files, num_workers)
+    manifest_dir = os.path.join(index_root, "manifests")
+    os.makedirs(manifest_dir, exist_ok=True)
+
     worker_jobs = []
-    for worker_id in range(num_workers):
+    for worker_id, files in enumerate(bins):
+        if not files:
+            continue
+        manifest_path = Path(manifest_dir) / f"worker_{worker_id:04d}.json"
+        manifest_path.write_text(json.dumps([str(p) for p in files]), encoding="utf-8")
         work_dir = fs.join(docs_root_out, f"worker_{worker_id:04d}")
         job = spawn_job(
             tokenizer_main,
-            document_directory=docs_dir,
+            document_directory=str(docs_dir_path),
             output_directory=work_dir,
             worker_index=worker_id,
             total_workers=num_workers,
+            manifest_path=str(manifest_path),
+            fs_root="/",
         )
         worker_jobs.append(job)
 
-    # Consolidate worker chunks before HKM build
     consolidate_job = spawn_job(
-        "hkm.builder.consolidate.consolidate",
+        "hkm.builder.consolidate.run_consolidate",
         index_root,
+        fs_root="/",
         dependencies=worker_jobs,
     )
-    # Launch the HKM tree builder once consolidation is complete
     spawn_job(
         "hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
+        max_k,
+        leaf_doc_limit,
+        seed,
+        "/",
         dependencies=[consolidate_job],
+    )
+
+
+def build_search_index_inline(
+    docs_dir: str,
+    index_root: str,
+    num_workers: int,
+    tokenizer_main: str = "hkm.builder.tokenize_and_embed.default_worker",
+    metadata_schema: str = "[['name','str'],['num_bytes','int']]",
+    max_k: int = 2,
+    leaf_doc_limit: int = 2,
+    seed: int = 42,
+    max_docs: int = 200,
+) -> None:
+    """Single-process helper for tests and small runs."""
+    docs_dir_path = Path(docs_dir)
+    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file()]
+    all_files = sorted(all_files, key=lambda p: p.stat().st_size)[:max_docs]
+    if not all_files:
+        raise ValueError("No documents found to index.")
+
+    docs_root_out = os.path.join(index_root, "docs")
+    os.makedirs(docs_root_out, exist_ok=True)
+    hkm_root = os.path.join(index_root, "hkm")
+    os.makedirs(hkm_root, exist_ok=True)
+
+    bins = _bin_pack(all_files, num_workers)
+    manifest_dir = os.path.join(index_root, "manifests")
+    os.makedirs(manifest_dir, exist_ok=True)
+
+    # Import tokenizer entry point dynamically
+    module_path, func_name = tokenizer_main.rsplit(".", 1)
+    tokenizer_mod = __import__(module_path, fromlist=[func_name])
+    tokenizer_fn = getattr(tokenizer_mod, func_name)
+
+    for worker_id, files in enumerate(bins):
+        if not files:
+            continue
+        manifest_path = Path(manifest_dir) / f"worker_{worker_id:04d}.json"
+        manifest_path.write_text(json.dumps([str(p) for p in files]), encoding="utf-8")
+        work_dir = os.path.join(docs_root_out, f"worker_{worker_id:04d}")
+        tokenizer_fn(
+            document_directory=str(docs_dir_path),
+            output_directory=work_dir,
+            worker_index=worker_id,
+            total_workers=num_workers,
+            manifest_path=str(manifest_path),
+            fs_root=index_root,
+            metadata_schema=metadata_schema,
+        )
+
+    # Consolidate
+    from .consolidate import consolidate
+
+    fs = FileSystem(root=index_root)
+    consolidate(fs, index_root)
+
+    # Build HKM tree
+    from .recursive_index_builder import build_cluster_index
+
+    build_cluster_index(
+        index_root,
+        max_cluster_count=max_k,
+        leaf_doc_limit=leaf_doc_limit,
+        seed=seed,
+        fs_root=index_root,
+        run_inline=True,
+        max_depth=3,
+        depth=0,
     )
 
 
