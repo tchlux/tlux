@@ -128,8 +128,8 @@ Directory structure (fixed):
           ...
       data/                   # randomized data broken up by number of workers
         part_0000/
-          chunk_00000000_00000042.hkmchunk  # ZIP archive (min doc ID, max doc ID) of
-          chunk_00000043_00000099.hkmchunk  #  embeddings, tokens, and metadata.
+          chunk_00000000_00000042.hkmchunk/  # directory: tokens.bin, tokens_index.npy, embeddings.npy, embed_index.npy, metadata.npy
+          chunk_00000043_00000099.hkmchunk/
           ...
         ...
       cluster_0000/     # recursively structured subdirectories
@@ -145,7 +145,7 @@ Directory structure (fixed):
         ...
       ...
 
-Binary format: `.hkmchunk` custom ZIP archive.
+Binary format: directory-based `.hkmchunk` with NumPy v2 arrays and raw binaries.
 
 Structured dtypes:
 
