@@ -96,12 +96,14 @@ class ChunkWriter:
         output_directory: str,
         chunk_size_limit: int,
         metadata_schema: MetadataSchema,
+        n_gram: int = 3,
     ):
         self._fs = file_system
         self._output_directory = output_directory
         self._chunk_size_limit = chunk_size_limit
         self._metadata_schema = metadata_schema
         self._iterable_fields = [name for (name, typ) in metadata_schema if typ in (list, dict, tuple)]
+        self._n_gram = max(1, int(n_gram))
         self._reset()
 
     def _reset(self) -> None:
@@ -133,6 +135,7 @@ class ChunkWriter:
         self._iterable_uniques = {
             name: UniqueCounter(precision=UNIQUE_PRECISION) for name in self._iterable_fields
         }
+        self._ngram_counter = UniqueCounter(precision=UNIQUE_PRECISION)
 
     def _metadata_dtype(self) -> np.dtype:
         fields = []
@@ -166,6 +169,12 @@ class ChunkWriter:
         self._total_bytes += len(token_data)
         self._min_document_id = min(self._min_document_id, document_id)
         self._max_document_id = max(self._max_document_id, document_id)
+
+        # n-gram counting for token sequences
+        for n in range(1, self._n_gram + 1):
+            for i in range(len(tokens) - n + 1):
+                ngram_bytes = b"".join(int(tok).to_bytes(4, "little") for tok in tokens[i : i + n])
+                self._ngram_counter.add(ngram_bytes)
 
         for i, (start, end, window_size) in enumerate(embedding_windows):
             embedding_row = embeddings[i]
@@ -276,6 +285,9 @@ class ChunkWriter:
         for field_name, counter in self._iterable_uniques.items():
             with open(os.path.join(chunk_dir, f"unique.{field_name}.bytes"), "wb") as f_uc:
                 f_uc.write(counter.to_bytes())
+        # token n-gram unique counter
+        with open(os.path.join(chunk_dir, "n_gram_counter.bytes"), "wb") as f_ng:
+            f_ng.write(self._ngram_counter.to_bytes())
 
         chunk_meta = {
             "min_document_id": int(self._min_document_id),

@@ -18,6 +18,8 @@ try:                from ..fs import FileSystem
 except ImportError: from tlux.search.hkm.fs import FileSystem
 try:                from ..jobs import spawn_job
 except ImportError: from tlux.search.hkm.jobs import spawn_job
+try:                from .consolidate import consolidate
+except ImportError: from tlux.search.hkm.builder.consolidate import consolidate
 
 
 # Function to build the search index by orchestrating worker processes.
@@ -70,11 +72,17 @@ def build_search_index(
         )
         worker_jobs.append(job)
 
-    # Launch the HKM tree builder once all worker jobs are complete
+    # Consolidate worker chunks before HKM build
+    consolidate_job = spawn_job(
+        "hkm.builder.consolidate.consolidate",
+        index_root,
+        dependencies=worker_jobs,
+    )
+    # Launch the HKM tree builder once consolidation is complete
     spawn_job(
         "hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
-        dependencies=worker_jobs,
+        dependencies=[consolidate_job],
     )
 
 
@@ -110,4 +118,3 @@ def main() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
-

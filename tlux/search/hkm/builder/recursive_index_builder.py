@@ -70,7 +70,9 @@ def build_cluster_index(index_root_directory: str) -> None:
     filesystem.mkdir(hkm_dir, exist_ok=True)
 
     # Collect embedding file paths
-    embedding_paths: List[Path] = list(Path(docs_dir).rglob("embed_*.npy"))
+    embedding_paths: List[Path] = list(Path(docs_dir).glob("embed_root.npy"))
+    if not embedding_paths:
+        embedding_paths = list(Path(docs_dir).rglob("embed_*.npy"))
     if not embedding_paths:
         raise ValueError(f"No embedding files found in {docs_dir}")
 
@@ -81,7 +83,7 @@ def build_cluster_index(index_root_directory: str) -> None:
     combined_embeddings: np.ndarray = np.vstack(embedding_arrays) if embedding_arrays else np.empty((0, embedding_arrays[0].shape[1]), dtype=np.float32)
 
     # Calculate preview sample size based on data size
-    preview_size: int = min(combined_embeddings.shape[0], MAX_PREVIEW_SIZE)
+    preview_size: int = min(combined_embeddings.shape[0], 512)
 
     # Generate preview indices with deterministic randomness
     random_indices: np.ndarray = select_random(
@@ -97,24 +99,25 @@ def build_cluster_index(index_root_directory: str) -> None:
 
     # Determine maximum cluster count
     cluster_limit: int = min(combined_embeddings.shape[0], MAX_CLUSTER_COUNT)
+    if cluster_limit <= 1:
+        return
 
     # Perform k-means clustering with seeded RNG
     cluster_centers: np.ndarray
     cluster_centers, _ = kmeans(combined_embeddings, cluster_limit, seed=RANDOM_SEED)
     np.save(filesystem.join(hkm_dir, "centroids.npy"), cluster_centers)
 
-    # Spawn partitioning jobs for each cluster
+    # Spawn partitioning job for this level
     assignment_jobs: List[Any] = []
-    for cluster_id in range(cluster_centers.shape[0]):
-        job = spawn_job(
-            "hkm.builder.partitioner",
-            docs_dir,
-            hkm_dir,
-            cluster_id=cluster_id,
-            num_clusters=cluster_centers.shape[0],
-        )
-        assignment_jobs.append(job)
-    # Launch recursive index-building jobs
+    job = spawn_job(
+        "hkm.builder.partitioner.route_embeddings",
+        docs_dir,
+        hkm_dir,
+        centroids_path=filesystem.join(hkm_dir, "centroids.npy"),
+    )
+    assignment_jobs.append(job)
+
+    # Launch recursive index-building jobs for children
     for cluster_id in range(cluster_centers.shape[0]):
         sub_hkm_dir: str = filesystem.join(hkm_dir, f"cluster_{cluster_id:04d}")
         spawn_job(
@@ -122,12 +125,6 @@ def build_cluster_index(index_root_directory: str) -> None:
             sub_hkm_dir,
             dependencies=assignment_jobs,
         )
-    # Initiate metadata merging job for *this* cluster.
-    spawn_job(
-        "hkm.builder.metadata_merger.merge_metadata",
-        docs_dir,
-        hkm_dir,
-    )
 
 
 
