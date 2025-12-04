@@ -37,7 +37,8 @@
 - Each algorithm has a doctest-style example in the preceding comments.
 - Unit tests reside in local `./tests/` subdirectories and not inside source files.
 - Every file should be runnable as a quick sanity check via its `__main__` if it does not already have a command line to support.
-- Activate the local virtual environment when testing with `source .env/bin/activate`.
+- Activate the local virtual environment when testing with commands like `source .env/bin/activate && python3 -m pytest tests/` to execute all tests.
+- No test should take more than 30 seconds, so you are encouraged to set timeouts on test execution to enforce that behavior.
 
 
 ## Example Python Code
