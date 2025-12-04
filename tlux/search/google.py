@@ -90,7 +90,7 @@ def get_image(image_url, save_dir="/tmp/downloaded_images", method="curl", uniqu
 # If an image search is desired instead of a text search, pass "images=True".
 # 
 @cache(max_files=MAX_CACHE_FILES, cache_dir=".cache/search_results")
-def search(query, images=False, n=5, start=1, **params):
+def search(query, images=False, n=10, start=1, **params):
     num_results = n  # Rename for local readability.
     assert (num_results <= 100), f"At most 100 results can be returned by a search with the Google API."
     # Libraries needed to execute the search.
@@ -168,3 +168,189 @@ def to_str(o, indent=2, gap=0):
     return string
 
 
+# A simple MCP server based command line interface.
+def mcp():
+    import sys
+    import json
+    # Single tool definition reused for initialize/tools.list
+    search_tool = {
+        "name": "search",
+        "title": "Search Internet",
+        "description": "Use Google to search the internet only when asked. Good for real time information, citations, or facts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query string."
+                },
+                # "images": {
+                #     "type": "boolean",
+                #     "description": "If true, perform image search.",
+                #     "default": False
+                # },
+                # "n": {
+                #     "type": "integer",
+                #     "description": "Number of results requested (max 10).",
+                #     "default": 10
+                # }
+            },
+            "required": ["query"]
+        },
+    }
+
+    def send(obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            # Ignore garbage input
+            continue
+        method = msg.get("method")
+        req_id = msg.get("id")
+        # Notifications (no id) can be safely ignored
+        if method is None:
+            continue
+        # --- initialize ------------------------------------------------------
+        if method == "initialize":
+            # LM Studio currently uses protocolVersion "2024-11-05" 
+            send({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        # We support tools, no extra options needed
+                        "tools": {}
+                    },
+                    "serverInfo": {
+                        "name": "tlux-search",
+                        "version": "0.1.0",
+                    },
+                },
+            })
+            continue
+        # --- tools/list ------------------------------------------------------
+        if method == "tools/list":
+            # LM Studio uses this to discover available tools 
+            send({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "tools": [search_tool],
+                },
+            })
+            continue
+        # --- tools/call ------------------------------------------------------
+        if method == "tools/call":
+            params = msg.get("params", None) or {}
+            tool_name = params.get("name")
+            args = params.get("arguments") or {}
+            if tool_name != "search":
+                send({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32601,  # Method not found
+                        "message": f"Unknown tool: {tool_name!r}",
+                    },
+                })
+                continue
+            try:
+                query = args["query"]
+            except KeyError:
+                send({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,  # Invalid params
+                        "message": "Missing required parameter 'query'.",
+                    },
+                })
+                continue
+            images = bool(args.get("images", False))
+            n = int(args.get("n", 5))
+            start = int(args.get("start", 1))
+            try:
+                # Run your existing search()
+                raw = search(query, images=images, n=n, start=start)
+                # Strip to the fields you care about
+                to_keep = {"title", "link", "displayLink", "snippet"}
+                simplified = []
+                for r in raw:
+                    if not isinstance(r, dict):
+                        continue
+                    s = {k: v for k, v in r.items() if k in to_keep}
+                    simplified.append(s)
+                # MCP tool result: unstructured text, plus the JSON as text
+                # (LM Studio will feed this back to the model)
+                text_payload = to_str(simplified)
+                text_payload = ""
+                for i, r in enumerate(simplified, start=1):
+                    text_payload += f" <search-result-{i}> \n\n"
+                    title = r.get("title", "").replace("\n", " ")
+                    text_payload += f"Title: {title} \n"
+                    link = r.get("displayLink", "")
+                    text_payload += f"Link: {link} \n"
+                    snippet = r.get("snippet", "")
+                    text_payload += f"Snippet: {snippet} \n"
+                    text_payload += f"\n </search-result-{i}> \n\n"
+                send({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": text_payload.strip(),
+                            }
+                        ]
+                    },
+                })
+            except Exception as e:
+                send({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": -32000,  # Server error
+                        "message": f"search failed: {e}",
+                    },
+                })
+            continue
+        # Ignore other methods (e.g. notifications/initialized, roots/*, etc.)
+        # No response is required for unknown notifications; for unknown
+        # requests with an id, you *could* send an error, but LM Studio
+        # will mostly send the three handled above.
+
+
+# Enable both: CLI for manual use, MCP for LM Studio (no args).
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        # Old CLI behavior
+        import argparse
+        parser = argparse.ArgumentParser(description="Search the Internet with Google")
+        parser.add_argument("--query", "-q", type=str, help="The query to search.")
+        parser.add_argument("--num_results", "-n", type=int, default=10,
+                            help="The number of results to return.")
+        parser.add_argument("--images", "-i", action="store_true",
+                            help="Return image search results.")
+        args = parser.parse_args()
+
+        if args.query:
+            results = search(args.query, images=args.images, n=args.num_results)
+            to_keep = {"title", "link", "displayLink", "snippet"}
+            for r in results:
+                for k in list(r):
+                    if k not in to_keep:
+                        r.pop(k, None)
+            print(to_str(results))
+    else:
+        # No args: act as an MCP stdio server
+        mcp()
