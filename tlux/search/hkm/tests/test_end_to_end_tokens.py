@@ -1,7 +1,6 @@
 import os
 import tempfile
-
-os.environ["HKM_FAKE_EMBEDDER"] = "1"
+import pytest
 
 from tlux.search.hkm.fs import FileSystem
 from tlux.search.hkm.builder.tokenize_and_embed import process_documents
@@ -9,7 +8,8 @@ from tlux.search.hkm.builder.consolidate import consolidate
 from tlux.search.hkm.search.searcher import Searcher
 
 
-def test_end_to_end_token_sequence():
+def test_end_to_end_token_sequence(monkeypatch):
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     with tempfile.TemporaryDirectory() as tmpdir:
         fs = FileSystem(root=tmpdir)
         docs_root = fs.join(tmpdir, "docs")

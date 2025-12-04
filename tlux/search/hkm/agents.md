@@ -18,7 +18,7 @@
 ## Documentation & Comments
 - **Module banner** as above.
 - **API docs** – NumPy-style comment blocks with "#" *preceding* classes / functions  
-  (`# Description:\n#  ...\n# \n# Parameters:\n#   arg (type): description\n# ...`), no inline `"""docstrings"""` inside definitions.
+  (`# Description:\n#  ...\n# \n# Parameters:\n#   arg (type): description\n# ...`), no inline `"""docstrings"""` inside definitions they are ugly do NOT use docstrings.
 - Inline comments provide "overview descriptions" for intents of blocks of code and fill explanations where reading the code alone is not sufficiently obvious to indicate why something is being done.
 - Avoid horizontal lines (e.g., `---(-)*` or `###(#)*`), rather rely on simple whitespace and vertical separation.
 
@@ -41,6 +41,7 @@
 
 
 ## Example Python Code
+
 ```
 # Create a directory at the specified path, return 
 # a boolean indicating if that directory already existed.
@@ -62,3 +63,7 @@ def mkdir(self, path: str, exist_ok: bool = False) -> bool:
     os.makedirs(path, exist_ok=exist_ok)
     return existed
 ```
+
+Be mindful of the goals of creating a MINIMAL and CLEAN library. Redundancy should be stripped. Every line of code should be added only with clear and necessary purpose. Constantly try to discover new ways to refactor and reduce unique logic and delete significant chunks of code to simplify and compartmentalize the logic often.
+
+If any pattern is repeated more than twice, it should be abstracted out and compartmentalized for reuse to minimize total unique logic in the code base.

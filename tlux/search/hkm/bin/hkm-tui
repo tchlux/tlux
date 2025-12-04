@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Run the HKM curses builder and explorer."""
+
+from tlux.search.hkm.tui import main
+
+
+if __name__ == "__main__":
+    main()

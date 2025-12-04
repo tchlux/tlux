@@ -24,11 +24,15 @@ import signal
 import socket
 import sys
 import time
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
-try: from .fs import FileSystem
-except: exec(open(os.path.join(os.path.dirname(__file__), "fs.py")).read())
+try:
+    from .fs import FileSystem
+except:
+    # exec(open(os.path.join(os.path.dirname(__file__), "fs.py")).read())
+    from tlux.search.hkm.fs import FileSystem
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
 JOBS_ROOT: str = os.path.join(CODE_ROOT, "jobs")
@@ -64,13 +68,14 @@ import subprocess
 #
 def _launch_worker(fs: FileSystem, job_dir: str, module_path: str = MODULE_PATH) -> 'Job':
     # Create the worker script as a string.
+    repo_root = os.path.abspath(os.path.join(CODE_ROOT, os.pardir, os.pardir, os.pardir))
     script = (
         "import sys\n"
         "import traceback\n"
         "try:\n"
-       f"    sys.path.insert(0, {repr(CODE_ROOT)})\n"
+       f"    sys.path.append({repr(repo_root)})\n"
+       f"    sys.path.append({repr(CODE_ROOT)})\n"
        f"    import {module_path} as mod\n"
-        "    sys.path.pop(0)\n"
         "    fs_cls = getattr(mod, 'FileSystem')\n"
         "    job_cls = getattr(mod, 'Job')\n"
         "    worker = getattr(mod, 'worker')\n"
@@ -156,7 +161,7 @@ class Job:
         for _status in STATUS_VALUES:
             candidate_path = self._fs.join(_status.lower(), self.id)
             if self._fs.exists(candidate_path):
-                self._load(candidate_path)
+                self._load(Path(candidate_path))
                 self.status = _status
                 return
         raise FileNotFoundError(f"Job '{self.id}' not found in any status bucket.")
@@ -272,16 +277,44 @@ class Job:
     #   NotImplementedError: On unsupported platforms.
     #
     def kill(self) -> None:
-        if (self.status != "RUNNING"):
-            return
-        if (self.job is None):
-            raise RuntimeError("Cannot kill job that is not owned by this host process. `self.job is None`")
         if os.name != "posix":
             raise NotImplementedError("Process signaling is supported only on POSIX systems.")
+        target_pid: Optional[int] = None
+        job_pid: Optional[int] = getattr(self, "job_pid", None)
+        if self.job is not None:
+            target_pid = self.job.pid
+        elif job_pid is not None:
+            target_pid = int(job_pid)
+        if target_pid is None:
+            raise RuntimeError("Cannot kill job without a recorded pid.")
         try:
-            os.kill(self.job.pid, signal.SIGKILL)
+            os.kill(target_pid, signal.SIGKILL)
         except Exception as e:
             raise RuntimeError(f"Failed to kill job process: {e}")
+        # Also try child pid if recorded.
+        child_pid = getattr(self, "child_pid", None)
+        if child_pid:
+            try:
+                os.kill(int(child_pid), signal.SIGKILL)
+            except Exception:
+                pass
+        # Mark as failed and move to failed bucket.
+        try:
+            self._ensure_path()
+            cfg_path = self._fs.join(self.path, "job_config")
+            cfg = json.loads(self._fs.read(cfg_path).decode())
+            cfg.update({
+                "status": "FAILED",
+                "exit_code": -9,
+                "end_ts": time.time(),
+            })
+            self._fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
+            failed_dir = self._fs.join("failed", self.id)
+            self._fs.rename(self.path, failed_dir)
+            self.path = failed_dir
+            self.status = "FAILED"
+        except Exception:
+            pass
 
     # Send SIGSTOP to the job process.
     #
@@ -347,6 +380,7 @@ class Job:
             "resource_config": self.resource_config,
             "hostname": self.hostname,
             "pid": self.job_pid,
+            "child_pid": getattr(self, "child_pid", None),
         }
         self._fs.write(self._fs.join(self.path, "job_config"),
                        json.dumps(cfg).encode(), overwrite=True)
@@ -377,6 +411,7 @@ class Job:
         self.resource_config = data.get("resource_config", {})
         self.hostname = data.get("hostname")
         self.job_pid = data.get("pid")
+        self.child_pid = data.get("child_pid")
         self.path = str(path)
 
 
@@ -394,11 +429,13 @@ class Job:
 # Returns:
 #   Job: The created job wrapper.
 # 
-def create_new_job(fs: FileSystem, command: str, *,
-                   dependencies: Iterable[Job] = (),
-                   args: Optional[Iterable[Any]] = None,
-                   kwargs: Optional[Dict[str, Any]] = None,
-                   resource_config: Optional[Dict[str, Any]] = None) -> Job:
+def create_new_job(
+    fs: FileSystem, command: str, *,
+    dependencies: Iterable[Job] = (),
+    args: Optional[Iterable[Any]] = None,
+    kwargs: Optional[Dict[str, Any]] = None,
+    resource_config: Optional[Dict[str, Any]] = None
+) -> Job:
     # Reserve a unique job ID via atomic directory creation.
     #
     # Parameters:
@@ -443,6 +480,7 @@ def create_new_job(fs: FileSystem, command: str, *,
         "resource_config": resource_config,
         "hostname": None,
         "pid": None,
+        "child_pid": None,
     }
     fs.write(fs.join(job_temp_dir, "job_config"), json.dumps(cfg).encode(), overwrite=True)
 
@@ -454,12 +492,13 @@ def create_new_job(fs: FileSystem, command: str, *,
             next_root = fs.join("next", dep.id)
             fs.mkdir(next_root, exist_ok=True)
             fs.mkdir(fs.join(next_root, job_id), exist_ok=True)
-        fs.rename(job_temp_dir, job_dir)
+        if not fs.rename(job_temp_dir, job_dir):
+            raise RuntimeError(f"Failed to move job dir into queued bucket: {job_temp_dir} -> {job_dir}")
         return Job(fs=fs, path=job_dir)
     else:
-        fs.rename(job_temp_dir, job_dir)
+        if not fs.rename(job_temp_dir, job_dir):
+            raise RuntimeError(f"Failed to move job dir into running bucket: {job_temp_dir} -> {job_dir}")
         return _launch_worker(fs=fs, job_dir=job_dir)
-
     # return Job(fs, path=job_dir, active_job=active_job)
 
 
@@ -642,6 +681,13 @@ def worker(fs: FileSystem, job: Job) -> Job:
     job.job = proc
     job._save()
 
+    # Persist child pid in job_config for external kill/inspection.
+    cfg_path = fs.join(job.path, "job_config")
+    cfg = json.loads(fs.read(cfg_path).decode())
+    cfg["pid"] = proc.pid  # worker pid already saved via _save, but ensure child recorded too
+    cfg["child_pid"] = proc.pid
+    fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
+
     # --- monitoring loop -----------------------------------------------------
     mem_limit = job.resource_config.get("max_rss")  # bytes or None
     cpu_target = job.resource_config.get("target_cpu")  # % or None
@@ -650,41 +696,109 @@ def worker(fs: FileSystem, job: Job) -> Job:
 
     res_file = Path(fs.join(job.path, "resources"))
     res_file.touch(exist_ok=True)
+    mon_out = Path(fs.join(job.path, "stdout"))
 
-    def sample(pid: int) -> Dict[str, Any]:
-        """Return {'rss','cpu_percent'} — zero if unsupported platform."""
-        rss = 0
-        cpu_pct = 0.0
-        stat_path = Path(f"/proc/{pid}/stat")
-        status_path = Path(f"/proc/{pid}/status")
-        if stat_path.exists() and status_path.exists():
-            with stat_path.open() as f:
-                parts = f.readline().split()
-                ut, st = int(parts[13]), int(parts[14])
-            clk = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-            proc_time = (ut + st) / clk
-            wall = time.time()
-            nonlocal prev_cpu  # noqa: PLW0603
-            if prev_cpu is not None:
-                dt_cpu = proc_time - prev_cpu[0]
-                dt_wall = wall - prev_cpu[1]
-                if dt_wall > 0:
-                    cpu_pct = 100 * dt_cpu / dt_wall
-            prev_cpu = (proc_time, wall)
-            with status_path.open() as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        rss = int(line.split()[1]) * 1024
-                        break
-        return {"rss": rss, "cpu_percent": cpu_pct}
+    def _gpu_percent(pid: int) -> float | None:
+        """Best-effort GPU percent (nvidia-smi); returns None if unavailable."""
+        if os.name != "posix":
+            return None
+        nvsmi = shutil.which("nvidia-smi")
+        if not nvsmi:
+            return None
+        try:
+            out = subprocess.check_output(
+                [
+                    nvsmi,
+                    "--query-compute-apps=pid,utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+            )
+            for line in out.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) != 2:
+                    continue
+                if str(pid) == parts[0]:
+                    return float(parts[1])
+        except Exception:
+            return None
+        return None
+
+    def sample(pids: list[int]) -> Dict[str, Any]:
+        """Return {'rss','cpu_percent','gpu_percent'} for the hottest PID."""
+        best = {"rss": 0, "cpu_percent": 0.0, "gpu_percent": None}
+        for pid in pids:
+            rss = 0
+            cpu_pct = 0.0
+            stat_path = Path(f"/proc/{pid}/stat")
+            status_path = Path(f"/proc/{pid}/status")
+            if stat_path.exists() and status_path.exists():
+                with stat_path.open() as f:
+                    parts = f.readline().split()
+                    ut, st = int(parts[13]), int(parts[14])
+                clk = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+                proc_time = (ut + st) / clk
+                wall = time.time()
+                nonlocal prev_cpu  # noqa: PLW0603
+                if prev_cpu is not None:
+                    dt_cpu = proc_time - prev_cpu[0]
+                    dt_wall = wall - prev_cpu[1]
+                    if dt_wall > 0:
+                        cpu_pct = 100 * dt_cpu / dt_wall
+                prev_cpu = (proc_time, wall)
+                with status_path.open() as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rss = int(line.split()[1]) * 1024
+                            break
+            else:
+                try:
+                    out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True)
+                    rss_kb = int(out.strip() or 0)
+                    rss = rss_kb * 1024
+                except Exception:
+                    rss = 0
+                try:
+                    out = subprocess.check_output(["ps", "-o", "%cpu=", "-p", str(pid)], text=True)
+                    cpu_pct = float(out.strip() or 0.0)
+                except Exception:
+                    cpu_pct = 0.0
+            gpu_pct = _gpu_percent(pid)
+            if rss > best["rss"]:
+                best["rss"] = rss
+            if cpu_pct > best["cpu_percent"]:
+                best["cpu_percent"] = cpu_pct
+            if gpu_pct is not None:
+                if best["gpu_percent"] is None or gpu_pct > best["gpu_percent"]:
+                    best["gpu_percent"] = gpu_pct
+        return best
 
     while proc.poll() is None:
-        snap = sample(proc.pid)
-        res_file.write_bytes(
-            res_file.read_bytes() +
-            (json.dumps({"ts": time.time(), **snap}) + "\n").encode()
-        )
-
+        # include worker pid, recorded child pid, plus direct children
+        pid_list = [proc.pid]
+        if getattr(job, "child_pid", None):
+            pid_list.append(int(job.child_pid))
+        try:
+            out = subprocess.check_output(["ps", "-o", "pid=", "--ppid", str(proc.pid)], text=True)
+            for line in out.strip().splitlines():
+                try:
+                    pid_list.append(int(line.strip()))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        snap = sample(pid_list)
+        try:
+            with res_file.open("a", encoding="utf-8") as rf:
+                rf.write(json.dumps({"ts": time.time(), **snap}) + "\n")
+        except Exception:
+            pass
+        # Also write a lightweight heartbeat to stdout for UIs.
+        try:
+            with mon_out.open("a", encoding="utf-8") as mo:
+                mo.write(f"[monitor] rss={snap['rss']//1_048_576:.1f}MiB cpu={snap['cpu_percent']:.1f}% gpu={snap['gpu_percent'] if snap['gpu_percent'] is not None else 'n/a'}\n")
+        except Exception:
+            pass
         # Memory enforcement
         if mem_limit:
             if snap["rss"] > mem_limit:
@@ -695,14 +809,12 @@ def worker(fs: FileSystem, job: Job) -> Job:
                     os.kill(proc.pid, signal.SIGKILL)
             else:
                 grace_deadline = None  # reset if usage recovers
-
         # Simple CPU throttling
         if cpu_target and snap["cpu_percent"] > cpu_target * 1.2:
             os.kill(proc.pid, signal.SIGSTOP)
             time.sleep(2.0)
             os.kill(proc.pid, signal.SIGCONT)
-
-        time.sleep(1.0)
+        time.sleep(5.0)
 
     exit_code = proc.returncode or 0
     # --- finalize job directory ---------------------------------------------

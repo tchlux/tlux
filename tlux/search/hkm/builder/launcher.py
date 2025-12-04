@@ -51,24 +51,40 @@ def _bin_pack(paths: List[Path], target_bins: int) -> List[List[Path]]:
     return bins
 
 
+def _should_skip(path: Path, skip_list: List[Path]) -> bool:
+    for s in skip_list:
+        try:
+            if path == s or path.is_relative_to(s):
+                return True
+        except Exception:
+            if str(path).startswith(str(s)):
+                return True
+    return False
+
+
 def build_search_index(
     fs: FileSystem,
     docs_dir: str,
     index_root: str,
     num_workers: int,
-    tokenizer_main: str = "hkm.builder.tokenize_and_embed.default_worker",
+    tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
     max_k: int = 2,
     leaf_doc_limit: int = 2,
     seed: int = 42,
+    fs_root: str | None = None,
+    skip_paths: List[str] | None = None,
 ) -> None:
     # Validate input parameters
     if not os.path.exists(docs_dir):
         raise ValueError(f"docs_dir '{docs_dir}' does not exist")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
+    if fs_root is None:
+        fs_root = fs.root
 
     docs_dir_path = Path(docs_dir)
-    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file()]
+    skip_list = [Path(p).resolve() for p in (skip_paths or [])]
+    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file() and not _should_skip(p, skip_list)]
     if not all_files:
         raise ValueError("No documents found to index.")
 
@@ -96,23 +112,23 @@ def build_search_index(
             worker_index=worker_id,
             total_workers=num_workers,
             manifest_path=str(manifest_path),
-            fs_root="/",
+            fs_root=fs_root,
         )
         worker_jobs.append(job)
 
     consolidate_job = spawn_job(
-        "hkm.builder.consolidate.run_consolidate",
+        "tlux.search.hkm.builder.consolidate.run_consolidate",
         index_root,
-        fs_root="/",
+        fs_root=fs_root,
         dependencies=worker_jobs,
     )
     spawn_job(
-        "hkm.builder.recursive_index_builder.build_cluster_index",
+        "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
         leaf_doc_limit=leaf_doc_limit,
         seed=seed,
-        fs_root="/",
+        fs_root=fs_root,
         run_inline=True,
         max_depth=3,
         depth=0,
@@ -124,16 +140,21 @@ def build_search_index_inline(
     docs_dir: str,
     index_root: str,
     num_workers: int,
-    tokenizer_main: str = "hkm.builder.tokenize_and_embed.default_worker",
+    tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
     metadata_schema: str = "[['name','str'],['num_bytes','int']]",
     max_k: int = 2,
     leaf_doc_limit: int = 2,
     seed: int = 42,
     max_docs: int = 200,
+    fs_root: str | None = None,
+    skip_paths: List[str] | None = None,
 ) -> None:
+    if fs_root is None:
+        fs_root = index_root
     """Single-process helper for tests and small runs."""
     docs_dir_path = Path(docs_dir)
-    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file()]
+    skip_list = [Path(p).resolve() for p in (skip_paths or [])]
+    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file() and not _should_skip(p, skip_list)]
     all_files = sorted(all_files, key=lambda p: p.stat().st_size)[:max_docs]
     if not all_files:
         raise ValueError("No documents found to index.")
@@ -164,21 +185,21 @@ def build_search_index_inline(
             worker_index=worker_id,
             total_workers=num_workers,
             manifest_path=str(manifest_path),
-            fs_root=index_root,
+            fs_root=fs_root,
             metadata_schema=metadata_schema,
         )
 
     # Consolidate
-    spawn_job_inline("hkm.builder.consolidate.run_consolidate", index_root, fs_root=index_root)
+    spawn_job_inline("tlux.search.hkm.builder.consolidate.run_consolidate", index_root, fs_root=fs_root)
 
     # Build HKM tree inline
     spawn_job_inline(
-        "hkm.builder.recursive_index_builder.build_cluster_index",
+        "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
         leaf_doc_limit=leaf_doc_limit,
         seed=seed,
-        fs_root=index_root,
+        fs_root=fs_root,
         run_inline=True,
         max_depth=3,
         depth=0,
@@ -212,7 +233,7 @@ def main() -> None:
     args = parser.parse_args()
 
     fs = FileSystem()
-    build_search_index(fs, args.docs_dir, args.index_root, args.workers)
+    build_search_index(fs, args.docs_dir, args.index_root, args.workers, fs_root=fs.root)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -92,6 +92,7 @@ def process_documents(
     file_system = FileSystem() if fs_root is None else FileSystem(root=fs_root)
     document_output_directory = file_system.mkdir(document_output_directory, exist_ok=True)
     summary_output_directory = file_system.mkdir(summary_output_directory, exist_ok=True)
+    print(f"[worker] start output_dir={document_output_directory} summary_dir={summary_output_directory}", flush=True)
 
     ngram_counter = UniqueCounter()
     category_ids: Dict[str, Dict[str, int]] = {}
@@ -109,8 +110,11 @@ def process_documents(
     )
     document_id = 0
 
-    for texts, metadata_list in document_batches:
+    total_docs = 0
+    total_chunks = 0
+    for batch_idx, (texts, metadata_list) in enumerate(document_batches):
         for text, metadata in zip(texts, metadata_list):
+            total_docs += 1
             document_id += 1
             tokens = tokenize([text])[0]
             if len(tokens) == 0:
@@ -146,9 +150,14 @@ def process_documents(
                     value = hash_value
                 doc_metadata.append(value)
             chunk_writer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
+        if (batch_idx + 1) % 100 == 0:
+            print(f"[worker] batch={batch_idx+1} docs={total_docs} chunks={chunk_writer.chunk_index+1}", flush=True)
 
     chunk_writer.save_chunk()
     chunk_writer.finalize_worker()
+    total_chunks = getattr(chunk_writer, "chunk_index", -1) + 1
+
+    print(f"[worker] processed_docs={total_docs} chunks={total_chunks} out={document_output_directory}", flush=True)
 
     file_system.write(
         file_system.join(summary_output_directory, "n_gram_counter.bytes"),

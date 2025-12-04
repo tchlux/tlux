@@ -44,8 +44,8 @@ class FileSystem:
     #   str: Absolute path within root.
     #
     def _resolve(self, path: str) -> str:
-        abs_path = os.path.abspath(os.path.join(self.root, path))
         root_path = os.path.abspath(self.root)
+        abs_path = os.path.abspath(os.path.join(root_path, path))
         if not abs_path.startswith(root_path + os.sep) and abs_path != root_path:
             raise ValueError(f"Path '{path}' escapes root '{self.root}'.")
         return abs_path

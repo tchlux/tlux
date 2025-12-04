@@ -14,10 +14,9 @@ from tlux.search.hkm.fs import FileSystem
 from tlux.search.hkm.builder.launcher import build_search_index_inline
 from tlux.search.hkm.search.searcher import Searcher
 
-os.environ["HKM_FAKE_EMBEDDER"] = "1"
 
-
-def test_hkm_integration_repo_corpus(tmp_path: Path) -> None:
+def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     fs = FileSystem(root=str(tmp_path))
 
     # create synthetic corpus with guaranteed numeric tokens including 99
