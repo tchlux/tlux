@@ -18,7 +18,6 @@
 
 import json
 import os
-import pickle
 import subprocess
 import signal
 import socket
@@ -37,7 +36,7 @@ except:
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
 JOBS_ROOT: str = os.path.join(CODE_ROOT, "jobs")
 ID_WIDTH: int = 9
-STATUS_VALUES: set[str] = {"QUEUED", "RUNNING", "FINISHED", "FAILED"}
+STATUS_VALUES: set[str] = {"WAITING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
 if __name__ == "__main__":
     MODULE_PATH: str = os.path.splitext(os.path.basename(__file__))[0]
 else:
@@ -128,7 +127,7 @@ def _launch_worker(fs: FileSystem, job_dir: str, module_path: str = MODULE_PATH)
 #   start_ts (float | None), end_ts (float | None), resource_config (dict)
 # 
 class Job:
-    status: str = "QUEUED"
+    status: str = ""
 
     # Initialize a Job from the given file system and job directory path.
     #
@@ -144,7 +143,7 @@ class Job:
         self._load(Path(path))
         if active_job is not None:
             self.hostname = socket.gethostname()
-            self.job_pid = active_job.pid
+            self.monitor_pid = active_job.pid
             self._save()
 
     # Ensure that the job's path is correct by checking the current location.
@@ -198,7 +197,7 @@ class Job:
     @property
     def arguments(self) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         blob: bytes = self._fs.read(self._fs.join(self.path, "exec_args"))
-        payload: Dict[str, Any] = pickle.loads(blob)
+        payload: Dict[str, Any] = json.loads(blob.decode())
         return tuple(payload.get("args", ())), payload.get("kwargs", {})
 
     # Return the standard output produced by the job process.
@@ -231,8 +230,10 @@ class Job:
     #
     @property
     def pid(self) -> int:
-        if (self.job_pid is not None):
-            return self.job_pid
+        if (self.job is not None):
+            return self.job.pid
+        elif (self.monitor_pid is not None):
+            return self.monitor_pid
         raise RuntimeError("No PID available for job.")
 
     # Check if the job process is done executing.
@@ -244,7 +245,7 @@ class Job:
     #   NotImplementedError: On unsupported platforms.
     #
     def is_done(self) -> bool:
-        return self.status in {"FINISHED", "FAILED"}
+        return self.status in {"SUCCEEDED", "FAILED"}
 
     # Check if the job process is running.
     #
@@ -257,8 +258,6 @@ class Job:
     def is_running(self) -> bool:
         if (self.status != "RUNNING"):
             return False
-        if os.name != "posix":
-            raise NotImplementedError("Process tracking is supported only on POSIX systems.")
         # If this is the owning process, we can actually check directly to see if it is done.
         if self.job is not None:
             try:
@@ -276,43 +275,38 @@ class Job:
     #   RuntimeError: If PID is unavailable or signaling fails.
     #   NotImplementedError: On unsupported platforms.
     #
-    def kill(self) -> None:
-        if os.name != "posix":
-            raise NotImplementedError("Process signaling is supported only on POSIX systems.")
+    def kill(self, reason: str = "Killed.") -> None:
         target_pid: Optional[int] = None
-        job_pid: Optional[int] = getattr(self, "job_pid", None)
         if self.job is not None:
             target_pid = self.job.pid
-        elif job_pid is not None:
-            target_pid = int(job_pid)
+        elif self.monitor_pid is not None:
+            target_pid = self.monitor_pid
         if target_pid is None:
             raise RuntimeError("Cannot kill job without a recorded pid.")
         try:
             os.kill(target_pid, signal.SIGKILL)
         except Exception as e:
             raise RuntimeError(f"Failed to kill job process: {e}")
-        # Also try child pid if recorded.
-        child_pid = getattr(self, "child_pid", None)
-        if child_pid:
+        # Also verify executor pid is killed.
+        target_pid = getattr(self, "executor_pid", None)
+        if target_pid:
             try:
-                os.kill(int(child_pid), signal.SIGKILL)
+                os.kill(int(target_pid), signal.SIGKILL)
             except Exception:
                 pass
         # Mark as failed and move to failed bucket.
         try:
-            self._ensure_path()
-            cfg_path = self._fs.join(self.path, "job_config")
-            cfg = json.loads(self._fs.read(cfg_path).decode())
-            cfg.update({
-                "status": "FAILED",
-                "exit_code": -9,
-                "end_ts": time.time(),
-            })
-            self._fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
-            failed_dir = self._fs.join("failed", self.id)
-            self._fs.rename(self.path, failed_dir)
-            self.path = failed_dir
+            # Set the status and save.
             self.status = "FAILED"
+            self.status_reason = reason
+            self.exit_code = -9
+            self.end_ts = time.time()
+            self._save()
+            # Rename from the current status to "failed" (final atomic lock on state).
+            self._fs.rename(
+                self._fs.join("running", self.id),
+                self._fs.join("failed", self.id)
+            )
         except Exception:
             pass
 
@@ -326,9 +320,7 @@ class Job:
         if (self.status != "RUNNING"):
             return
         if (self.job is None):
-            raise RuntimeError("Cannot kill job that is not owned by this host process. `self.job is None`")
-        if os.name != "posix":
-            raise NotImplementedError("Process signaling is supported only on POSIX systems.")
+            raise RuntimeError("Cannot pause a job that is not owned by this host process. `self.job is None`")
         try:
             os.kill(self.job.pid, signal.SIGSTOP)
         except Exception as e:
@@ -343,8 +335,6 @@ class Job:
     def resume(self) -> None:
         if self.job is None:
             raise RuntimeError("This Job does not have a process to resume.")
-        if os.name != "posix":
-            raise NotImplementedError("Process signaling is supported only on POSIX systems.")
         try:
             os.kill(self.job.pid, signal.SIGCONT)
         except Exception as e:
@@ -362,7 +352,7 @@ class Job:
         # Polls the job's running status at fixed intervals until finished.
         while self.is_running():
             time.sleep(poll_interval)
-        return self.status == "FINISHED"
+        return self.status == "SUCCEEDED"
 
     # Write the job configuration and metadata to job_config file.
     #
@@ -373,14 +363,15 @@ class Job:
         cfg = {
             "id": self.id,
             "status": self.status,
+            "status_reason": "",
             "exit_code": self.exit_code,
             "submit_ts": self.submit_ts,
             "start_ts": self.start_ts,
             "end_ts": self.end_ts,
             "resource_config": self.resource_config,
             "hostname": self.hostname,
-            "pid": self.job_pid,
-            "child_pid": getattr(self, "child_pid", None),
+            "watcher_pid": self.pid,
+            "executor_pid": getattr(self, "executor_pid", None),
         }
         self._fs.write(self._fs.join(self.path, "job_config"),
                        json.dumps(cfg).encode(), overwrite=True)
@@ -404,14 +395,15 @@ class Job:
             raise RuntimeError(f"Corrupt status '{status}' for job '{path}'.")
         self.id = data["id"]
         self.status = status
+        self.status_reason = data.get("status_reason", "")
         self.exit_code = data.get("exit_code")
         self.submit_ts = data.get("submit_ts")
         self.start_ts = data.get("start_ts")
         self.end_ts = data.get("end_ts")
         self.resource_config = data.get("resource_config", {})
         self.hostname = data.get("hostname")
-        self.job_pid = data.get("pid")
-        self.child_pid = data.get("child_pid")
+        self.monitor_pid = data.get("monitor_pid")
+        self.executor_pid = data.get("executor_pid")
         self.path = str(path)
 
 
@@ -429,8 +421,9 @@ class Job:
 # Returns:
 #   Job: The created job wrapper.
 # 
-def create_new_job(
-    fs: FileSystem, command: str, *,
+def create_job(
+    fs: FileSystem,
+    command: str, *,
     dependencies: Iterable[Job] = (),
     args: Optional[Iterable[Any]] = None,
     kwargs: Optional[Dict[str, Any]] = None,
@@ -457,117 +450,88 @@ def create_new_job(
     args = tuple(args or ())
     kwargs = dict(kwargs or {})
     resource_config = dict(resource_config or {})
-
     job_id, job_id_dir = _reserve_id(fs)
-    job_temp_dir = fs.join(job_id_dir, job_id)
-    fs.mkdir(job_temp_dir, exist_ok=False)
     # Set the job directory (where this will move once populated).
     has_deps = bool(dependencies)
-    bucket = "queued" if has_deps else "running"
-    job_dir = fs.join(bucket, job_id)
-
-    fs.write(fs.join(job_temp_dir, "exec_function"), command.encode(), overwrite=True)
-    fs.write(fs.join(job_temp_dir, "exec_args"), pickle.dumps({"args": args, "kwargs": kwargs}), overwrite=True)
-
+    bucket = "waiting" if has_deps else "queued"
+    job_state_dir = fs.join(bucket, job_id)
+    fs.write(fs.join(job_id_dir, "exec_function"), command.encode(), overwrite=True)
+    fs.write(fs.join(job_id_dir, "exec_args"), json.dumps({"args": args, "kwargs": kwargs}).encode(), overwrite=True)
     now_ts = time.time()
     cfg: Dict[str, Any] = {
         "id": job_id,
-        "status": "QUEUED" if has_deps else "RUNNING",
+        "status": bucket.upper(),
         "exit_code": None,
         "submit_ts": now_ts,
-        "start_ts": None if has_deps else now_ts,
+        "start_ts": None,
         "end_ts": None,
         "resource_config": resource_config,
         "hostname": None,
-        "pid": None,
-        "child_pid": None,
+        "monitor_pid": None,
+        "executor_pid": None,
     }
-    fs.write(fs.join(job_temp_dir, "job_config"), json.dumps(cfg).encode(), overwrite=True)
-
+    fs.write(fs.join(job_id_dir, "job_config"), json.dumps(cfg).encode(), overwrite=True)
     if has_deps:
-        up_root = fs.join(job_temp_dir, "upstream_jobs")
+        up_root = fs.join(job_id_dir, "upstream_jobs")
         fs.mkdir(up_root, exist_ok=True)
         for dep in dependencies:
             fs.mkdir(fs.join(up_root, dep.id), exist_ok=True)
             next_root = fs.join("next", dep.id)
             fs.mkdir(next_root, exist_ok=True)
             fs.mkdir(fs.join(next_root, job_id), exist_ok=True)
-        if not fs.rename(job_temp_dir, job_dir):
-            raise RuntimeError(f"Failed to move job dir into queued bucket: {job_temp_dir} -> {job_dir}")
-        return Job(fs=fs, path=job_dir)
-    else:
-        if not fs.rename(job_temp_dir, job_dir):
-            raise RuntimeError(f"Failed to move job dir into running bucket: {job_temp_dir} -> {job_dir}")
-        return _launch_worker(fs=fs, job_dir=job_dir)
-    # return Job(fs, path=job_dir, active_job=active_job)
+    if not fs.mkdir(job_state_dir, exist_ok=False):
+        raise RuntimeError(f"Failed to assign job dir into {repr(bucket)}: {job_id_dir} -> {job_state_dir}")
+    # Return the Job object.
+    return Job(fs=fs, path=job_id_dir)
 
 
-# Spawn a job using the default file system rooted at JOBS_ROOT.
+# Run a job using the default file system rooted at JOBS_ROOT.
 #
 # Parameters:
 #   command (str): Import path to function.
 #   dependencies (Iterable[Job]): Optional upstream jobs.
+#   inline (bool): Execute immediately in-process when True.
 #   *args (Any): Positional arguments.
 #   **kwargs (Any): Keyword arguments.
 #
 # Returns:
-#   Job: The created job wrapper.
-# 
-def spawn_job(
+#   Job | InlineJob: Created job wrapper or inline result.
+#
+def run_job(
     command: str,
     *args: Any,
     dependencies: Iterable[Job] = (),
-    **kwargs: Any
-) -> Job:
-    default_fs = FileSystem(JOBS_ROOT)
-    return create_new_job(
-        default_fs,
-        command,
-        dependencies=dependencies,
-        args=args,
-        kwargs=kwargs
-    )
-
-
-# Lightweight inline execution for serial workflows and tests.
-# Runs the job function immediately in-process, bypassing subprocess and watcher.
-class InlineJob:
-    def __init__(self, job_id: str = "inline") -> None:
-        self.id = job_id
-        self.status = "FINISHED"
-        self.exit_code = 0
-
-    def is_done(self) -> bool:
-        return True
-
-    def is_running(self) -> bool:
-        return False
-
-
-# Execute a job function immediately and return an InlineJob.
-# 
-# Parameters:
-#   command (str): Dotted import path to function.
-#   *args, **kwargs: Passed through to the function.
-# 
-# Returns:
-#   InlineJob: The completed job object.
-# 
-def spawn_job_inline(command: str, *args: Any, **kwargs: Any) -> InlineJob:
-    mod_path, func_name = command.rsplit(".", 1)
-    mod = __import__(mod_path, fromlist=[func_name])
-    func = getattr(mod, func_name)
-    func(*args, **kwargs)
-    return InlineJob()
+    inline: bool = False,
+    **kwargs: Any,
+) -> Union[Job, Any]:
+    if inline:
+        mod_path, func_name = command.rsplit(".", 1)
+        mod = __import__(mod_path, fromlist=[func_name])
+        func = getattr(mod, func_name)
+        return func(*args, **kwargs)
+    else:
+        default_fs = FileSystem(JOBS_ROOT)
+        new_job = create_job(
+            default_fs,
+            command,
+            dependencies=dependencies,
+            args=args,
+            kwargs=kwargs
+        )
+        # TODO: Ensure a worker is runnign (up to the max).
+        # return _launch_worker(fs=fs, job_dir=job_dir)
+        return new_job
 
 
 # Host-local maintenance loop.
 # 
 # Every *scan_interval* seconds this function:
+# 
 # 1. Marks orphaned RUNNING jobs as FAILED.
 # 2. Promotes QUEUED jobs whose deps are satisfied and launches a worker.
-# 3. Fires downstream activations for newly finished/failed jobs.
-# 4. Prunes ids/, finished/, failed/ to the 100 newest entries.
+# 3. Fires downstream activations for newly succeeded/failed jobs.
+# 4. Prunes ids/, succeeded/, failed/ to the 100 newest entries.
+# 
 def watcher(fs: FileSystem, scan_interval: float = 10.0) -> None:
 
     def _process_exists(pid: int) -> bool:
@@ -630,13 +594,13 @@ def watcher(fs: FileSystem, scan_interval: float = 10.0) -> None:
             if not _process_exists(pid):
                 _finalize(jdir, "FAILED", "proc-gone")
 
-        # Downstream activation for jobs already finished/failed
-        for bucket in ("finished", "failed"):
+        # Downstream activation for jobs already succeeded/failed
+        for bucket in ("succeeded", "failed"):
             for jid in fs.listdir(bucket):
                 _activate_downstreams(jid)
 
         # Garbage-collect oldest entries
-        for bucket in ("ids", "finished", "failed"):
+        for bucket in ("ids", "succeeded", "failed"):
             if not fs.exists(bucket):
                 continue
             entries = sorted(fs.listdir(bucket))
@@ -655,18 +619,17 @@ def watcher(fs: FileSystem, scan_interval: float = 10.0) -> None:
 def worker(fs: FileSystem, job: Job) -> Job:
     # --- launch target -------------------------------------------------------
     args, kwargs = job.arguments
-    payload_hex = pickle.dumps({"args": args, "kwargs": kwargs}).hex()
+    payload_hex = json.dumps({"args": args, "kwargs": kwargs}).encode().hex()
 
     launcher_code = (
-        "import importlib, pickle, sys;"
-        "mod_path, blob = sys.argv[1], sys.argv[2];"
-        "mod = importlib.import_module('.'.join(mod_path.split('.')[:-1]));"
-        "func = getattr(mod, mod_path.split('.')[-1]);"
-        "payload = pickle.loads(bytes.fromhex(blob));"
-        "ret = func(*payload['args'], **payload['kwargs']);"
+        "import importlib, json, sys; "
+        "mod_path, blob = sys.argv[1], sys.argv[2]; "
+        "mod = importlib.import_module('.'.join(mod_path.split('.')[:-1])); "
+        "func = getattr(mod, mod_path.split('.')[-1]); "
+        "payload = json.loads(bytes.fromhex(blob).decode()); "
+        "ret = func(*payload['args'], **payload['kwargs']); "
         "sys.exit(ret if isinstance(ret, int) else 0)"
     )
-
     out_path = fs.join(job.path, "stdout")
     err_path = fs.join(job.path, "stderr")
     with open(out_path, "ab") as so, open(err_path, "ab") as se:
@@ -676,17 +639,9 @@ def worker(fs: FileSystem, job: Job) -> Job:
             stderr=se,
             close_fds=True,
         )
-
     # Update the job config.
     job.job = proc
     job._save()
-
-    # Persist child pid in job_config for external kill/inspection.
-    cfg_path = fs.join(job.path, "job_config")
-    cfg = json.loads(fs.read(cfg_path).decode())
-    cfg["pid"] = proc.pid  # worker pid already saved via _save, but ensure child recorded too
-    cfg["child_pid"] = proc.pid
-    fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
 
     # --- monitoring loop -----------------------------------------------------
     mem_limit = job.resource_config.get("max_rss")  # bytes or None
@@ -700,8 +655,6 @@ def worker(fs: FileSystem, job: Job) -> Job:
 
     def _gpu_percent(pid: int) -> float | None:
         """Best-effort GPU percent (nvidia-smi); returns None if unavailable."""
-        if os.name != "posix":
-            return None
         nvsmi = shutil.which("nvidia-smi")
         if not nvsmi:
             return None
@@ -823,10 +776,10 @@ def worker(fs: FileSystem, job: Job) -> Job:
     cfg.update({
         "exit_code": exit_code,
         "end_ts": time.time(),
-        "status": "FINISHED" if exit_code == 0 else "FAILED",
+        "status": "SUCCEEDED" if exit_code == 0 else "FAILED",
     })
     fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
-    dest_bucket = "finished" if exit_code == 0 else "failed"
+    dest_bucket = "SUCCEEDED" if exit_code == 0 else "failed"
     dest_dir = fs.join(dest_bucket, job.id)
     fs.rename(job.path, dest_dir)
     job = Job(fs=fs, path=dest_dir)
@@ -863,7 +816,7 @@ if __name__ == "__main__":
     import time
 
     # Test 1 (failed job)
-    job = spawn_job(f"tests.test_jobs._example_fail", 7, 8)
+    job = run_job(f"tests.test_jobs._example_fail", 7, 8)
     print("job: ", job, flush=True)
     print(f"Spawned job ID: {job.id}")
     # Wait for job to finish.
@@ -881,7 +834,7 @@ if __name__ == "__main__":
     print(job.stderr)
 
     # Test 2 (successful job)
-    job = spawn_job(f"tests.test_jobs._example_add", 7, 8)
+    job = run_job(f"tests.test_jobs._example_add", 7, 8)
     print("job: ", job, flush=True)
     print(f"Spawned job ID: {job.id}")
     # Wait for job to finish.
@@ -899,13 +852,15 @@ if __name__ == "__main__":
     print(job.stderr)
 
     # Test 3 (job dependencies, upstream succeeds)
-    job_a = spawn_job("tests.test_jobs._example_add", 2, 3)
-    job_b = spawn_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
+    job_a = run_job("tests.test_jobs._example_add", 2, 3)
+    job_b = run_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
     print(f"Spawned\n job_a: {job_a.id}\n job_b: {job_b.id}")
     while job_a.is_running():
         time.sleep(0.01)
+    print("done waiting on a", flush=True)
     while not job_b.is_done():
         time.sleep(0.01)
+    print("done waiting on b", flush=True)
     print("Stdout:")
     print("", "job_a", repr(job_a.stdout))
     if job_b:

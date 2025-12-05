@@ -19,8 +19,8 @@ from typing import List
 
 try:                from ..fs import FileSystem
 except ImportError: from tlux.search.hkm.fs import FileSystem
-try:                from ..jobs import spawn_job, spawn_job_inline
-except ImportError: from tlux.search.hkm.jobs import spawn_job, spawn_job_inline
+try:                from ..jobs import spawn_job
+except ImportError: from tlux.search.hkm.jobs import spawn_job
 
 
 # Function to build the search index by orchestrating worker processes.
@@ -190,10 +190,15 @@ def build_search_index_inline(
         )
 
     # Consolidate
-    spawn_job_inline("tlux.search.hkm.builder.consolidate.run_consolidate", index_root, fs_root=fs_root)
+    spawn_job(
+        "tlux.search.hkm.builder.consolidate.run_consolidate",
+        index_root,
+        fs_root=fs_root,
+        inline=True,
+    )
 
     # Build HKM tree inline
-    spawn_job_inline(
+    spawn_job(
         "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
@@ -203,6 +208,7 @@ def build_search_index_inline(
         run_inline=True,
         max_depth=3,
         depth=0,
+        inline=True,
     )
 
 
