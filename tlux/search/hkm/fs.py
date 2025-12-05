@@ -17,7 +17,7 @@
 import os
 import shutil
 from dataclasses import dataclass
-from typing import Iterable
+from typing import List
 
 
 # Simple file system interface rooted at a specified base path.
@@ -97,9 +97,9 @@ class FileSystem:
     #   path (str): Directory path.
     #
     # Returns:
-    #   Iterable[str]: List of entry names.
+    #   List[str]: List of entry names.
     # 
-    def listdir(self, path: str) -> Iterable[str]:
+    def listdir(self, path: str) -> List[str]:
         path = self._resolve(path)
         return os.listdir(path)
 

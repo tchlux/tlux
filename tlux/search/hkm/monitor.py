@@ -1,13 +1,20 @@
-# macos_utilization.py
-# Python 3.x, stdlib only.
+# GPU utilization sampler for macOS.
+# 
+# One-shot helper that reads the IORegistry PerformanceStatistics entry
+# exposed by Apple GPU services and returns the current utilization
+# percentage. Designed to be dependency-free and suitable for lightweight
+# polling on Apple Silicon hardware.
+# 
+# Example:
+#     pct = gpu_util_percent()
+#     print(f"GPU utilization: {pct:.1f}%")
+
 
 import ctypes as C
-import time
 
-# ----- Common CF/IOKit setup -----
+# Common CF/IOKit setup
 cf = C.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
 iokit = C.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
-libc = C.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
 
 CFTypeRef = C.c_void_p
 CFStringRef = C.c_void_p
@@ -62,7 +69,7 @@ def cfstring_to_py(s: CFStringRef) -> str:
         return buf.value.decode("utf-8", "replace")
     return ""
 
-def cfnumber_to_float(n: CFTypeRef):
+def cfnumber_to_float(n: CFTypeRef) -> float | None:
     # Try float64 first, else int64
     out_d = C.c_double()
     if cf.CFNumberGetValue(n, kCFNumberFloat64Type, C.byref(out_d)):
@@ -72,9 +79,7 @@ def cfnumber_to_float(n: CFTypeRef):
         return float(out_i.value)
     return None
 
-def cfdict_to_python(d: CFDictionaryRef):
-    if not d:
-        return None
+def cfdict_to_python(d: CFDictionaryRef) -> dict[str, float | dict] | None:
     if cf.CFGetTypeID(d) != cf.CFDictionaryGetTypeID():
         return None
     count = cf.CFDictionaryGetCount(d)
@@ -85,15 +90,15 @@ def cfdict_to_python(d: CFDictionaryRef):
     for i in range(count):
         k = C.c_void_p(keys[i])
         v = C.c_void_p(vals[i])
-        if cf.CFGetTypeID(k.value) == cf.CFStringGetTypeID():
-            key = cfstring_to_py(k.value)
+        if (cf.CFGetTypeID(k.value) == cf.CFStringGetTypeID()) and (k.value is not None):
+            key = cfstring_to_py(C.cast(k.value, CFStringRef))
         else:
             continue
         vt = cf.CFGetTypeID(v.value)
-        if vt == cf.CFNumberGetTypeID():
-            out[key] = cfnumber_to_float(v.value)
-        elif vt == cf.CFDictionaryGetTypeID():
-            out[key] = cfdict_to_python(v.value)
+        if (vt == cf.CFNumberGetTypeID()) and (v.value is not None):
+            out[key] = cfnumber_to_float(C.cast(v.value, CFStringRef))
+        elif (vt == cf.CFDictionaryGetTypeID()) and (v.value is not None):
+            out[key] = cfdict_to_python(C.cast(v.value, CFStringRef))
         else:
             # unsupported CFType -> skip
             continue
@@ -117,70 +122,8 @@ iokit.IORegistryEntryCreateCFProperty.restype = CFTypeRef
 iokit.IOObjectRelease.argtypes = [C.c_uint]
 iokit.IOObjectRelease.restype = C.c_int
 
-# ----- CPU utilization via Mach host_processor_info -----
-mach_task_self = libc.mach_task_self
-mach_task_self.restype = mach_port_t
-
-mach_host_self = libc.mach_host_self
-mach_host_self.restype = mach_port_t
-
-host_processor_info = libc.host_processor_info
-host_processor_info.argtypes = [
-    mach_port_t, C.c_int,
-    C.POINTER(C.c_uint),                      # outCPUCount
-    C.POINTER(C.POINTER(C.c_uint)),           # outInfo array
-    C.POINTER(C.c_uint)                       # outInfoCount
-]
-host_processor_info.restype = C.c_int
-
-vm_deallocate = libc.vm_deallocate
-vm_deallocate.argtypes = [mach_port_t, C.c_void_p, C.c_size_t]
-vm_deallocate.restype = C.c_int
-
-PROCESSOR_CPU_LOAD_INFO = 2
-CPU_STATE_USER, CPU_STATE_SYSTEM, CPU_STATE_IDLE, CPU_STATE_NICE = 0,1,2,3
-CPU_STATE_MAX = 4
-
-def _read_cpu_ticks():
-    host = mach_host_self()
-    cpu_count = C.c_uint(0)
-    info_cnt = C.c_uint(0)
-    info = C.POINTER(C.c_uint)()
-    kr = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO,
-                             C.byref(cpu_count),
-                             C.byref(info),
-                             C.byref(info_cnt))
-    if kr != 0:
-        raise OSError(kr, "host_processor_info failed")
-    ncpu = cpu_count.value
-    total = [0,0,0,0]
-    try:
-        # info is an array sized ncpu * CPU_STATE_MAX
-        arr = C.cast(info, C.POINTER(C.c_uint * (ncpu * CPU_STATE_MAX))).contents
-        for i in range(ncpu):
-            base = i * CPU_STATE_MAX
-            total[CPU_STATE_USER]  += arr[base + CPU_STATE_USER]
-            total[CPU_STATE_SYSTEM]+= arr[base + CPU_STATE_SYSTEM]
-            total[CPU_STATE_IDLE]  += arr[base + CPU_STATE_IDLE]
-            total[CPU_STATE_NICE]  += arr[base + CPU_STATE_NICE]
-    finally:
-        vm_deallocate(mach_task_self(), info, info_cnt.value * C.sizeof(C.c_uint))
-    return total
-
-def cpu_util_percent(sample_interval=0.25):
-    a = _read_cpu_ticks()
-    time.sleep(sample_interval)
-    b = _read_cpu_ticks()
-    du = b[0]-a[0]
-    ds = b[1]-a[1]
-    di = b[2]-a[2]
-    dn = b[3]-a[3]
-    used = du + ds + dn
-    tot = used + di
-    return 100.0 * used / tot if tot else 0.0
-
-# ----- GPU utilization via IORegistry PerformanceStatistics -----
-def _ioreg_perfstats_for_service(classname: str):
+# GPU utilization via IORegistry PerformanceStatistics
+def _ioreg_perfstats_for_service(classname: str) -> dict[str, float | dict] | None:
     match = iokit.IOServiceMatching(classname.encode("utf-8"))
     if not match:
         return None
@@ -202,8 +145,17 @@ def _ioreg_perfstats_for_service(classname: str):
     finally:
         iokit.IOObjectRelease(svc)
 
-def gpu_util_percent():
-    # Common Apple GPU service names to try
+# Description:
+#   Return the current GPU utilization percentage from IORegistry, or None
+#   if no supported GPU service exposes PerformanceStatistics.
+#
+# Returns:
+#   float or None: Utilization in [0, 100] when available.
+#
+# Example:
+#   pct = gpu_util_percent()
+#   print(f"GPU utilization: {pct:.1f}%")
+def gpu_util_percent() -> float | None:
     for name in ("AGXAccelerator", "IOAccelerator", "AppleGPUWrangler"):
         d = _ioreg_perfstats_for_service(name)
         if not d:
@@ -216,41 +168,87 @@ def gpu_util_percent():
             "HW Busy",
             "Overall Utilization %",
         ):
-            if k in d and isinstance(d[k], (int, float)):
-                v = float(d[k])
-                # Some keys may be 0..1 fraction; normalize if needed.
-                return v*100.0 if v <= 1.0 else v
-        # Some firmwares nest stats under a sub-dictionary
+            if (k in d):
+                dk = d[k]
+                if (isinstance(dk, (int, float))):
+                    v = float(dk)
+                    return v * 100.0 if v <= 1.0 else v
+        # Some firmwares nest stats under a sub-dictionary.
         for subk in ("GPU", "GLDriver", "PerformanceStatistics"):
             sub = d.get(subk)
             if isinstance(sub, dict):
-                for k in ("GPU Busy", "Device Utilization %", "HW Busy", "Overall Utilization %"):
-                    if k in sub:
+                for k in (
+                    "GPU Busy",
+                    "Device Utilization %",
+                    "HW Busy",
+                    "Overall Utilization %",
+                ):
+                    if k in sub and isinstance(sub[k], (int, float)):
                         v = float(sub[k])
-                        return v*100.0 if v <= 1.0 else v
+                        return v * 100.0 if v <= 1.0 else v
     return None
 
-# ----- ANE utilization (rarely exposed unprivileged) -----
-def ane_util_percent():
-    for name in ("AppleNeuralEngine", "ANE", "ANEService"):
-        d = _ioreg_perfstats_for_service(name)
-        if not d:
-            continue
-        for k in ("ANE Busy", "Device Utilization %", "HW Busy", "Overall Utilization %"):
-            if k in d:
-                v = float(d[k])
-                return v*100.0 if v <= 1.0 else v
-    return None
 
-def sample_all():
-    return {
-        "cpu_pct": cpu_util_percent(),
-        "gpu_pct": gpu_util_percent(),
-        "ane_pct": ane_util_percent(),
-    }
+import os
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+prev_cpu: Optional[Tuple[float, float]] = None  # (proc_time, wall_time)
+
+# Return {'rss','cpu_percent','gpu_percent'} for the hottest PID.
+def proc_usage(pids: list[int]) -> Dict[str, Any]:
+    best = {"rss": 0, "cpu_percent": 0.0, "gpu_percent": None}
+    for pid in pids:
+        rss = 0
+        cpu_pct = 0.0
+        stat_path = Path(f"/proc/{pid}/stat")
+        status_path = Path(f"/proc/{pid}/status")
+        if stat_path.exists() and status_path.exists():
+            with stat_path.open() as f:
+                parts = f.readline().split()
+                ut, st = int(parts[13]), int(parts[14])
+            clk = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+            proc_time = (ut + st) / clk
+            wall = time.time()
+            global prev_cpu
+            if prev_cpu is not None:
+                dt_cpu = proc_time - prev_cpu[0]
+                dt_wall = wall - prev_cpu[1]
+                if dt_wall > 0:
+                    cpu_pct = 100 * dt_cpu / dt_wall
+            prev_cpu = (proc_time, wall)
+            with status_path.open() as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss = int(line.split()[1]) * 1024
+                        break
+        else:
+            try:
+                out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True)
+                rss_kb = int(out.strip() or 0)
+                rss = rss_kb * 1024
+            except Exception:
+                rss = 0
+            try:
+                out = subprocess.check_output(["ps", "-o", "%cpu=", "-p", str(pid)], text=True)
+                cpu_pct = float(out.strip() or 0.0)
+            except Exception:
+                cpu_pct = 0.0
+        gpu_pct = gpu_util_percent()
+        if rss > best["rss"]:
+            best["rss"] = rss
+        if cpu_pct > best["cpu_percent"]:
+            best["cpu_percent"] = cpu_pct
+        if gpu_pct is not None:
+            if best["gpu_percent"] is None or gpu_pct > best["gpu_percent"]:
+                best["gpu_percent"] = gpu_pct
+    return best
+
 
 if __name__ == "__main__":
     import time
     while True:
-        print(sample_all())
+        pct = gpu_util_percent()
+        print(f"GPU utilization: {pct:.1f}%" if pct is not None else "GPU utilization unavailable")
         time.sleep(1)

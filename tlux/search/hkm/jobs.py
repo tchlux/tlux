@@ -23,15 +23,16 @@ import signal
 import socket
 import sys
 import time
-import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 try:
     from .fs import FileSystem
+    from .monitor import proc_usage
 except:
     # exec(open(os.path.join(os.path.dirname(__file__), "fs.py")).read())
     from tlux.search.hkm.fs import FileSystem
+    from tlux.search.hkm.monitor import proc_usage
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
 JOBS_ROOT: str = os.path.join(CODE_ROOT, "jobs")
@@ -45,74 +46,6 @@ else:
 import tempfile
 import os
 import subprocess
-
-
-# Launch a worker subprocess for the specified job directory.
-#
-# Description:
-#   Writes a temporary worker script and launches it as a subprocess,
-#   passing filesystem and job directory arguments. Returns a Job
-#   instance tracking the active worker process.
-#
-# Parameters:
-#   fs (FileSystem): File-system abstraction.
-#   job_dir (str): Path to the job directory to run.
-#   module_path (str): Import path to the current module.
-#
-# Returns:
-#   Job: Job object tracking the worker subprocess.
-#
-# Raises:
-#   OSError: If process launch fails.
-#
-def _launch_worker(fs: FileSystem, job_dir: str, module_path: str = MODULE_PATH) -> 'Job':
-    # Create the worker script as a string.
-    repo_root = os.path.abspath(os.path.join(CODE_ROOT, os.pardir, os.pardir, os.pardir))
-    script = (
-        "import sys\n"
-        "import traceback\n"
-        "try:\n"
-       f"    sys.path.append({repr(repo_root)})\n"
-       f"    sys.path.append({repr(CODE_ROOT)})\n"
-       f"    import {module_path} as mod\n"
-        "    fs_cls = getattr(mod, 'FileSystem')\n"
-        "    job_cls = getattr(mod, 'Job')\n"
-        "    worker = getattr(mod, 'worker')\n"
-        "    fs = fs_cls(sys.argv[2])\n"
-        "    job = job_cls(fs, path=sys.argv[3])\n"
-        "    worker(fs, job)\n"
-        "except Exception:\n"
-        "    traceback.print_exc()\n"
-        "    sys.exit(1)\n"
-    )
-    # Write the script to a temporary file.
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".py")
-    try:
-        with os.fdopen(temp_fd, "w") as f:
-            f.write(script)
-        proc = subprocess.Popen([
-                sys.executable,
-                temp_path,
-                module_path,
-                fs.root,
-                job_dir,
-            ],
-            stderr=open(os.path.join(JOBS_ROOT, "launcher.stderr"), "w"),
-            stdout=open(os.path.join(JOBS_ROOT, "launcher.stdout"), "w"),
-            cwd=os.path.abspath(os.path.dirname(__file__)),
-        )
-        time.sleep(0.1)
-        try:
-            os.unlink(temp_path)
-        except Exception:
-            pass
-        return Job(fs=fs, path=job_dir, active_job=proc)
-    except Exception as exc:
-        try:
-            os.unlink(temp_path)
-        except Exception:
-            pass
-        raise exc
 
 
 # Wrapper for a single job stored in the FileSystem.
@@ -525,102 +458,24 @@ def run_job(
 
 # Host-local maintenance loop.
 # 
-# Every *scan_interval* seconds this function:
+# Steps:
+#  - check active registrations for watchers
+#  - register self if < max workers running (global config)
+#  - verify that < max workers are running (kill latest to spawn, including self, if over)
+#  - check for QUEUED jobs, execute "worker" directly on first job
+#  - if none QUEUED, then look for WAITING with none RUNNING (kill those WAITING as unsatisfiable)
+#  - if all empty, then exit
 # 
-# 1. Marks orphaned RUNNING jobs as FAILED.
-# 2. Promotes QUEUED jobs whose deps are satisfied and launches a worker.
-# 3. Fires downstream activations for newly succeeded/failed jobs.
-# 4. Prunes ids/, succeeded/, failed/ to the 100 newest entries.
-# 
-def watcher(fs: FileSystem, scan_interval: float = 10.0) -> None:
-
-    def _process_exists(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            return False
-        return True
-
-    def _load_cfg(jdir: str) -> Dict[str, Any]:
-        return json.loads(fs.read(fs.join(jdir, "job_config")).decode())
-
-    def _save_cfg(jdir: str, cfg: Dict[str, Any]) -> None:
-        fs.write(fs.join(jdir, "job_config"),
-                 json.dumps(cfg).encode(),
-                 overwrite=True)
-
-    def _finalize(jdir: str, status: str, reason: str) -> None:
-        cfg = _load_cfg(jdir)
-        cfg.update({"status": status, "exit_code": -1, "end_ts": time.time(), "fail_reason": reason})
-        _save_cfg(jdir, cfg)
-        fs.rename(jdir, fs.join(status.lower(), Path(jdir).name))
-        _activate_downstreams(Path(jdir).name)
-
-    def _activate_downstreams(jid: str) -> None:
-        nxt = fs.join("next", jid)
-        if not fs.exists(nxt):
-            return
-        for did in fs.listdir(nxt):
-            wdir = fs.join("queued", did)
-            up_dir = fs.join(wdir, "upstream_jobs")
-            deps_remaining = [p for p in fs.listdir(up_dir)
-                              if not p.startswith("_")] if fs.exists(up_dir) else []
-            if deps_remaining:
-                continue
-            rdir = fs.join("running", did)
-            # Launch worker for promoted job
-            try:
-                if fs.rename(wdir, rdir):
-                    _launch_worker(fs=fs, job_dir=rdir)
-            except Exception as e:
-                print(f"Failed to move job directory and activate the downstream: {e}")
-        fs.rename(nxt, fs.join("next", f"_{jid}_done"))
-
-    while True:
-        tick_start = time.time()
-
-        # Orphan detection
-        for jid in fs.listdir("running"):
-            jdir = fs.join("running", jid)
-            cfg_path = fs.join(jdir, "job_config")
-            if not fs.exists(cfg_path):
-                _finalize(jdir, "FAILED", "missing-config")
-                continue
-            cfg = json.loads(fs.read(cfg_path).decode())
-            pid = cfg.get("pid")
-            if pid is None:
-                _finalize(jdir, "FAILED", "missing-pid")
-                continue
-            if not _process_exists(pid):
-                _finalize(jdir, "FAILED", "proc-gone")
-
-        # Downstream activation for jobs already succeeded/failed
-        for bucket in ("succeeded", "failed"):
-            for jid in fs.listdir(bucket):
-                _activate_downstreams(jid)
-
-        # Garbage-collect oldest entries
-        for bucket in ("ids", "succeeded", "failed"):
-            if not fs.exists(bucket):
-                continue
-            entries = sorted(fs.listdir(bucket))
-            for old in entries[:-100]:
-                gc_dir = fs.join(bucket, "_gc")
-                fs.mkdir(gc_dir, exist_ok=True)
-                fs.rename(fs.join(bucket, old), fs.join(gc_dir, old))
-
-        # Sleep remainder of interval
-        delay = scan_interval - (time.time() - tick_start)
-        if delay > 0:
-            time.sleep(delay)
+def watcher(fs: Optional[FileSystem] = None) -> None:
+    if fs is None:
+        fs = FileSystem(JOBS_ROOT)
 
 
 # Run *job* in a subprocess, monitor resources, finalize state, trigger deps.
 def worker(fs: FileSystem, job: Job) -> Job:
-    # --- launch target -------------------------------------------------------
+    # --- launch target ---
     args, kwargs = job.arguments
     payload_hex = json.dumps({"args": args, "kwargs": kwargs}).encode().hex()
-
     launcher_code = (
         "import importlib, json, sys; "
         "mod_path, blob = sys.argv[1], sys.argv[2]; "
@@ -640,92 +495,13 @@ def worker(fs: FileSystem, job: Job) -> Job:
             close_fds=True,
         )
     # Update the job config.
-    job.job = proc
+    job.monitor_pid = os.getpid()
+    job.executor_pid = proc.pid
     job._save()
-
-    # --- monitoring loop -----------------------------------------------------
-    mem_limit = job.resource_config.get("max_rss")  # bytes or None
-    cpu_target = job.resource_config.get("target_cpu")  # % or None
-    grace_deadline: Optional[float] = None
-    prev_cpu: Optional[Tuple[float, float]] = None  # (proc_time, wall_time)
-
+    # --- monitoring loop ---
     res_file = Path(fs.join(job.path, "resources"))
     res_file.touch(exist_ok=True)
     mon_out = Path(fs.join(job.path, "stdout"))
-
-    def _gpu_percent(pid: int) -> float | None:
-        """Best-effort GPU percent (nvidia-smi); returns None if unavailable."""
-        nvsmi = shutil.which("nvidia-smi")
-        if not nvsmi:
-            return None
-        try:
-            out = subprocess.check_output(
-                [
-                    nvsmi,
-                    "--query-compute-apps=pid,utilization.gpu",
-                    "--format=csv,noheader,nounits",
-                ],
-                text=True,
-            )
-            for line in out.strip().splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) != 2:
-                    continue
-                if str(pid) == parts[0]:
-                    return float(parts[1])
-        except Exception:
-            return None
-        return None
-
-    def sample(pids: list[int]) -> Dict[str, Any]:
-        """Return {'rss','cpu_percent','gpu_percent'} for the hottest PID."""
-        best = {"rss": 0, "cpu_percent": 0.0, "gpu_percent": None}
-        for pid in pids:
-            rss = 0
-            cpu_pct = 0.0
-            stat_path = Path(f"/proc/{pid}/stat")
-            status_path = Path(f"/proc/{pid}/status")
-            if stat_path.exists() and status_path.exists():
-                with stat_path.open() as f:
-                    parts = f.readline().split()
-                    ut, st = int(parts[13]), int(parts[14])
-                clk = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-                proc_time = (ut + st) / clk
-                wall = time.time()
-                nonlocal prev_cpu  # noqa: PLW0603
-                if prev_cpu is not None:
-                    dt_cpu = proc_time - prev_cpu[0]
-                    dt_wall = wall - prev_cpu[1]
-                    if dt_wall > 0:
-                        cpu_pct = 100 * dt_cpu / dt_wall
-                prev_cpu = (proc_time, wall)
-                with status_path.open() as f:
-                    for line in f:
-                        if line.startswith("VmRSS:"):
-                            rss = int(line.split()[1]) * 1024
-                            break
-            else:
-                try:
-                    out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True)
-                    rss_kb = int(out.strip() or 0)
-                    rss = rss_kb * 1024
-                except Exception:
-                    rss = 0
-                try:
-                    out = subprocess.check_output(["ps", "-o", "%cpu=", "-p", str(pid)], text=True)
-                    cpu_pct = float(out.strip() or 0.0)
-                except Exception:
-                    cpu_pct = 0.0
-            gpu_pct = _gpu_percent(pid)
-            if rss > best["rss"]:
-                best["rss"] = rss
-            if cpu_pct > best["cpu_percent"]:
-                best["cpu_percent"] = cpu_pct
-            if gpu_pct is not None:
-                if best["gpu_percent"] is None or gpu_pct > best["gpu_percent"]:
-                    best["gpu_percent"] = gpu_pct
-        return best
-
     while proc.poll() is None:
         # include worker pid, recorded child pid, plus direct children
         pid_list = [proc.pid]
@@ -740,7 +516,7 @@ def worker(fs: FileSystem, job: Job) -> Job:
                     pass
         except Exception:
             pass
-        snap = sample(pid_list)
+        snap = proc_usage(pid_list)
         try:
             with res_file.open("a", encoding="utf-8") as rf:
                 rf.write(json.dumps({"ts": time.time(), **snap}) + "\n")
@@ -752,25 +528,9 @@ def worker(fs: FileSystem, job: Job) -> Job:
                 mo.write(f"[monitor] rss={snap['rss']//1_048_576:.1f}MiB cpu={snap['cpu_percent']:.1f}% gpu={snap['gpu_percent'] if snap['gpu_percent'] is not None else 'n/a'}\n")
         except Exception:
             pass
-        # Memory enforcement
-        if mem_limit:
-            if snap["rss"] > mem_limit:
-                if grace_deadline is None:
-                    os.kill(proc.pid, signal.SIGTERM)
-                    grace_deadline = time.time() + 10
-                elif time.time() >= grace_deadline and sample(proc.pid)["rss"] > mem_limit:
-                    os.kill(proc.pid, signal.SIGKILL)
-            else:
-                grace_deadline = None  # reset if usage recovers
-        # Simple CPU throttling
-        if cpu_target and snap["cpu_percent"] > cpu_target * 1.2:
-            os.kill(proc.pid, signal.SIGSTOP)
-            time.sleep(2.0)
-            os.kill(proc.pid, signal.SIGCONT)
         time.sleep(5.0)
-
     exit_code = proc.returncode or 0
-    # --- finalize job directory ---------------------------------------------
+    # --- finalize job directory ---
     cfg_path = fs.join(job.path, "job_config")
     cfg = json.loads(fs.read(cfg_path).decode())
     cfg.update({
@@ -783,29 +543,27 @@ def worker(fs: FileSystem, job: Job) -> Job:
     dest_dir = fs.join(dest_bucket, job.id)
     fs.rename(job.path, dest_dir)
     job = Job(fs=fs, path=dest_dir)
-
-    # --- trigger downstreams -------------------------------------------------
+    # --- trigger downstreams ---
     next_dir = fs.join("next", job.id)
     if not fs.exists(next_dir):
         return job
     for did in fs.listdir(next_dir):
-        wdir = fs.join("queued", did)
+        wdir = fs.join("waiting", did)
         up_dir = fs.join(wdir, "upstream_jobs")
         try:
-            lock_dir = fs.join(up_dir, f"_{job.id}_done")
-            fs.rename(fs.join(up_dir, job.id), lock_dir)
-            fs.remove(lock_dir)
+            fs.remove(fs.join(up_dir, job.id))
         except Exception as e:
-            print(f"Failed to move job directory and activate the downstream: {e}")
-        if not [p for p in fs.listdir(up_dir) if not p.startswith("_")]:
-            rdir = fs.join("running", did)
+            print(f"Failed to remove downstream wait-lock. {e}")
+        # If the downstream job has no more upstreams, move it to queued.
+        if len(list(fs.listdir(up_dir))) == 0:
             try:
-                if fs.rename(wdir, rdir):
-                    _launch_worker(fs=fs, job_dir=rdir)
+                fs.rename(wdir, fs.join("queued", did))
+                print("Moved ready downstream {did} to QUEUED state.")
             except Exception as e:
-                print(f"Failed to move job directory and activate the downstream: {e}")
-    fs.rename(next_dir, fs.join("next", f"_{job.id}_done"))
-
+                print(f"Failed to move downstream into QUEUED state: {e}")
+    # TODO: Log the downstreams into the config at time of launching and delete the next directory (since it will not be watched further).
+    # # Remove the "next" directory indicating it has been processed.
+    # fs.remove(next_dir)
     return job
 
 
