@@ -494,7 +494,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
         # The process will overwrite its own STDOUT and STDERR when ready.
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), fs.root],
-            env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ["PYTHONPATH"]},
+            env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", "")},
         )
         return
     # Check how many registered workers there are.
@@ -520,6 +520,8 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     # Set standard output and error for this process to be owned worker directory.
     out_file = open(fs.join(wdir, "logs"), "a")
     stdout, stderr = sys.stdout, sys.stderr
+    sys.stdout = out_file
+    sys.stderr = out_file
     # Check for queued jobs, execute "worker" on first available.
     #   - reserve a queued job by moving it from 'queued' to 'running' (if successful, it is owned).
     while ((next_jid := next(iter(fs.listdir("queued")+[None]))) is not None):
