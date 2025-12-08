@@ -183,7 +183,7 @@ Quick-start (local, single process):
 
 Jobs-based builds:  
   *  Use `build_search_index` to enqueue tokenize/embed -> consolidate -> HKM build via the filesystem-backed `jobs/` queue.  
-  *  For purely serial runs, `spawn_job(..., inline=True)` executes job functions in-process while keeping the same interface.
+  *  For purely serial runs, `run_job(..., inline=True)` executes job functions in-process while keeping the same interface.
 
 Configuration knobs (common):  
   * `max_k`: max clusters per level (default 8)  

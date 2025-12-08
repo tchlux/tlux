@@ -27,7 +27,7 @@ from typing import List, Any, Optional
 import numpy as np
 
 from ..fs import FileSystem
-from ..jobs import spawn_job
+from ..jobs import run_job
 from ..tools.kmeans import kmeans
 from ..tools.preview import select_random, select_diverse
 from .sampler import sample_embeddings
@@ -140,8 +140,8 @@ def build_cluster_index(
                 depth=depth + 1,
             )
     else:
-        job = spawn_job(
-            "hkm.builder.partitioner.route_embeddings",
+        job = run_job(
+            "tlux.search.hkm.builder.partitioner.route_embeddings",
             docs_dir,
             hkm_dir,
             os.path.join(hkm_dir, "centroids.npy"),
@@ -152,8 +152,8 @@ def build_cluster_index(
 
         for cluster_id in range(cluster_centers.shape[0]):
             sub_hkm_dir: str = os.path.join(hkm_dir, f"cluster_{cluster_id:04d}")
-            spawn_job(
-                "hkm.builder.recursive_index_builder.build_cluster_index",
+            run_job(
+                "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
                 sub_hkm_dir,
                 max_cluster_count,
                 leaf_doc_limit,

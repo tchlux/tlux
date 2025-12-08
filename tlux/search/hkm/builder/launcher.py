@@ -4,7 +4,7 @@
 #   1. Tokenizing and embedding raw documents in parallel workers.
 #   2. Building the hierarchical K-Means (HKM) tree once all shards are ready.
 # 
-# Workers are launched via `jobs.spawn_job`, which invokes a Python function in
+# Workers are launched via `jobs.run_job`, which invokes a Python function in
 # a new process with the provided arguments and optional dependencies.
 # 
 # Example usage:
@@ -19,8 +19,8 @@ from typing import List
 
 try:                from ..fs import FileSystem
 except ImportError: from tlux.search.hkm.fs import FileSystem
-try:                from ..jobs import spawn_job
-except ImportError: from tlux.search.hkm.jobs import spawn_job
+try:                from ..jobs import run_job
+except ImportError: from tlux.search.hkm.jobs import run_job
 
 
 # Function to build the search index by orchestrating worker processes.
@@ -105,7 +105,7 @@ def build_search_index(
         manifest_path = Path(manifest_dir) / f"worker_{worker_id:04d}.json"
         manifest_path.write_text(json.dumps([str(p) for p in files]), encoding="utf-8")
         work_dir = fs.join(docs_root_out, f"worker_{worker_id:04d}")
-        job = spawn_job(
+        job = run_job(
             tokenizer_main,
             document_directory=str(docs_dir_path),
             output_directory=work_dir,
@@ -116,13 +116,13 @@ def build_search_index(
         )
         worker_jobs.append(job)
 
-    consolidate_job = spawn_job(
+    consolidate_job = run_job(
         "tlux.search.hkm.builder.consolidate.run_consolidate",
         index_root,
         fs_root=fs_root,
         dependencies=worker_jobs,
     )
-    spawn_job(
+    run_job(
         "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
@@ -190,7 +190,7 @@ def build_search_index_inline(
         )
 
     # Consolidate
-    spawn_job(
+    run_job(
         "tlux.search.hkm.builder.consolidate.run_consolidate",
         index_root,
         fs_root=fs_root,
@@ -198,7 +198,7 @@ def build_search_index_inline(
     )
 
     # Build HKM tree inline
-    spawn_job(
+    run_job(
         "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
