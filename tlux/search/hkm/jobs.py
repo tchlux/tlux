@@ -659,19 +659,31 @@ def worker(fs: FileSystem, job: Job) -> Job:
         try:
             fs.remove(wentry)
             fs.remove(njob)
-        except Exception as e:
+        except: # Exception as e:
             # print(f"[jobs.WORKER] Failed to remove downstream wait-lock for {job.id} blocking downstream {did}. {e}", file=sys.stderr, flush=True)
             pass
-        # If the downstream job has no more upstreams, move it to queued.
-        if len(list(fs.listdir(updir))) == 0:
+        # Fail all downstream jobs if this job failed.
+        if job.status == "FAILED":
             try:
                 j = Job(fs=fs, path=fs.join("ids", did))
-                j.status = "QUEUED"
+                j.status = "FAILED"
+                j.status_reason = f"Upstream job {job.id} failed."
+                j.exit_code = 1
                 j._save()
-                fs.rename(wjob, fs.join("queued", did))
-                # Ensure a watcher exists to execute the job.
-                watcher(fs=fs, launch=True)
-            except Exception as e:
+                fs.rename(wjob, fs.join("failed", did))
+            except:
+                pass
+        # If the downstream job has no more upstreams, move it to its next state.
+        elif len(list(fs.listdir(updir))) == 0:
+            try:
+                j = Job(fs=fs, path=fs.join("ids", did))
+                if (j.status != "FAILED"):
+                    j.status = "QUEUED"
+                    j._save()
+                    fs.rename(wjob, fs.join("queued", did))
+                    # Ensure a watcher exists to execute the job.
+                    watcher(fs=fs, launch=True)
+            except: # Exception as e:
                 # print(f"[jobs.WORKER] Failed to move downstream {did} into QUEUED state: {e}", file=sys.stderr, flush=True)
                 pass
     # TODO: Log the downstreams into the config at time of launching and delete the next directory (since it will not be watched further).
