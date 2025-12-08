@@ -13,14 +13,15 @@ def test_job_stdout_visible(tmp_path) -> None:
         jobs_root.mkdir(parents=True, exist_ok=True)
         jobs.JOBS_ROOT = str(jobs_root)
         fs = jobs.FileSystem(jobs.JOBS_ROOT)
-        for bucket in ("ids", "queued", "running", "finished", "failed", "next"):
+        for bucket in ("ids", "waiting", "queued", "running", "succeeded", "failed", "next"):
             fs.mkdir(fs.join(bucket), exist_ok=True)
 
-        job = jobs.spawn_job("tlux.search.hkm.job_runner_helper.job_with_output")
+        job = jobs.run_job("tlux.search.hkm.tests.job_runner_helper.job_with_output")
+        jobs.watcher(fs=fs, max_workers=1)
         job.wait_for_completion(poll_interval=0.05)
 
         stdout_text = job.stdout
         assert "[job_with_output] tick" in stdout_text, f"missing job output: {stdout_text!r}"
-        assert job.status == "FINISHED"
+        assert job.status == "SUCCEEDED"
     finally:
         jobs.JOBS_ROOT = old_root
