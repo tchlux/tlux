@@ -1,5 +1,5 @@
 import time
-from tlux.search.hkm.jobs import spawn_job
+from tlux.search.hkm.jobs import run_job
 
 # Define a simple function to be executed as a job.
 def _example_add(x: int, y: int) -> int:
@@ -30,7 +30,7 @@ def _example_dep(x: int) -> int:
 #
 def test_failed_job() -> None:
     import time
-    job = spawn_job("tests.test_jobs._example_fail", 7, 8)
+    job = run_job("tests.test_jobs._example_fail", 7, 8)
     print(f"Spawned job ID: {job.id}")
     job.wait_for_completion(poll_interval=0.02)
     print("Job stdout:", repr(job.stdout))
@@ -50,7 +50,7 @@ def test_failed_job() -> None:
 #
 def test_successful_job() -> None:
     import time
-    job = spawn_job("tests.test_jobs._example_add", 7, 8)
+    job = run_job("tests.test_jobs._example_add", 7, 8)
     print(f"Spawned job ID: {job.id}")
     while job.is_running():
         time.sleep(0.02)
@@ -66,8 +66,8 @@ def test_successful_job() -> None:
 #
 def test_job_with_dependency() -> None:
     import time
-    job_a = spawn_job("tests.test_jobs._example_add", 2, 3)
-    job_b = spawn_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
+    job_a = run_job("tests.test_jobs._example_add", 2, 3)
+    job_b = run_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
     print(f"Spawned job_a: {job_a.id}, job_b: {job_b.id}")
     # Wait for job_a to complete.
     job_a.wait_for_completion(poll_interval=0.02)

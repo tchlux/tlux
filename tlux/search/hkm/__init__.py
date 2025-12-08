@@ -6,6 +6,7 @@ from .fs import FileSystem
 from .schema import BuildConfig, QuerySpec, SearchResult, Hit
 from .builder.launcher import build_search_index, build_search_index_inline
 from .search.searcher import Searcher
+from .monitor import proc_usage
 
 __all__ = [
     "FileSystem",

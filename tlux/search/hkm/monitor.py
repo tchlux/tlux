@@ -191,6 +191,7 @@ def gpu_util_percent() -> float | None:
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -247,8 +248,13 @@ def proc_usage(pids: list[int]) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    import time
     while True:
-        pct = gpu_util_percent()
-        print(f"GPU utilization: {pct:.1f}%" if pct is not None else "GPU utilization unavailable")
+        print()
+        usage = proc_usage([os.getpid()])
+        mem = usage["rss"]
+        print(f"MEM {mem/2**20:.0f}MB" if mem is not None else "MEM utilization unavailable")
+        pct = usage["cpu_percent"]
+        print(f"CPU {pct:.1f}%" if pct is not None else "CPU utilization unavailable")
+        pct = usage["gpu_percent"]
+        print(f"GPU {pct:.1f}%" if pct is not None else "GPU utilization unavailable")
         time.sleep(1)

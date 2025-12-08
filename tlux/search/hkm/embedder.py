@@ -24,11 +24,11 @@ from collections import defaultdict
 import numpy as np
 
 try:
-    from .utils.drama.inference import tokenize, detokenize, embed
-    # from .utils.contriever.inference import tokenize, detokenize, embed
-    # from .utils.e5.inference import tokenize, detokenize, embed
+    from .libs.drama.inference import tokenize, detokenize, embed
+    # from .libs.contriever.inference import tokenize, detokenize, embed
+    # from .libs.e5.inference import tokenize, detokenize, embed
 except ImportError:
-    from tlux.search.hkm.utils.drama.inference import tokenize, detokenize, embed
+    from tlux.search.hkm.libs.drama.inference import tokenize, detokenize, embed
 
 _MAX_SEQ_LEN = 8192
 _DEFAULT_WINDOWS = (32, 128, 512, 1024)

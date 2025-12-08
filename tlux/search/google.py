@@ -275,7 +275,7 @@ def mcp():
                 })
                 continue
             images = bool(args.get("images", False))
-            n = int(args.get("n", 5))
+            n = int(args.get("n", 10))
             start = int(args.get("start", 1))
             try:
                 # Run your existing search()

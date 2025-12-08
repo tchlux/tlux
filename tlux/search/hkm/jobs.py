@@ -28,13 +28,13 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 try:
     from .fs import FileSystem
-    from .monitor import proc_usage
+    from .monitor import proc_usage  # pyright: ignore
 except:
-    # exec(open(os.path.join(os.path.dirname(__file__), "fs.py")).read())
     from tlux.search.hkm.fs import FileSystem
-    from tlux.search.hkm.monitor import proc_usage
+    from tlux.search.hkm.monitor import proc_usage  # pyright: ignore
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
+REPO_ROOT: str = os.path.dirname(os.path.dirname(os.path.dirname(CODE_ROOT)))
 JOBS_ROOT: str = os.path.join(CODE_ROOT, "jobs")
 ID_WIDTH: int = 9
 STATUS_VALUES: set[str] = {"WAITING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
@@ -43,7 +43,6 @@ if __name__ == "__main__":
 else:
     MODULE_PATH: str = __name__
 
-import tempfile
 import os
 import subprocess
 
@@ -61,6 +60,12 @@ import subprocess
 # 
 class Job:
     status: str = ""
+
+    # A descriptive string representation of this Job.
+    def __repr__(self):
+        p = os.path.relpath(self.path, os.getcwd())
+        t = time.ctime(self.submit_ts)
+        return f"Job({self.id}, path={repr(p)}) at {t}"
 
     # Initialize a Job from the given file system and job directory path.
     #
@@ -86,14 +91,15 @@ class Job:
     #   FileNotFoundError: If the job cannot be found in any status bucket.
     #
     def _ensure_path(self) -> None:
+        # TODO: If the "mtime" of the job config file is newer, reload.
+        # 
         # If current path exists, nothing to do.
-        if self._fs.exists(self.path):
+        if self._fs.exists(self._fs.join(self.status, self.id)):
             return
         # Search all status buckets for a job with the same ID.
         for _status in STATUS_VALUES:
             candidate_path = self._fs.join(_status.lower(), self.id)
             if self._fs.exists(candidate_path):
-                self._load(Path(candidate_path))
                 self.status = _status
                 return
         raise FileNotFoundError(f"Job '{self.id}' not found in any status bucket.")
@@ -107,8 +113,8 @@ class Job:
     #   Any: Attribute value.
     #
     def __getattribute__(self, name: str) -> Any:
-        _refresh_on = {"QUEUED", "RUNNING"}
-        _refresh_for = {"stdout", "stderr", "pid", "is_done", "is_running", "kill", "pause", "resume", "_save"}
+        _refresh_on = {"WAITING", "QUEUED", "RUNNING"}
+        _refresh_for = {"stdout", "stderr", "exit_code", "pid", "is_done", "is_running", "kill", "pause", "resume", "_save"}
         if (object.__getattribute__(self, "status") in _refresh_on) and (name in _refresh_for):
             self._ensure_path()
         return object.__getattribute__(self, name)
@@ -162,12 +168,12 @@ class Job:
     #   RuntimeError: If PID cannot be determined.
     #
     @property
-    def pid(self) -> int:
+    def pid(self) -> Optional[int]:
         if (self.job is not None):
             return self.job.pid
         elif (self.monitor_pid is not None):
             return self.monitor_pid
-        raise RuntimeError("No PID available for job.")
+        return None
 
     # Check if the job process is done executing.
     #
@@ -296,7 +302,7 @@ class Job:
         cfg = {
             "id": self.id,
             "status": self.status,
-            "status_reason": "",
+            "status_reason": self.status_reason,
             "exit_code": self.exit_code,
             "submit_ts": self.submit_ts,
             "start_ts": self.start_ts,
@@ -309,6 +315,11 @@ class Job:
         self._fs.write(self._fs.join(self.path, "job_config"),
                        json.dumps(cfg).encode(), overwrite=True)
 
+    # Reload this job.
+    def reload(self) -> None:
+        if self.path:
+            return self._load(self.path)
+
     # Load job metadata from job_config file and initialize attributes.
     #
     # Parameters:
@@ -318,7 +329,7 @@ class Job:
     #   FileNotFoundError: If job_config is missing.
     #   RuntimeError: If status is invalid or data is corrupt.
     #
-    def _load(self, path: Path) -> None:
+    def _load(self, path: str | Path) -> None:
         cfg_path = self._fs.join(str(path), "job_config")
         if not self._fs.exists(cfg_path):
             raise FileNotFoundError(f"job_config missing at '{cfg_path}'.")
@@ -409,9 +420,16 @@ def create_job(
         fs.mkdir(up_root, exist_ok=True)
         for dep in dependencies:
             fs.mkdir(fs.join(up_root, dep.id), exist_ok=True)
-            next_root = fs.join("next", dep.id)
-            fs.mkdir(next_root, exist_ok=True)
-            fs.mkdir(fs.join(next_root, job_id), exist_ok=True)
+            next_entry = fs.join("next", dep.id, job_id)
+            fs.mkdir(fs.join(next_entry), exist_ok=True)
+            # Assert that the job we just gave a "next" is still RUNNING,
+            #  if it is not, then do not create a "next" entry for it.
+            if (
+                (not fs.exists(fs.join("waiting", dep.id)))
+                and (not fs.exists(fs.join("queued", dep.id)))
+                and (not fs.exists(fs.join("running", dep.id)))
+            ):
+                fs.remove(fs.join(next_entry))
     if not fs.mkdir(job_state_dir, exist_ok=False):
         raise RuntimeError(f"Failed to assign job dir into {repr(bucket)}: {job_id_dir} -> {job_state_dir}")
     # Return the Job object.
@@ -451,12 +469,13 @@ def run_job(
             args=args,
             kwargs=kwargs
         )
-        # TODO: Ensure a worker is runnign (up to the max).
+        # Ensure a worker is running (up to the max).
+        watcher(launch=True)
         # return _launch_worker(fs=fs, job_dir=job_dir)
         return new_job
 
 
-# Host-local maintenance loop.
+# Watcher that monitors the state of the jobs directory, executes jobs, and cleans.
 # 
 # Steps:
 #  - check active registrations for watchers
@@ -466,9 +485,69 @@ def run_job(
 #  - if none QUEUED, then look for WAITING with none RUNNING (kill those WAITING as unsatisfiable)
 #  - if all empty, then exit
 # 
-def watcher(fs: Optional[FileSystem] = None) -> None:
+def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=False) -> None:
+    # Otherwise assume this is the primary process.
     if fs is None:
         fs = FileSystem(JOBS_ROOT)
+    # If a launch is desired, create a process and return.
+    if launch:
+        # The process will overwrite its own STDOUT and STDERR when ready.
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), fs.root],
+            env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ["PYTHONPATH"]},
+        )
+        return
+    # Check how many registered workers there are.
+    fs.mkdir("workers", exist_ok=True)
+    registered_watchers = fs.listdir("workers")
+    if len(registered_watchers) >= max_workers:
+        a = "are" if len(registered_watchers) > 1 else "is"
+        w = "watchers" if len(registered_watchers) > 1 else "watcher"
+        print(f"[jobs.WATCHER] Exiting since there {a} {len(registered_watchers)} {w} already.", flush=True)
+        return
+    # Register self as a worker.
+    pid = str(os.getpid())
+    wdir = fs.join("workers", pid)
+    fs.mkdir(wdir)
+    # Validate the number of workers (deterministically exit if too many run).
+    registered_watchers = fs.listdir("workers")  # naturally ordered by start time
+    if (len(registered_watchers) >= max_workers) and (pid not in registered_watchers[:max_workers]):
+        a = "are" if len(registered_watchers) > 1 else "is"
+        w = "watchers" if len(registered_watchers) > 1 else "watcher"
+        print(f"[jobs.WATCHER] Exiting and removing watcher directory since there {a} {len(registered_watchers)} {w}.", flush=True)
+        fs.remove(wdir)
+        return
+    # Set standard output and error for this process to be owned worker directory.
+    out_file = open(fs.join(wdir, "logs"), "a")
+    stdout, stderr = sys.stdout, sys.stderr
+    # Check for queued jobs, execute "worker" on first available.
+    #   - reserve a queued job by moving it from 'queued' to 'running' (if successful, it is owned).
+    while ((next_jid := next(iter(fs.listdir("queued")+[None]))) is not None):
+        # Move the job to "running" to claim it.
+        try:
+            fs.rename(fs.join("queued", next_jid), fs.join("running", next_jid))
+            job = Job(fs=fs, path=fs.join("ids", next_jid))
+            worker(fs=fs, job=job)
+        except Exception as e:
+            print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
+            continue
+    # All jobs completed, moving on to cleanup, indicate by saying this watcher is no longer active.
+    fs.remove(wdir)
+    # Check for unsatisfiable jobs (waiting with nothing running).
+    if fs.exists("waiting"):
+        while ((next_jid := next(iter(fs.listdir("waiting")+[None]))) is not None) and (len(fs.listdir("running")) == 0):
+            try:
+                fs.rename(fs.join("waiting", next_jid), fs.join("failed", next_jid))
+                job = Job(fs=fs, path=fs.join("ids", next_jid))
+                job.status = "FAILED"
+                job.status_reason = "WAITING but no jobs are RUNNING"
+                job._save()
+            except:
+                pass
+    # Reset standard output streams.
+    sys.stdout = stdout
+    sys.stderr = stderr
+    out_file.close()
 
 
 # Run *job* in a subprocess, monitor resources, finalize state, trigger deps.
@@ -501,14 +580,17 @@ def worker(fs: FileSystem, job: Job) -> Job:
     # --- monitoring loop ---
     res_file = Path(fs.join(job.path, "resources"))
     res_file.touch(exist_ok=True)
-    mon_out = Path(fs.join(job.path, "stdout"))
-    while proc.poll() is None:
-        # include worker pid, recorded child pid, plus direct children
-        pid_list = [proc.pid]
-        if getattr(job, "child_pid", None):
-            pid_list.append(int(job.child_pid))
+    while True:
+        # Wait for exit of the process.
         try:
-            out = subprocess.check_output(["ps", "-o", "pid=", "--ppid", str(proc.pid)], text=True)
+            exit_code = proc.wait(timeout=5)
+            break
+        except:
+            pass
+        # If the process hasn't exited, do a resource utilization check as a heartbeat.
+        pid_list = [proc.pid]
+        try:
+            out = subprocess.check_output(["ps", "-o", "pid=", "-p", str(proc.pid)], text=True)
             for line in out.strip().splitlines():
                 try:
                     pid_list.append(int(line.strip()))
@@ -516,51 +598,47 @@ def worker(fs: FileSystem, job: Job) -> Job:
                     pass
         except Exception:
             pass
-        snap = proc_usage(pid_list)
         try:
+            # Also write a lightweight heartbeat to stdout for UIs.
+            snap = proc_usage(pid_list)
             with res_file.open("a", encoding="utf-8") as rf:
                 rf.write(json.dumps({"ts": time.time(), **snap}) + "\n")
         except Exception:
             pass
-        # Also write a lightweight heartbeat to stdout for UIs.
-        try:
-            with mon_out.open("a", encoding="utf-8") as mo:
-                mo.write(f"[monitor] rss={snap['rss']//1_048_576:.1f}MiB cpu={snap['cpu_percent']:.1f}% gpu={snap['gpu_percent'] if snap['gpu_percent'] is not None else 'n/a'}\n")
-        except Exception:
-            pass
-        time.sleep(5.0)
-    exit_code = proc.returncode or 0
-    # --- finalize job directory ---
-    cfg_path = fs.join(job.path, "job_config")
-    cfg = json.loads(fs.read(cfg_path).decode())
-    cfg.update({
-        "exit_code": exit_code,
-        "end_ts": time.time(),
-        "status": "SUCCEEDED" if exit_code == 0 else "FAILED",
-    })
-    fs.write(cfg_path, json.dumps(cfg).encode(), overwrite=True)
-    dest_bucket = "SUCCEEDED" if exit_code == 0 else "failed"
-    dest_dir = fs.join(dest_bucket, job.id)
-    fs.rename(job.path, dest_dir)
-    job = Job(fs=fs, path=dest_dir)
+    # --- finalize job ---
+    job.exit_code = exit_code
+    job.end_ts = time.time()
+    job.status = "SUCCEEDED" if exit_code == 0 else "FAILED"
+    job._save()
+    dest_dir = fs.join(job.status.lower(), job.id)
+    # Before checking for downstreams, remove from "running".
+    fs.rename(fs.join("running", job.id), dest_dir)
     # --- trigger downstreams ---
     next_dir = fs.join("next", job.id)
     if not fs.exists(next_dir):
         return job
     for did in fs.listdir(next_dir):
-        wdir = fs.join("waiting", did)
-        up_dir = fs.join(wdir, "upstream_jobs")
+        njob = fs.join(next_dir, did)  # next job entry (MINE for downstream)
+        wjob = fs.join("waiting", did)  # waiting job entry (downstream job)
+        updir = fs.join("ids", did, "upstream_jobs")
+        wentry = fs.join(updir, job.id)  # waiting-on entry (downstream for ME)
+        # Remove the downstream from THIS job's waiting list.
         try:
-            fs.remove(fs.join(up_dir, job.id))
+            fs.remove(wentry)
+            fs.remove(njob)
         except Exception as e:
-            print(f"Failed to remove downstream wait-lock. {e}")
+            print(f"[jobs.WORKER] Failed to remove downstream wait-lock for {job.id} blocking downstream {did}. {e}", file=sys.stderr, flush=True)
         # If the downstream job has no more upstreams, move it to queued.
-        if len(list(fs.listdir(up_dir))) == 0:
+        if len(list(fs.listdir(updir))) == 0:
             try:
-                fs.rename(wdir, fs.join("queued", did))
-                print("Moved ready downstream {did} to QUEUED state.")
+                j = Job(fs=fs, path=fs.join("ids", did))
+                j.status = "QUEUED"
+                j._save()
+                fs.rename(wjob, fs.join("queued", did))
+                # Ensure a watcher exists to execute the job.
+                watcher(fs=fs, launch=True)
             except Exception as e:
-                print(f"Failed to move downstream into QUEUED state: {e}")
+                print(f"[jobs.WORKER] Failed to move downstream {did} into QUEUED state: {e}", file=sys.stderr, flush=True)
     # TODO: Log the downstreams into the config at time of launching and delete the next directory (since it will not be watched further).
     # # Remove the "next" directory indicating it has been processed.
     # fs.remove(next_dir)
@@ -568,58 +646,81 @@ def worker(fs: FileSystem, job: Job) -> Job:
 
 
 if __name__ == "__main__":
-    # Example: spawn a job that computes a simple function, wait, and print result.
-    #
-    # The test function below is for demonstration only.
-    import time
+    # 
+    # print(os.getpid(), "-"*100, flush=True)
+    # print("sys.argv: ", sys.argv, flush=True)
+    # 
+    if len(sys.argv) > 1:
+        # This is a watcher process.
+        # Ensure CODE_ROOT and REPO_ROOT are in the sys path.
+        if REPO_ROOT not in sys.path:
+            sys.path.insert(0, REPO_ROOT)
+        if CODE_ROOT not in sys.path:
+            sys.path.insert(0, CODE_ROOT)
+        watcher(fs=FileSystem(sys.argv[1]))
+    else:
+        print("[jobs.TESTER] begin.", flush=True)
+        # Example: spawn a job that computes a simple function, wait, and print result.
+        #
+        # The test function below is for demonstration only.
+        import time
 
-    # Test 1 (failed job)
-    job = run_job(f"tests.test_jobs._example_fail", 7, 8)
-    print("job: ", job, flush=True)
-    print(f"Spawned job ID: {job.id}")
-    # Wait for job to finish.
-    for _ in range(2):
-        time.sleep(1)
-        if not job.is_running():
-            break
-        print("Waiting for job to finish...")
-    # Print results.
-    print("Job stdout:", repr(job.stdout))
-    print("Job stderr:", repr(job.stderr))
-    print(f"Job finished? {not job.is_running()}")
-    print(f"Job exit code: {job.exit_code}")
-    print()
-    print(job.stderr)
+        # Test 1 (failed job)
+        job = run_job(f"tests.test_jobs._example_fail", 7, 8)
+        print("job: ", job, flush=True)
+        print(f"Spawned job ID: {job.id}")
+        # Wait for job to finish.
+        for _ in range(2):
+            time.sleep(1)
+            if not job.is_running():
+                break
+            print("Waiting for job to finish...")
+        # Print results.
+        # TODO: Job should reload itself here automatically!
+        job.reload()
+        print("Job stdout:", repr(job.stdout))
+        print("Job stderr:", repr(job.stderr))
+        print(f"Job finished? {not job.is_running()}")
+        print(f"Job exit code: {job.exit_code}")
+        print()
+        print(job.stderr)
 
-    # Test 2 (successful job)
-    job = run_job(f"tests.test_jobs._example_add", 7, 8)
-    print("job: ", job, flush=True)
-    print(f"Spawned job ID: {job.id}")
-    # Wait for job to finish.
-    for _ in range(2):
-        time.sleep(1)
-        if not job.is_running():
-            break
-        print("Waiting for job to finish...")
-    # Print results.
-    print("Job stdout:", repr(job.stdout))
-    print("Job stderr:", repr(job.stderr))
-    print(f"Job finished? {not job.is_running()}")
-    print(f"Job exit code: {job.exit_code}")
-    print()
-    print(job.stderr)
+        # Test 2 (successful job)
+        job = run_job(f"tests.test_jobs._example_add", 7, 8)
+        print("job: ", job, flush=True)
+        print(f"Spawned job ID: {job.id}")
+        # Wait for job to finish.
+        for _ in range(2):
+            time.sleep(1)
+            if not job.is_running():
+                break
+            print("Waiting for job to finish...")
+        # Update job config.
+        job._load(Path(job.path))
+        # Print results.
+        job.reload()
+        print("Job stdout:", repr(job.stdout))
+        print("Job stderr:", repr(job.stderr))
+        print(f"Job finished? {not job.is_running()}")
+        print(f"Job exit code: {job.exit_code}")
+        print()
+        print(job.stderr)
 
-    # Test 3 (job dependencies, upstream succeeds)
-    job_a = run_job("tests.test_jobs._example_add", 2, 3)
-    job_b = run_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
-    print(f"Spawned\n job_a: {job_a.id}\n job_b: {job_b.id}")
-    while job_a.is_running():
-        time.sleep(0.01)
-    print("done waiting on a", flush=True)
-    while not job_b.is_done():
-        time.sleep(0.01)
-    print("done waiting on b", flush=True)
-    print("Stdout:")
-    print("", "job_a", repr(job_a.stdout))
-    if job_b:
-        print("", "job_b", repr(job_b.stdout))
+        # Test 3 (job dependencies, upstream succeeds)
+        job_a = run_job("tests.test_jobs._example_add", 2, 3)
+        job_b = run_job("tests.test_jobs._example_dep", 5, dependencies=[job_a])
+        print(f"Spawned\n job_a: {job_a.id}\n job_b: {job_b.id}")
+        while job_a.is_running():
+            time.sleep(0.01)
+        print("done waiting on a", flush=True)
+        while not job_b.is_done():
+            print(f"job_b {job_b.id} is done?", job_b.is_done(), flush=True)
+            time.sleep(1.0)
+        print("done waiting on b", flush=True)
+        print("Stdout:")
+        print("", "job_a", repr(job_a.stdout))
+        if job_b:
+            print("", "job_b", repr(job_b.stdout))
+    # 
+    # print(os.getpid(), "^"*100, flush=True)
+    # 
