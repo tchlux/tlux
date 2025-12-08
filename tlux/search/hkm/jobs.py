@@ -497,6 +497,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
             env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", "")},
         )
         return
+    parent_pid = os.getppid()
     # Check how many registered workers there are.
     fs.mkdir("workers", exist_ok=True)
     registered_watchers = fs.listdir("workers")
@@ -522,7 +523,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     if len(registered_watchers) >= max_workers:
         a = "are" if len(registered_watchers) > 1 else "is"
         w = "watchers" if len(registered_watchers) > 1 else "watcher"
-        print(f"[jobs.WATCHER] Exiting since there {a} {len(registered_watchers)} {w} already.", flush=True)
+        # print(f"[jobs.WATCHER] Exiting since there {a} {len(registered_watchers)} {w} already.", flush=True)
         return
     # Register self as a worker.
     pid = str(os.getpid())
@@ -533,7 +534,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     if (len(registered_watchers) >= max_workers) and (pid not in registered_watchers[:max_workers]):
         a = "are" if len(registered_watchers) > 1 else "is"
         w = "watchers" if len(registered_watchers) > 1 else "watcher"
-        print(f"[jobs.WATCHER] Exiting and removing watcher directory since there {a} {len(registered_watchers)} {w}.", flush=True)
+        # print(f"[jobs.WATCHER] Exiting and removing watcher directory since there {a} {len(registered_watchers)} {w}.", flush=True)
         fs.remove(wdir)
         return
     # Set standard output and error for this process to be owned worker directory.
@@ -544,13 +545,15 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     # Check for queued jobs, execute "worker" on first available.
     #   - reserve a queued job by moving it from 'queued' to 'running' (if successful, it is owned).
     while ((next_jid := next(iter(fs.listdir("queued")+[None]))) is not None):
+        if os.getppid() == 1:
+            break
         # Move the job to "running" to claim it.
         try:
             fs.rename(fs.join("queued", next_jid), fs.join("running", next_jid))
             job = Job(fs=fs, path=fs.join("ids", next_jid))
             worker(fs=fs, job=job)
         except Exception as e:
-            print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
+            # print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
             continue
     # All jobs completed, moving on to cleanup, indicate by saying this watcher is no longer active.
     fs.remove(wdir)
@@ -574,6 +577,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
 # Run *job* in a subprocess, monitor resources, finalize state, trigger deps.
 def worker(fs: FileSystem, job: Job) -> Job:
     # --- launch target ---
+    parent_pid = os.getppid()
     args, kwargs = job.arguments
     payload_hex = json.dumps({"args": args, "kwargs": kwargs}).encode().hex()
     launcher_code = (
@@ -602,6 +606,13 @@ def worker(fs: FileSystem, job: Job) -> Job:
     res_file = Path(fs.join(job.path, "resources"))
     res_file.touch(exist_ok=True)
     while True:
+        if os.getppid() == 1:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            exit_code = -9
+            break
         # Wait for exit of the process.
         try:
             exit_code = proc.wait(timeout=5)
@@ -648,7 +659,8 @@ def worker(fs: FileSystem, job: Job) -> Job:
             fs.remove(wentry)
             fs.remove(njob)
         except Exception as e:
-            print(f"[jobs.WORKER] Failed to remove downstream wait-lock for {job.id} blocking downstream {did}. {e}", file=sys.stderr, flush=True)
+            # print(f"[jobs.WORKER] Failed to remove downstream wait-lock for {job.id} blocking downstream {did}. {e}", file=sys.stderr, flush=True)
+            pass
         # If the downstream job has no more upstreams, move it to queued.
         if len(list(fs.listdir(updir))) == 0:
             try:
@@ -659,7 +671,8 @@ def worker(fs: FileSystem, job: Job) -> Job:
                 # Ensure a watcher exists to execute the job.
                 watcher(fs=fs, launch=True)
             except Exception as e:
-                print(f"[jobs.WORKER] Failed to move downstream {did} into QUEUED state: {e}", file=sys.stderr, flush=True)
+                # print(f"[jobs.WORKER] Failed to move downstream {did} into QUEUED state: {e}", file=sys.stderr, flush=True)
+                pass
     # TODO: Log the downstreams into the config at time of launching and delete the next directory (since it will not be watched further).
     # # Remove the "next" directory indicating it has been processed.
     # fs.remove(next_dir)
