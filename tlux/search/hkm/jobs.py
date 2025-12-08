@@ -28,10 +28,10 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 try:
     from .fs import FileSystem
-    from .monitor import proc_usage  # pyright: ignore
+    from .monitor import proc_usage # pyright: ignore
 except:
     from tlux.search.hkm.fs import FileSystem
-    from tlux.search.hkm.monitor import proc_usage  # pyright: ignore
+    from tlux.search.hkm.monitor import proc_usage # pyright: ignore
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
 REPO_ROOT: str = os.path.dirname(os.path.dirname(os.path.dirname(CODE_ROOT)))
@@ -497,7 +497,6 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
             env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", "")},
         )
         return
-    parent_pid = os.getppid()
     # Check how many registered workers there are.
     fs.mkdir("workers", exist_ok=True)
     registered_watchers = fs.listdir("workers")
@@ -521,8 +520,8 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
                 pass
     registered_watchers = live_watchers
     if len(registered_watchers) >= max_workers:
-        a = "are" if len(registered_watchers) > 1 else "is"
-        w = "watchers" if len(registered_watchers) > 1 else "watcher"
+        # a = "are" if len(registered_watchers) > 1 else "is"
+        # w = "watchers" if len(registered_watchers) > 1 else "watcher"
         # print(f"[jobs.WATCHER] Exiting since there {a} {len(registered_watchers)} {w} already.", flush=True)
         return
     # Register self as a worker.
@@ -532,8 +531,8 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     # Validate the number of workers (deterministically exit if too many run).
     registered_watchers = fs.listdir("workers")  # naturally ordered by start time
     if (len(registered_watchers) >= max_workers) and (pid not in registered_watchers[:max_workers]):
-        a = "are" if len(registered_watchers) > 1 else "is"
-        w = "watchers" if len(registered_watchers) > 1 else "watcher"
+        # a = "are" if len(registered_watchers) > 1 else "is"
+        # w = "watchers" if len(registered_watchers) > 1 else "watcher"
         # print(f"[jobs.WATCHER] Exiting and removing watcher directory since there {a} {len(registered_watchers)} {w}.", flush=True)
         fs.remove(wdir)
         return
@@ -552,7 +551,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
             fs.rename(fs.join("queued", next_jid), fs.join("running", next_jid))
             job = Job(fs=fs, path=fs.join("ids", next_jid))
             worker(fs=fs, job=job)
-        except Exception as e:
+        except: # Exception as e:
             # print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
             continue
     # All jobs completed, moving on to cleanup, indicate by saying this watcher is no longer active.
@@ -577,7 +576,6 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
 # Run *job* in a subprocess, monitor resources, finalize state, trigger deps.
 def worker(fs: FileSystem, job: Job) -> Job:
     # --- launch target ---
-    parent_pid = os.getppid()
     args, kwargs = job.arguments
     payload_hex = json.dumps({"args": args, "kwargs": kwargs}).encode().hex()
     launcher_code = (
@@ -591,6 +589,9 @@ def worker(fs: FileSystem, job: Job) -> Job:
     )
     out_path = fs.join(job.path, "stdout")
     err_path = fs.join(job.path, "stderr")
+    job.start_ts = time.time()
+    job.status = "RUNNING"
+    job._save()
     with open(out_path, "ab") as so, open(err_path, "ab") as se:
         proc = subprocess.Popen(
             [sys.executable, "-c", launcher_code, job.command, payload_hex],

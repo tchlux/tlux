@@ -70,7 +70,7 @@ class FormField:
 # 
 # Parameters:
 #   job_id (str): Identifier from the job directory.
-#   status (str): QUEUED | RUNNING | FINISHED | FAILED.
+#   status (str): WAITING | QUEUED | RUNNING | SUCCEEDED | FAILED.
 #   command (str): Executed function path.
 #   exit_code (int | None): Process return code.
 #   runtime (float): Seconds from start_ts to now/end_ts.
@@ -204,14 +204,15 @@ def _tail(path: Path, lines: int = 4) -> List[str]:
 # 
 def _load_jobs(fs: FileSystem, tail_lines: int = 200) -> List[JobSummary]:
     jobs: List[JobSummary] = []
-    buckets = ("queued", "running", "finished", "failed")
+    buckets = ("waiting", "queued", "running", "succeeded", "failed")
     for bucket in buckets:
         bucket_path = Path(fs.join(bucket))
         if not bucket_path.exists():
             continue
         for jid in sorted(bucket_path.iterdir()):
-            cfg_path = jid / "job_config"
-            cmd_path = jid / "exec_function"
+            id_dir = Path(fs.join("ids", jid.name))
+            cfg_path = id_dir / "job_config"
+            cmd_path = id_dir / "exec_function"
             if not cfg_path.exists():
                 continue
             try:
@@ -229,7 +230,7 @@ def _load_jobs(fs: FileSystem, tail_lines: int = 200) -> List[JobSummary]:
             rss = 0
             cpu = 0.0
             gpu: float | None = None
-            res_path = jid / "resources"
+            res_path = id_dir / "resources"
             if res_path.exists():
                 try:
                     lines = res_path.read_text().strip().splitlines()
@@ -255,8 +256,8 @@ def _load_jobs(fs: FileSystem, tail_lines: int = 200) -> List[JobSummary]:
                     rss_bytes=rss,
                     cpu_pct=cpu,
                     gpu_pct=gpu,
-                    stdout_tail=_tail(jid / "stdout", lines=tail_lines),
-                    stderr_tail=_tail(jid / "stderr", lines=tail_lines),
+                    stdout_tail=_tail(id_dir / "stdout", lines=tail_lines),
+                    stderr_tail=_tail(id_dir / "stderr", lines=tail_lines),
                 )
             )
     return jobs
@@ -422,7 +423,7 @@ class HkmTuiApp:
             return
         self.last_job_refresh = now
         raw_jobs = _load_jobs(self.jobs_fs, tail_lines=200)
-        priority = {"RUNNING": 0, "QUEUED": 1, "FINISHED": 2, "FAILED": 3}
+        priority = {"RUNNING": 0, "QUEUED": 1, "WAITING": 1, "SUCCEEDED": 2, "FAILED": 3}
         self.job_table = sorted(raw_jobs, key=lambda j: (priority.get(j.status, 4), j.job_id))
         if self.state == "build" and self._build_finished():
             self.message = "Build finished. Press ENTER to open the browser."
@@ -637,7 +638,7 @@ class HkmTuiApp:
         if jobs_root.exists():
             shutil.rmtree(jobs_root, ignore_errors=True)
         jobs_root.mkdir(parents=True, exist_ok=True)
-        for bucket in ("ids", "queued", "running", "finished", "failed", "next"):
+        for bucket in ("ids", "queued", "running", "succeeded", "failed", "next"):
             (jobs_root / bucket).mkdir(exist_ok=True)
         jobs.JOBS_ROOT = str(jobs_root)
         self.jobs_root = jobs_root
@@ -679,7 +680,7 @@ class HkmTuiApp:
         if self.watcher_thread is not None:
             return
         # Ensure expected buckets exist to avoid watcher listdir errors.
-        for bucket in ("ids", "queued", "running", "finished", "failed", "next"):
+        for bucket in ("ids", "queued", "running", "succeeded", "failed", "next"):
             try:
                 self.jobs_fs.mkdir(self.jobs_fs.join(bucket), exist_ok=True)
             except Exception:
@@ -724,9 +725,10 @@ class HkmTuiApp:
         for i, job in enumerate(self.job_table[: max_rows]):
             row_y = 5 + i
             state_colors = {
-                "FINISHED": 3,
+                "SUCCEEDED": 3,
                 "FAILED": 4,
                 "QUEUED": 1,
+                "WAITING": 1,
                 "RUNNING": 0,
             }
             color = curses.color_pair(state_colors.get(job.status, 0))
@@ -820,7 +822,7 @@ class HkmTuiApp:
     #   Compute a compact textual summary of job counts.
     # 
     def _job_summary(self) -> str:
-        counts: Dict[str, int] = {"QUEUED": 0, "RUNNING": 0, "FINISHED": 0, "FAILED": 0}
+        counts: Dict[str, int] = {"QUEUED": 0, "WAITING": 0, "RUNNING": 0, "SUCCEEDED": 0, "FAILED": 0}
         for job in self.job_table:
             counts[job.status] = counts.get(job.status, 0) + 1
         parts = [f"{k.lower()}={v}" for k, v in counts.items()]
@@ -832,7 +834,7 @@ class HkmTuiApp:
     def _build_finished(self) -> bool:
         if not self.job_table:
             return False
-        pending = any(j.status in {"QUEUED", "RUNNING"} for j in self.job_table)
+        pending = any(j.status in {"QUEUED", "WAITING", "RUNNING"} for j in self.job_table)
         if pending:
             return False
         index_root = Path(self._field_value("index"))
