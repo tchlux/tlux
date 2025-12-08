@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import List
 
@@ -34,7 +35,7 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
             target = worker_path / f"shard_{shard_id:08d}.hkmchunk"
             if chunk_dir != target:
                 if target.exists():
-                    os.rename(target, target.with_suffix(".old"))
+                    shutil.rmtree(target, ignore_errors=True)
                 os.rename(chunk_dir, target)
             shard_id += 1
     if rows:

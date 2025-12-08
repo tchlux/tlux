@@ -22,6 +22,8 @@ Example usage:
 
 from collections import defaultdict
 import numpy as np
+import sys
+import tqdm
 
 try:
     from .libs.drama.inference import tokenize, detokenize, embed
@@ -46,7 +48,6 @@ _DEFAULT_OVERLAP = 0.5
 #   token_ids_list (list[list[int]]): List of token ID sequences.
 #   window_sizes   (list[int]): Window sizes (default: [32,128,512,1024]).
 #   window_overlap (float): Fractional overlap in [0, 1).
-#   max_len        (int): Maximum allowed sequence length.
 #   role           (str): 'doc' or 'query', selects special prefix handling.
 #
 # Returns:
@@ -60,7 +61,6 @@ def embed_windows(
     token_ids_list: list[list[int]],
     window_sizes: list[int] = list(_DEFAULT_WINDOWS),
     window_overlap: float = _DEFAULT_OVERLAP,
-    max_len: int = _MAX_SEQ_LEN,
     role: str = "doc",
 ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
     # Validate arguments.
@@ -96,7 +96,7 @@ def embed_windows(
     hidden_dim = dummy.shape[1]
     embeddings = np.zeros((total, hidden_dim), dtype=np.float32)
     # Compute embeddings in size-batched chunks.
-    for w, bucket in by_size.items():
+    for w, bucket in tqdm.tqdm(by_size.items(), file=sys.stdout):
         indices, windows = zip(*bucket)
         batch_emb = embed(list(windows), role=role)
         if batch_emb.shape != (len(windows), hidden_dim):

@@ -345,7 +345,9 @@ class HkmTuiApp:
             FormField("workers", "Workers", "1", "int"),
         ]
         self.active_field: int = 0
-        self.skip_paths: List[str] = []
+        self.state_path = Path.home() / ".hkm_state.json"
+        self.skip_paths = []
+        self._load_state()
         self.job_cursor: int = 0
         self.jobs_root = Path(JOBS_ROOT)
         self.jobs_fs = FileSystem(root=str(self.jobs_root))
@@ -360,6 +362,23 @@ class HkmTuiApp:
         curses.curs_set(0)
         self.stdscr.nodelay(True)
         self._init_colors()
+
+    def _load_state(self) -> None:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
+        except Exception:
+            data = {}
+        for field in self.fields:
+            if field.name in data.get("fields", {}):
+                field.value = str(data["fields"][field.name])
+        self.skip_paths = data.get("skip_paths", [])
+
+    def _persist_state(self) -> None:
+        try:
+            payload = {"fields": {f.name: f.value for f in self.fields}, "skip_paths": self.skip_paths}
+            self.state_path.write_text(json.dumps(payload), encoding="utf-8")
+        except Exception:
+            pass
 
     # Description:
     #   Set up color pairs for highlighting.
@@ -377,6 +396,7 @@ class HkmTuiApp:
     # Write text padded to clear the full line.
     def _write_line(self, y: int, text: str, *, color: int | None = None, attr: int | None = None) -> None:
         _, w = self.stdscr.getmaxyx()
+        text = text.replace("\x00", "")
         if color:
             self.stdscr.attron(curses.color_pair(color))
         if attr:
@@ -564,6 +584,7 @@ class HkmTuiApp:
                     self.skip_paths.append(target)
                 else:
                     self.skip_paths.remove(target)
+                self._persist_state()
             return
         if key in (curses.KEY_UP, curses.KEY_DOWN) and field.kind == "int":
             try:
@@ -574,6 +595,7 @@ class HkmTuiApp:
             field.value = str(max(1, current + delta))
             field.cursor = len(field.value)
             field.last_input_ts = time.time()
+            self._persist_state()
             return
         if key in (curses.KEY_UP, curses.KEY_DOWN) and field.kind == "path":
             if field.suggestions:
@@ -586,12 +608,14 @@ class HkmTuiApp:
             field.prev_value = field.value
             field.value = field.suggestions[field.suggestion_idx]
             field.cursor = len(field.value)
+            self._persist_state()
             return
         if key == curses.KEY_LEFT and field.kind == "path":
             if field.prev_value:
                 field.value = field.prev_value
                 field.cursor = len(field.value)
                 field.prev_value = ""
+                self._persist_state()
             return
         if key in (curses.KEY_ENTER, 10, 13):
             self._start_build()
@@ -600,6 +624,7 @@ class HkmTuiApp:
             if field.value:
                 field.value = field.value[:-1]
                 field.cursor = max(0, field.cursor - 1)
+                self._persist_state()
             return
         if 32 <= key <= 126:
             ch = chr(key)
@@ -612,6 +637,7 @@ class HkmTuiApp:
             field.value = field.value[: field.cursor] + ch + field.value[field.cursor :]
             field.cursor += 1
             field.last_input_ts = now
+            self._persist_state()
 
     # Description:
     #   Launch the build in a background thread and start the watcher.

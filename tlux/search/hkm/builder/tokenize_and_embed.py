@@ -113,7 +113,10 @@ def process_documents(
     total_docs = 0
     total_chunks = 0
     for batch_idx, (texts, metadata_list) in enumerate(document_batches):
+        print("-"*40, flush=True)
+        print(f"Document {batch_idx+1}", flush=True)
         for text, metadata in zip(texts, metadata_list):
+            print("  ", repr(str(metadata)[:40]), flush=True)
             total_docs += 1
             document_id += 1
             tokens = tokenize([text])[0]
@@ -150,8 +153,6 @@ def process_documents(
                     value = hash_value
                 doc_metadata.append(value)
             chunk_writer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
-        if (batch_idx + 1) % 100 == 0:
-            print(f"[worker] batch={batch_idx+1} docs={total_docs} chunks={chunk_writer.chunk_index+1}", flush=True)
 
     chunk_writer.save_chunk()
     chunk_writer.finalize_worker()
