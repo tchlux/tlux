@@ -152,7 +152,7 @@ def _fmt_seconds(seconds: float) -> str:
 # Returns:
 #   List[str]: Candidate absolute paths.
 # 
-def _path_suggestions(text: str, limit: int = 8) -> List[str]:
+def _path_suggestions(text: str, limit: int | None = None) -> List[str]:
     expanded = os.path.expanduser(text or ".")
     target = Path(expanded)
     base_dir = target if target.is_dir() else target.parent
@@ -164,7 +164,7 @@ def _path_suggestions(text: str, limit: int = 8) -> List[str]:
         for entry in sorted(base_dir.iterdir()):
             if entry.name.startswith(prefix):
                 suggestions.append(str(entry))
-            if len(suggestions) >= limit:
+            if limit is not None and len(suggestions) >= limit:
                 break
     except OSError:
         return []
@@ -473,14 +473,23 @@ class HkmTuiApp:
         if active.suggestions:
             if active.suggestion_idx >= len(active.suggestions):
                 active.suggestion_idx = 0
-            self.stdscr.addstr(y + 1, 4, "Suggestions:")
-            display_max = min(8, height - y - 4)
-            # Scroll the window when cursor approaches bottom (within 2 rows).
+            total_sugs = len(active.suggestions)
+            available_lines = max(0, height - (y + 2) - 2)  # start two rows below header, leave 2-line buffer
+            display_max = min(total_sugs, available_lines)
             start = 0
+            # Scroll window to keep cursor near bottom without hiding earlier entries.
             if active.suggestion_idx >= max(0, display_max - 2):
                 start = active.suggestion_idx - (display_max - 2)
-            start = max(0, min(start, max(0, len(active.suggestions) - display_max)))
+            start = max(0, min(start, max(0, total_sugs - display_max)))
             window = active.suggestions[start : start + display_max]
+
+            # Show position / range inline with the Suggestions label.
+            showing_end = start + len(window)
+            header = (
+                f"Suggestions {active.suggestion_idx + 1}/{total_sugs} "
+                f"(showing {start + 1}-{showing_end})"
+            )
+            self._write_line(y + 1, header[: width - 4])
             for i, sug in enumerate(window):
                 global_idx = start + i
                 marker = "→ " if global_idx == active.suggestion_idx else "  "
@@ -497,6 +506,9 @@ class HkmTuiApp:
                 self.stdscr.addstr(y + 2 + i, 6 + len(marker), f"{sug[: width - 10]}")
                 if sug in self.skip_paths:
                     self.stdscr.attroff(curses.color_pair(6))
+            # Clear any unused rows within the available window to avoid stale text when shrinking.
+            for i in range(len(window), available_lines):
+                self._write_line(y + 2 + i, "")
 
 
         index_value = self._field_value("index")
