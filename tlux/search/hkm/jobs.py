@@ -500,6 +500,25 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     # Check how many registered workers there are.
     fs.mkdir("workers", exist_ok=True)
     registered_watchers = fs.listdir("workers")
+    # Drop stale worker directories whose PID is no longer alive.
+    live_watchers = []
+    for name in registered_watchers:
+        pid = int(name) if name.isdigit() else None
+        alive = False
+        if pid:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except OSError:
+                pass
+        if alive:
+            live_watchers.append(name)
+        else:
+            try:
+                fs.remove(fs.join("workers", name))
+            except Exception:
+                pass
+    registered_watchers = live_watchers
     if len(registered_watchers) >= max_workers:
         a = "are" if len(registered_watchers) > 1 else "is"
         w = "watchers" if len(registered_watchers) > 1 else "watcher"
