@@ -54,7 +54,7 @@ class FileLock:
                 os.mkdir(self.lock_info_path)
                 self.acquisition_time = os.path.getctime(self.lock_info_path)
                 return self
-            except OSError as e:
+            except OSError:
                 # Check the file hostname+user+PID in the directory, release if the host and user
                 #  is same as this process, and that PID does not exist (has terminated).
                 try: lock_info: str = next(iter(os.listdir(self.lock_path)))
@@ -76,7 +76,7 @@ class FileLock:
                     continue
                 elif (((host, user) == (HOST, USER)) and (not is_pid_active(int(pid)))):
                     try:
-                        logging.warning(f"Removing lock at {repr(self.lock_path)} held by nonliving process {pid}..", flush=True)
+                        logging.warning(f"Removing lock at {repr(self.lock_path)} held by nonliving process {pid}..")
                         os.rmdir(self.lock_info_path)
                         os.rmdir(self.lock_path)
                     except (FileNotFoundError, OSError): pass
@@ -86,7 +86,9 @@ class FileLock:
         else:
             raise FileLock.LockFailure("Max retries reached for acquiring file lock")
 
-    def __exit__(self, exc_type: Optional[type], exc_value: Optional[Exception], traceback: Optional[Any]) -> None:
+    # Arguments (unused) are:
+    #   exc_type: Optional[type], exc_value: Optional[Exception], traceback: Optional[Any]
+    def __exit__(self, *_) -> None:
         # Attempt to gracefully exit.
         try:
             if (os.path.getctime(self.lock_info_path) != self.acquisition_time):
