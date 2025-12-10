@@ -21,6 +21,7 @@ from typing import Any, Iterable, Iterator, Optional, Tuple
 try:
     from local_auth import COMPLETIONS_KEY, COMPLETIONS_URL
 except:
+    COMPLETIONS_URL = None
     COMPLETIONS_KEY = ""
 
 # Disable logs for diskcache.
@@ -646,7 +647,7 @@ if __name__ == '__main__':
 
     # Extract these parameters from the command line arguments.
     embed: bool = args.embed
-    json: bool = args.json
+    use_json: bool = args.json
     min_tokens: int = args.min_tokens
     max_tokens: int = args.max_tokens
     context_size: int = args.context_size
@@ -703,7 +704,7 @@ if __name__ == '__main__':
                 stream=True,
                 **kwargs,
                 # Add the grammar constraint
-                **({} if (not json) else dict(grammar=JSON_ARRAY_GRAMMAR)),
+                **({} if (not use_json) else dict(grammar=JSON_ARRAY_GRAMMAR)),
             ):
                 if chat:
                     channel = completion.channel or ""
