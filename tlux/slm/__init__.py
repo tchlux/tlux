@@ -32,6 +32,7 @@ logging.getLogger("diskcache").setLevel(logging.WARNING)
 # Set the path to the model.
 MODEL_PATH = os.path.expanduser('~/.slm.gguf')
 CACHE_PATH = os.path.expanduser('~/.slm.cache')
+LAST_PROMPT_PATH = os.path.expanduser('~/.last_prompt')
 
 # CHAT_FORMAT = "llama-3"  # Meta models
 # CHAT_FORMAT = "gemma"  # Google models
@@ -101,8 +102,8 @@ DEFAULT_PRESET: Optional[str] = "reliable"
 
 @dataclass
 class Completion:
-    raw: str
-    partial: str
+    raw: str = ""
+    partial: str = ""
     stop_reason: Optional[str] = None
     channel: Optional[str] = None
 
@@ -224,7 +225,10 @@ class suppress_stderr:
 # Load the model.
 def load_lm(model_path=MODEL_PATH, n_ctx=DEFAULT_CTX, embedding=False, verbose=False, n_gpu_layers=-1, chat_format=CHAT_FORMAT, n_threads=DEFAULT_N_THREADS, **llama_kwargs):
     model_path = os.path.expanduser(model_path)
-    cache = LlamaDiskCache(CACHE_PATH)
+    try:
+        cache = LlamaDiskCache(CACHE_PATH)
+    except:
+        cache = None
     _load_model = lambda: Llama(
         model_path,
         n_ctx=n_ctx,
@@ -629,6 +633,7 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--embed', action='store_true', help='Produce an average token (at final state) embedding for the prompt.')
     parser.add_argument('-j', '--json', action='store_true', help='Output in JSON format')
     parser.add_argument('-v', '--chat', action='store_true', help='True if a turn-based conversation should be initiated.')
+    parser.add_argument('-x', '--chat-format', action='store_true', help='True if a chat-format prompt submission should be used to generate a respnose.')
     parser.add_argument('-q', '--no-echo', action='store_true', help='True if the echo of the provided prompt should be skipped.')
     parser.add_argument('-m', '--min_tokens', type=int, default=1, help='The minimum number of tokens to produce.')
     parser.add_argument('-n', '--max_tokens', type=int, default=-1, help='The maximum number of tokens to produce.')
@@ -648,7 +653,12 @@ if __name__ == '__main__':
     prompt: str = args.prompt
     echo_prompt: bool = not args.no_echo
     chat: bool = args.chat
+    chat_format: bool = args.chat_format
     preset: Optional[str] = args.preset
+
+    # Store the prompt.
+    with open(LAST_PROMPT_PATH, "w") as f:
+        print(prompt, file=f, flush=True)
 
     # Local variables for tracking execution (in chat mode).
     response_raw: str = ""
@@ -675,7 +685,7 @@ if __name__ == '__main__':
                 prompt = "This is a plain text conversation in a terminal. There is no markdown rendering, so use easy to read and concise repsonses. When you are ready, please say 'Hello.'"
             # kwargs["messages"].append(dict(role="system", content="An expert polymath with lots of scientific and technical knowledge and strong communication skills is helping a person solve problems. The expert replies in markdown format. Following are questions and requests written by the person and high quality responses from the expert."))
         else:
-            generate_response = complete
+            generate_response = complete if not chat_format else chat_complete
             if echo_prompt:
                 print(prompt, end='', flush=True)
 
@@ -720,7 +730,8 @@ if __name__ == '__main__':
                             analysis_open = False
                         break
                 elif completion.partial:
-                    print(completion.partial, end="", flush=True)
+                    if (not completion.channel) or (completion.channel == "final"):
+                        print(completion.partial, end="", flush=True)
 
             # If this a chat, then listen and loop.
             if chat:
