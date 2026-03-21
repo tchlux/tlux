@@ -2,6 +2,9 @@ from typing import (
     Any,
     Callable,
     Optional,
+    ParamSpec,
+    Protocol,
+    TypeVar,
     Union,
 )
 
@@ -32,9 +35,11 @@ def same_as(to_copy, mention_usage=False):
         if hasattr(func, "__name__"): original_name = func.__name__
         else:                         original_name = str(func)
         # Set the documentation string for this new function
-        documentation = inspect.getdoc(to_copy)
-        if documentation == None: 
-            documentation = inspect.getcomments(to_copy)
+        documentation = (
+            inspect.getdoc(to_copy)
+            or inspect.getcomments(to_copy)
+            or ""
+        )
         # Store the documentation and signature into the wrapped function
         if hasattr(to_copy, "__name__"):
             func.__name__ = to_copy.__name__
@@ -53,8 +58,10 @@ def same_as(to_copy, mention_usage=False):
     return decorator_handler
 
 
+
 # ==================================================================
 #                    "Cache in File" Decorator     
+# 
 # 
 # This decorator (when wrapped around a function) uses a hash of the
 # string represenetation of the parameters to a function call in order
@@ -72,30 +79,35 @@ def same_as(to_copy, mention_usage=False):
 # 
 #   <function> = cache(<max_files>, <cache_dir>, <file_prefix>)(<function_to_decorate>)
 #   
-def cache(max_files=10, cache_dir=None, file_prefix=None, use_dill=False):
+def cache(
+    max_files: int = 10,
+    cache_dir: str | None = None,
+    file_prefix: str | None = None,
+    use_dill: bool = False
+):
     import os, hashlib
     # Import "dill" if it is available, otherwise use pickle.
     if use_dill:
-        try:    import dill as pickle
+        try:    import dill as pickle  # pyright: ignore
         except: import pickle
     else:
         import pickle    
     # Check to see if a cache directory was provided
-    if (type(cache_dir) == type(None)): cache_dir = os.path.join(os.path.abspath(os.curdir), ".cache")
+    if (cache_dir is None): cache_dir = os.path.join(os.path.abspath(os.curdir), ".cache")
     if (not os.path.exists(cache_dir)): os.makedirs(cache_dir)
     # Create a function that takes one argument, a function to be
     # decorated. This will be called by python when decorating.
     def decorator_handler(func):
         cache_prefix = file_prefix
-        if (type(file_prefix) == type(None)):
+        if (cache_prefix is None):
             cache_prefix = "Cache_[%s]"%(func.__name__)
-        def new_func(*args, **kwargs):
+        def new_func(*args, nocache=False, **kwargs):
             # Identify a cache name via sha256 hex over the serialization
             hash_value = hashlib.sha256(pickle.dumps((args, kwargs))).hexdigest()
             cache_suffix = ".pkl"
             cache_path = os.path.join(cache_dir, cache_prefix+"_"+hash_value+cache_suffix)
             # Check to see if a matching cache file exists
-            if os.path.exists(cache_path):
+            if (os.path.exists(cache_path) and (not nocache)):
                 with open(cache_path, "rb") as f:
                     args, kwargs, output = pickle.load(f)
             else:
@@ -104,10 +116,17 @@ def cache(max_files=10, cache_dir=None, file_prefix=None, use_dill=False):
                 # Identify the names of existing caches in this directory
                 existing_caches = [f for f in os.listdir(cache_dir)
                                    if cache_prefix in f[:len(cache_prefix)]]
-                # Only save a cached file if there are fewer than "max_files"
-                if len(existing_caches) < max_files:
-                    with open(cache_path, "wb") as f:
-                        pickle.dump((args, kwargs, output), f)
+                with open(cache_path, "wb") as f:
+                    pickle.dump((args, kwargs, output), f)
+                existing_caches.append(cache_path)
+                # If there are > "max_files" then remove oldest cache file.
+                while (len(existing_caches) > max_files):
+                    oldest = min(existing_caches, key=lambda p: os.path.getatime(p))
+                    try:
+                        os.remove(oldest)
+                    except OSError:
+                        pass
+                    existing_caches.remove(oldest)
             # Return the output (however it was achieved)
             return output
         # Return the decorated version of the function with identical documntation
@@ -213,13 +232,13 @@ def auto_cli(
 
     # Extract the description of arguments from the comments and docstring of a function.
     def extract_arg_descriptions(
-        comments: str, docstring: str
+        raw_comments: str, docstring: str
     ) -> Tuple[str, Dict[str, str]]:
         # Remove all preceding "#" and replace them with " " from the comments.
         comments: str = re.sub(
             "(\\s*)(#+)(\\s*)",
             lambda m: m.group(1) + " " * len(m.group(2)) + m.group(3),
-            comments,
+            raw_comments,
         )
         # Generate the full function description.
         all_docs: str = comments + "\n" + docstring
