@@ -1,8 +1,8 @@
 import json
-import os
 from pathlib import Path
 
-from tlux.search.hkm.builder.launcher import build_search_index_inline
+from tlux.search.hkm import build_search_index, drain_jobs
+from tlux.search.hkm.fs import FileSystem
 
 
 def test_skip_paths_excludes_files(tmp_path, monkeypatch):
@@ -19,14 +19,14 @@ def test_skip_paths_excludes_files(tmp_path, monkeypatch):
     index_root = tmp_path / "idx"
     index_root.mkdir()
 
-    build_search_index_inline(
+    build_search_index(
         docs_dir=str(docs),
         index_root=str(index_root),
         num_workers=1,
-        max_docs=10,
         fs_root=str(index_root),
         skip_paths=[str(skip_dir)],
     )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
 
     manifest = Path(index_root / "manifests" / "worker_0000.json")
     assert manifest.exists()

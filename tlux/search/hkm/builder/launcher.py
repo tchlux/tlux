@@ -1,14 +1,4 @@
-# Default driver orchestrator for HKM index construction.
-# 
-# This module spawns separate processes for:
-#   1. Tokenizing and embedding raw documents in parallel workers.
-#   2. Building the hierarchical K-Means (HKM) tree once all shards are ready.
-# 
-# Workers are launched via `jobs.run_job`, which invokes a Python function in
-# a new process with the provided arguments and optional dependencies.
-# 
-# Example usage:
-#   python launcher.py /path/to/index /path/to/docs --workers 4
+"""Job-managed HKM build orchestration."""
 
 
 import os
@@ -17,30 +7,12 @@ import argparse
 from pathlib import Path
 from typing import List
 
-try:                from ..fs import FileSystem
-except ImportError: from tlux.search.hkm.fs import FileSystem
-try:                from ..jobs import run_job
-except ImportError: from tlux.search.hkm.jobs import run_job
+try:
+    from ..jobs import Job, run_job, set_jobs_root
+except ImportError:
+    from tlux.search.hkm.jobs import Job, run_job, set_jobs_root
 
 
-# Function to build the search index by orchestrating worker processes.
-#
-# Prepares the directory structure, spawns worker processes to tokenize and
-# embed documents, and then spawns a job to build the HKM tree once all
-# workers complete.
-#
-# Parameters:
-#   fs (FileSystem): The file system object for directory operations.
-#   docs_dir (str): Path to the directory containing raw text documents.
-#   index_root (str): Root directory where the HKM index will be created.
-#   num_workers (int): Number of parallel worker processes.
-#
-# Returns:
-#   None
-#
-# Raises:
-#   ValueError: If docs_dir does not exist or num_workers is not a positive integer.
-# 
 def _bin_pack(paths: List[Path], target_bins: int) -> List[List[Path]]:
     bins: List[List[Path]] = [[] for _ in range(target_bins)]
     bin_sizes = [0] * target_bins
@@ -62,25 +34,45 @@ def _should_skip(path: Path, skip_list: List[Path]) -> bool:
     return False
 
 
+#
+# Enqueue the full HKM build pipeline on the shared job manager.
+#
+# Arguments:
+#   docs_dir (str): Directory of input documents.
+#   index_root (str): Root directory that will hold docs, hkm, and jobs.
+#   num_workers (int): Number of worker shards to enqueue.
+#
+# Returns:
+#   (Job): Root HKM build job.
+#
 def build_search_index(
-    fs: FileSystem,
     docs_dir: str,
     index_root: str,
     num_workers: int,
     tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
-    max_k: int = 2,
-    leaf_doc_limit: int = 2,
+    metadata_schema: str = "[['name','str'],['num_bytes','float']]",
+    max_k: int = 8,
+    leaf_doc_limit: int = 1024,
     seed: int = 42,
     fs_root: str | None = None,
+    jobs_root: str | None = None,
     skip_paths: List[str] | None = None,
-) -> None:
+) -> Job:
     # Validate input parameters
     if not os.path.exists(docs_dir):
         raise ValueError(f"docs_dir '{docs_dir}' does not exist")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
     if fs_root is None:
-        fs_root = fs.root
+        try:
+            fs_root = os.path.commonpath([os.path.abspath(docs_dir), os.path.abspath(index_root)])
+        except Exception:
+            fs_root = os.path.abspath(index_root)
+        if fs_root in ("", os.sep):
+            fs_root = os.path.abspath(index_root)
+    if jobs_root is None:
+        jobs_root = os.path.join(index_root, ".hkm_jobs")
+    set_jobs_root(jobs_root)
 
     docs_dir_path = Path(docs_dir)
     skip_list = [Path(p).resolve() for p in (skip_paths or [])]
@@ -104,7 +96,7 @@ def build_search_index(
             continue
         manifest_path = Path(manifest_dir) / f"worker_{worker_id:04d}.json"
         manifest_path.write_text(json.dumps([str(p) for p in files]), encoding="utf-8")
-        work_dir = fs.join(docs_root_out, f"worker_{worker_id:04d}")
+        work_dir = os.path.join(docs_root_out, f"worker_{worker_id:04d}")
         job = run_job(
             tokenizer_main,
             document_directory=str(docs_dir_path),
@@ -113,6 +105,7 @@ def build_search_index(
             total_workers=num_workers,
             manifest_path=str(manifest_path),
             fs_root=fs_root,
+            metadata_schema=metadata_schema,
         )
         worker_jobs.append(job)
 
@@ -122,93 +115,16 @@ def build_search_index(
         fs_root=fs_root,
         dependencies=worker_jobs,
     )
-    run_job(
+    return run_job(
         "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
         leaf_doc_limit=leaf_doc_limit,
         seed=seed,
         fs_root=fs_root,
-        run_inline=True,
         max_depth=3,
         depth=0,
         dependencies=[consolidate_job],
-    )
-
-
-def build_search_index_inline(
-    docs_dir: str,
-    index_root: str,
-    num_workers: int,
-    tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
-    metadata_schema: str = "[['name','str'],['num_bytes','int']]",
-    max_k: int = 2,
-    leaf_doc_limit: int = 2,
-    seed: int = 42,
-    max_docs: int = 200,
-    fs_root: str | None = None,
-    skip_paths: List[str] | None = None,
-) -> None:
-    if fs_root is None:
-        fs_root = index_root
-    """Single-process helper for tests and small runs."""
-    docs_dir_path = Path(docs_dir)
-    skip_list = [Path(p).resolve() for p in (skip_paths or [])]
-    all_files = [p for p in docs_dir_path.rglob("*") if p.is_file() and not _should_skip(p, skip_list)]
-    all_files = sorted(all_files, key=lambda p: p.stat().st_size)[:max_docs]
-    if not all_files:
-        raise ValueError("No documents found to index.")
-
-    docs_root_out = os.path.join(index_root, "docs")
-    os.makedirs(docs_root_out, exist_ok=True)
-    hkm_root = os.path.join(index_root, "hkm")
-    os.makedirs(hkm_root, exist_ok=True)
-
-    bins = _bin_pack(all_files, num_workers)
-    manifest_dir = os.path.join(index_root, "manifests")
-    os.makedirs(manifest_dir, exist_ok=True)
-
-    # Import tokenizer entry point dynamically
-    module_path, func_name = tokenizer_main.rsplit(".", 1)
-    tokenizer_mod = __import__(module_path, fromlist=[func_name])
-    tokenizer_fn = getattr(tokenizer_mod, func_name)
-
-    for worker_id, files in enumerate(bins):
-        if not files:
-            continue
-        manifest_path = Path(manifest_dir) / f"worker_{worker_id:04d}.json"
-        manifest_path.write_text(json.dumps([str(p) for p in files]), encoding="utf-8")
-        work_dir = os.path.join(docs_root_out, f"worker_{worker_id:04d}")
-        tokenizer_fn(
-            document_directory=str(docs_dir_path),
-            output_directory=work_dir,
-            worker_index=worker_id,
-            total_workers=num_workers,
-            manifest_path=str(manifest_path),
-            fs_root=fs_root,
-            metadata_schema=metadata_schema,
-        )
-
-    # Consolidate
-    run_job(
-        "tlux.search.hkm.builder.consolidate.run_consolidate",
-        index_root,
-        fs_root=fs_root,
-        inline=True,
-    )
-
-    # Build HKM tree inline
-    run_job(
-        "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
-        index_root,
-        max_cluster_count=max_k,
-        leaf_doc_limit=leaf_doc_limit,
-        seed=seed,
-        fs_root=fs_root,
-        run_inline=True,
-        max_depth=3,
-        depth=0,
-        inline=True,
     )
 
 
@@ -238,8 +154,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    fs = FileSystem()
-    build_search_index(fs, args.docs_dir, args.index_root, args.workers, fs_root=fs.root)
+    build_search_index(args.docs_dir, args.index_root, args.workers)
 
 
 if __name__ == "__main__":  # pragma: no cover

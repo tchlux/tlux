@@ -1,6 +1,4 @@
-onnxruntime
-plotly
-pytest
+numpy
 sentence-transformers
-sentencepiece
-setuptools
+tokenizers
+tqdm

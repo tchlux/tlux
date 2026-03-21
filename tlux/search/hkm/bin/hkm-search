@@ -4,8 +4,7 @@
 import argparse
 import json
 
-from tlux.search.hkm.fs import FileSystem
-from tlux.search.hkm.search.searcher import Searcher
+from tlux.search.hkm import Searcher
 
 
 def main() -> None:
@@ -14,12 +13,9 @@ def main() -> None:
     parser.add_argument("query_json", help="Path to JSON query file")
     args = parser.parse_args()
 
-    fs = FileSystem()
-    docs_root = fs.join(args.index_root, "docs")
-    hkm_root = fs.join(args.index_root, "hkm")
     with open(args.query_json, "r", encoding="utf-8") as f:
         query = json.load(f)
-    hits = Searcher(fs, docs_root, hkm_root).search(query)
+    hits = Searcher.from_index_root(args.index_root).search(query)
     for h in hits.docs:
         print(json.dumps({"doc_id": h.doc_id, "score": h.score, "span": h.span}))
 

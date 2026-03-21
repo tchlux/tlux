@@ -1,61 +1,143 @@
-"""
-Text tokenizer and embedding generator.
+"""Shared embedder interface with one default backend."""
 
-Module provides utilities for tokenizing text, detokenizing sequences,
-and generating fixed-size embedding vectors for variable-length token 
-sequences. Embeddings can be computed over sliding windows of tokens 
-to support long or fragmented documents.
+from __future__ import annotations
 
-This implementation minimizes external dependencies, supports batched
-embedding by window size for efficiency, and ensures deterministic 
-behavior by avoiding unseeded randomness.
-
-Example usage:
-  from text_embed import tokenize, detokenize, embed, embed_windows
-  texts = ["sample doc", "another"]
-  token_ids = tokenize(texts)
-  embeddings = embed(token_ids)
-  win_emb, meta = embed_windows(token_ids)
-"""
-
-# Module for text tokenization and embedding.
-
-from collections import defaultdict
-import numpy as np
+import os
 import sys
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Callable
+
+import numpy as np
 import tqdm
 
-try:
-    from .libs.drama.inference import tokenize, detokenize, embed
-    # from .libs.contriever.inference import tokenize, detokenize, embed
-    # from .libs.e5.inference import tokenize, detokenize, embed
-except ImportError:
-    from tlux.search.hkm.libs.drama.inference import tokenize, detokenize, embed
+TokenizeFn = Callable[[list[str]], list[list[int]]]
+DetokenizeFn = Callable[[list[list[int]]], list[str]]
+EmbedFn = Callable[[list[list[int]], int, str], np.ndarray]
 
-_MAX_SEQ_LEN = 8192
+
+@dataclass(frozen=True)
+class EmbedderBackend:
+    name: str
+    tokenize: TokenizeFn
+    detokenize: DetokenizeFn
+    embed: EmbedFn
+
+
+def _load_fake_backend() -> EmbedderBackend:
+    def _tok(texts: list[str]) -> list[list[int]]:
+        output: list[list[int]] = []
+        for text in texts:
+            output.append([int(part) & 0xFFFFFFFF for part in text.split() if part.lstrip("-").isdigit()])
+        return output
+
+    def _detok(token_ids: list[list[int]]) -> list[str]:
+        return [" ".join(str(token) for token in tokens) for tokens in token_ids]
+
+    def _emb(token_ids: list[list[int]], max_len: int = 8192, role: str = "doc") -> np.ndarray:
+        rows = []
+        for tokens in token_ids:
+            seq = (tokens[:max_len] or [0])
+            mean_val = float(sum(seq)) / float(len(seq))
+            span = float(max(seq) - min(seq)) if seq else 0.0
+            rows.append([mean_val, float(len(seq)), span, float(seq[0])])
+        return np.asarray(rows, dtype=np.float32)
+
+    return EmbedderBackend("fake", _tok, _detok, _emb)
+
+
+def _load_backend(name: str) -> EmbedderBackend:
+    modules = {
+        "drama": "tlux.search.hkm.libs.drama.inference",
+        "contriever": "tlux.search.hkm.libs.contriever.inference",
+        "e5": "tlux.search.hkm.libs.e5.inference",
+    }
+    if name == "fake":
+        return _load_fake_backend()
+    if name not in modules:
+        raise ValueError(f"Unknown HKM embedder backend {name!r}")
+    module = __import__(modules[name], fromlist=["tokenize", "detokenize", "embed"])
+    return EmbedderBackend(name, module.tokenize, module.detokenize, module.embed)
+
+
+# Return the configured embedder backend.
+#
+# Arguments:
+#   name (str | None): Optional backend override.
+#
+# Returns:
+#   (EmbedderBackend): Selected backend implementation.
+#
+def get_backend(name: str | None = None) -> EmbedderBackend:
+    if os.getenv("HKM_FAKE_EMBEDDER") == "1":
+        return _load_fake_backend()
+    return _load_backend(name or os.getenv("HKM_EMBEDDER", "drama"))
+
+
+# Return the list of supported backend names.
+#
+# Arguments:
+#   None
+#
+# Returns:
+#   (list[str]): Backend names available through the shared interface.
+#
+def available_backends() -> list[str]:
+    return ["drama", "contriever", "e5", "fake"]
+
+
 _DEFAULT_WINDOWS = (32, 128, 512, 1024)
 _DEFAULT_OVERLAP = 0.5
 
-# Computes embeddings for sliding windows over token sequences.
+
+# Tokenize text using the configured backend.
 #
-# Description:
-#   For each input token sequence, computes dense vector embeddings
-#   for sliding windows of specified sizes, efficiently batching
-#   by window size. Output includes both the embedding vectors and 
-#   metadata describing the origin of each window.
-#
-# Parameters:
-#   token_ids_list (list[list[int]]): List of token ID sequences.
-#   window_sizes   (list[int]): Window sizes (default: [32,128,512,1024]).
-#   window_overlap (float): Fractional overlap in [0, 1).
-#   role           (str): 'doc' or 'query', selects special prefix handling.
+# Arguments:
+#   texts (list[str]): Input text strings.
 #
 # Returns:
-#   (np.ndarray, list[tuple[int, int, int]]): Embeddings array (n_win, d), 
-#       and metadata for each window as (seq_idx, start, win_len).
+#   (list[list[int]]): Backend token IDs.
 #
-# Raises:
-#   AssertionError: If inputs do not meet contract.
+def tokenize(texts: list[str]) -> list[list[int]]:
+    return get_backend().tokenize(texts)
+
+
+# Convert token IDs back into strings.
+#
+# Arguments:
+#   token_ids (list[list[int]]): Token sequences to decode.
+#
+# Returns:
+#   (list[str]): Decoded strings.
+#
+def detokenize(token_ids: list[list[int]]) -> list[str]:
+    return get_backend().detokenize(token_ids)
+
+
+# Embed token sequences with the configured backend.
+#
+# Arguments:
+#   token_ids (list[list[int]]): Token sequences to embed.
+#   max_len (int): Maximum number of tokens consumed per sequence.
+#   role (str): Either "doc" or "query".
+#
+# Returns:
+#   (np.ndarray): Batch embedding matrix.
+#
+def embed(token_ids: list[list[int]], max_len: int = 8192, role: str = "doc") -> np.ndarray:
+    return get_backend().embed(token_ids, max_len=max_len, role=role)
+
+
+# Compute embeddings for sliding windows over token sequences.
+#
+# Arguments:
+#   token_ids_list (list[list[int]]): Token ID sequences to embed.
+#   window_sizes (list[int]): Sliding-window sizes to evaluate.
+#   window_overlap (float): Overlap fraction in [0, 1).
+#   role (str): Either "doc" or "query".
+#
+# Returns:
+#   (tuple[np.ndarray, list[tuple[int, int, int]]]): Embeddings and window metadata.
 #
 def embed_windows(
     token_ids_list: list[list[int]],
@@ -63,14 +145,12 @@ def embed_windows(
     window_overlap: float = _DEFAULT_OVERLAP,
     role: str = "doc",
 ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
-    # Validate arguments.
     if role not in {"doc", "query"}:
         raise ValueError("role must be 'doc' or 'query'")
     if not (0 <= window_overlap < 1):
         raise ValueError("window_overlap must be in [0, 1)")
     if not isinstance(token_ids_list, list):
         raise TypeError("token_ids_list must be a list of lists")
-    # Accumulate window info and batch by window size.
     windows_meta: list[tuple[int, int, int]] = []
     by_size: dict[int, list[tuple[int, list[int]]]] = defaultdict(list)
     for seq_idx, ids in enumerate(token_ids_list):
@@ -83,57 +163,19 @@ def embed_windows(
             tail = n - w
             if tail > 0 and starts[-1] != tail:
                 starts.append(tail)
-            for s in starts:
+            for start in starts:
                 idx = len(windows_meta)
-                window_ids = ids[s : s + w]
+                window_ids = ids[start : start + w]
                 by_size[w].append((idx, window_ids))
-                windows_meta.append((seq_idx, s, len(window_ids)))
-    # Prepare output array for embeddings.
-    total = len(windows_meta)
-    dummy = embed([[0]], role=role)
-    if dummy.ndim != 2:
-        raise RuntimeError("embed() must return (batch, dim) array")
-    hidden_dim = dummy.shape[1]
-    embeddings = np.zeros((total, hidden_dim), dtype=np.float32)
-    # Compute embeddings in size-batched chunks.
-    for w, bucket in tqdm.tqdm(by_size.items(), file=sys.stdout):
+                windows_meta.append((start, start + len(window_ids), len(window_ids)))
+    if not windows_meta:
+        empty = embed([[0]], role=role)[:0]
+        return empty, []
+    hidden_dim = int(embed([[0]], role=role).shape[1])
+    embeddings = np.zeros((len(windows_meta), hidden_dim), dtype=np.float32)
+    for _, bucket in tqdm.tqdm(by_size.items(), file=sys.stdout):
         indices, windows = zip(*bucket)
-        batch_emb = embed(list(windows), role=role)
-        if batch_emb.shape != (len(windows), hidden_dim):
-            raise RuntimeError(
-                f"embed output shape {batch_emb.shape} does not match "
-                f"(batch={len(windows)}, dim={hidden_dim})"
-            )
-        for i, idx in enumerate(indices):
-            embeddings[idx] = batch_emb[i]
+        batch = embed(list(windows), role=role)
+        for pos, idx in enumerate(indices):
+            embeddings[idx] = batch[pos]
     return embeddings, windows_meta
-
-
-if __name__ == "__main__":
-    # Demonstration / test code (no side effects on import).
-    test_texts = [
-        "",
-        "The Eiffel Tower is in Paris.",
-        "There is a tower monument in Paris that is famous.",
-        "dogs around san francisco rarely wear leashes!",
-        "Dogs around San Francisco rarely wear leashes.",
-    ]
-    # Tokenize sample texts.
-    test_tokens = tokenize(test_texts)
-    print("Tokens:")
-    for t in test_tokens:
-        print(" ", repr(detokenize([t])[0]))
-        print("   ", t)
-    print()
-    # Compute and show embeddings for full texts.
-    test_vecs = embed(test_tokens)
-    print("Embedding shape:", test_vecs.shape)
-    for v in test_vecs:
-        norm = round(float(np.linalg.norm(v)), 2)
-        head = [round(float(x), 2) for x in v[:10].tolist()]
-        print(f" {norm} -- {head}")
-    print()
-    # Sliding window embeddings.
-    win_vecs, win_meta = embed_windows(test_tokens)
-    print("Windowed embedding shape:", win_vecs.shape)
-    print("Window metadata:", win_meta)

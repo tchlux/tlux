@@ -1,8 +1,7 @@
-"""Token n-gram searcher over directory chunks."""
+"""Current HKM search entrypoint for token and embedding queries."""
 
 from __future__ import annotations
 
-import json
 import os
 import struct
 from pathlib import Path
@@ -16,7 +15,6 @@ import numpy as np
 from ..fs import FileSystem
 from ..schema import Hit, QuerySpec, SearchResult, DOC_INDEX_DTYPE
 from ..builder.chunk_io import ChunkReader
-from .planner import parse_query
 
 
 def _seq_to_bytes(seq: List[int]) -> bytes:
@@ -29,6 +27,11 @@ class Searcher:
     docs_root: str
     hkm_root: str = ""
 
+    @classmethod
+    def from_index_root(cls, index_root: str, fs: FileSystem | None = None) -> "Searcher":
+        fs = fs or FileSystem()
+        return cls(fs, fs.join(index_root, "docs"), fs.join(index_root, "hkm"))
+
     def _load_doc_index(self) -> np.ndarray:
         path = self.fs.join(self.docs_root, "doc_index.npy")
         return np.load(path)
@@ -40,7 +43,17 @@ class Searcher:
         return groups
 
     def search(self, query_dict) -> SearchResult:
-        spec = parse_query(json.dumps(query_dict)) if isinstance(query_dict, dict) else query_dict
+        if isinstance(query_dict, dict):
+            spec = QuerySpec(
+                text=query_dict.get("text", ""),
+                embeddings=query_dict.get("embeddings", []),
+                token_sequence=query_dict.get("token_sequence", []),
+                label_include=query_dict.get("label_include", {}),
+                numeric_range=query_dict.get("numeric_range", {}),
+                top_k=query_dict.get("top_k", 10),
+            )
+        else:
+            spec = query_dict
         if spec.embeddings:
             emb = np.array(spec.embeddings[0], dtype=np.float32)
             hits = self._search_embeddings(emb, spec.top_k)

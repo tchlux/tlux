@@ -1,18 +1,12 @@
-"""
-End-to-end HKM integration test using inline builder.
-"""
+"""End-to-end HKM integration test using the job-managed builder."""
 
 import json
-import os
 from pathlib import Path
-from typing import Iterable, List, Tuple
 
 import numpy as np
-import pytest
 
+from tlux.search.hkm import Searcher, build_search_index, drain_jobs
 from tlux.search.hkm.fs import FileSystem
-from tlux.search.hkm.builder.launcher import build_search_index_inline
-from tlux.search.hkm.search.searcher import Searcher
 
 
 def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
@@ -33,7 +27,7 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     for i, text in enumerate(contents):
         (docs_src / f"doc{i}.txt").write_text(text, encoding="utf-8")
 
-    build_search_index_inline(
+    root_job = build_search_index(
         docs_dir=str(docs_src),
         index_root=str(tmp_path),
         num_workers=2,
@@ -47,8 +41,10 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
         max_k=2,
         leaf_doc_limit=1,
         seed=0,
-        max_docs=20,
     )
+    drain_jobs(FileSystem(root=str(Path(tmp_path) / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
 
     doc_index_path = Path(tmp_path) / "docs" / "doc_index.npy"
     assert doc_index_path.exists(), "doc_index.npy missing after consolidate"
@@ -56,9 +52,9 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     assert doc_index.shape[0] >= 4, "expected multiple documents indexed"
     assert np.all(np.diff(doc_index["doc_id"]) >= 0), "doc_index should be sorted by doc_id"
 
-    docs_root = fs.join(str(tmp_path), "docs")
+    docs_root = Path(tmp_path) / "docs"
     hkm_root = fs.join(str(tmp_path), "hkm")
-    searcher = Searcher(fs, docs_root, hkm_root)
+    searcher = Searcher.from_index_root(str(tmp_path), fs=fs)
 
     hits = searcher.search({"token_sequence": [0], "top_k": 5})
     assert hits.docs, "token search should return at least one hit"
@@ -99,7 +95,7 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
         assert (child / "preview_random.npy").exists()
         assert (child / "preview_diverse.npy").exists()
 
-    chunk_dirs = sorted(Path(docs_root).rglob("*.hkmchunk"))
+    chunk_dirs = sorted(docs_root.rglob("*.hkmchunk"))
     assert chunk_dirs, "no chunks written"
     first_chunk = chunk_dirs[0]
     assert (first_chunk / "tokens.bin").exists()

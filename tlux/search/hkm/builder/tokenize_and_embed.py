@@ -1,11 +1,4 @@
-"""
-Tokenize and embed documents, writing directory-based .hkmchunk outputs.
-
-Public surface:
-- process_documents(...)  -> writes chunk dirs + per-worker summaries
-- default_worker(...)     -> convenience CLI-style entry
-- doc_chunk_dict(...)     -> helper to view chunk contents column-wise
-"""
+"""Tokenize and embed documents into chunk-directory outputs."""
 
 from __future__ import annotations
 
@@ -19,10 +12,12 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 import numpy as np
 
 try:
+    from .. import embedder
     from ..fs import FileSystem
     from ..tools.unique_count_estimator import UniqueCounter
     from ..tools.rank_estimator import RankEstimator
 except ImportError:  # pragma: no cover
+    from tlux.search.hkm import embedder
     from tlux.search.hkm.fs import FileSystem
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
     from tlux.search.hkm.tools.rank_estimator import RankEstimator
@@ -38,46 +33,6 @@ DocumentBatch = Iterable[Tuple[List[str], List[List[Union[str, float]]]]]
 MetadataSchema = List[Tuple[str, type]]
 
 
-def _load_embedder():
-    import os
-
-    if os.getenv("HKM_FAKE_EMBEDDER") == "1":
-        def _tok(texts: List[str]) -> List[List[int]]:
-            out: List[List[int]] = []
-            for txt in texts:
-                toks: List[int] = []
-                for t in txt.split():
-                    try:
-                        val = int(t)
-                    except Exception:
-                        continue
-                    toks.append(val & 0xFFFFFFFF)
-                out.append(toks)
-            return out
-
-        def _emb(tok_lists: List[List[int]]):
-            metas = []
-            all_vecs = []
-            for toks in tok_lists:
-                if len(toks) == 0:
-                    toks = [0]
-                mean_val = float(sum(toks)) / float(len(toks))
-                span = float(max(toks) - min(toks)) if toks else 0.0
-                vec = np.array([[mean_val, float(len(toks)), span, float(toks[0])]], dtype=np.float32)
-                all_vecs.append(vec)
-                metas.append((0, len(toks), len(toks)))
-            embeddings = np.vstack(all_vecs)
-            return embeddings, metas
-
-        return _tok, _emb
-
-    try:
-        from ..embedder import tokenize, embed_windows  # type: ignore
-    except Exception:
-        from tlux.search.hkm.embedder import tokenize, embed_windows  # type: ignore
-    return tokenize, embed_windows
-
-
 def process_documents(
     document_output_directory: str,
     summary_output_directory: str,
@@ -87,7 +42,6 @@ def process_documents(
     n_gram: int = 3,
     fs_root: Optional[str] = None,
 ) -> Tuple[str, str]:
-    tokenize, embed_windows = _load_embedder()
     """Tokenize + embed batches, emit chunk directories and summary stats."""
     file_system = FileSystem() if fs_root is None else FileSystem(root=fs_root)
     document_output_directory = file_system.mkdir(document_output_directory, exist_ok=True)
@@ -119,14 +73,14 @@ def process_documents(
             print("  ", repr(str(metadata)[:40]), flush=True)
             total_docs += 1
             document_id += 1
-            tokens = tokenize([text])[0]
+            tokens = embedder.tokenize([text])[0]
             if len(tokens) == 0:
                 tokens = [0]
             for n in range(1, n_gram + 1):
                 for i in range(len(tokens) - n + 1):
                     ngram_bytes = b"".join(int(token & 0xFFFFFFFF).to_bytes(4, "little") for token in tokens[i : i + n])
                     ngram_counter.add(ngram_bytes)
-            embeddings, embedding_windows = embed_windows([tokens])
+            embeddings, embedding_windows = embedder.embed_windows([tokens])
             doc_metadata: List[Union[int, float]] = []
             for (field_name, field_type), value in zip(metadata_schema, metadata):
                 if field_type is float:

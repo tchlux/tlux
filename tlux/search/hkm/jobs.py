@@ -18,6 +18,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import signal
 import socket
@@ -35,7 +36,8 @@ except:
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
 REPO_ROOT: str = os.path.dirname(os.path.dirname(os.path.dirname(CODE_ROOT)))
-JOBS_ROOT: str = os.path.join(CODE_ROOT, "jobs")
+JOBS_ROOT: str = os.environ.get("HKM_JOBS_ROOT", os.path.join(CODE_ROOT, "jobs"))
+JOB_BUCKETS: tuple[str, ...] = ("ids", "waiting", "queued", "running", "succeeded", "failed", "next", "workers")
 ID_WIDTH: int = 9
 STATUS_VALUES: set[str] = {"WAITING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
 if __name__ == "__main__":
@@ -309,7 +311,7 @@ class Job:
             "end_ts": self.end_ts,
             "resource_config": self.resource_config,
             "hostname": self.hostname,
-            "watcher_pid": self.pid,
+            "monitor_pid": self.pid,
             "executor_pid": getattr(self, "executor_pid", None),
         }
         self._fs.write(self._fs.join(self.path, "job_config"),
@@ -346,9 +348,43 @@ class Job:
         self.end_ts = data.get("end_ts")
         self.resource_config = data.get("resource_config", {})
         self.hostname = data.get("hostname")
-        self.monitor_pid = data.get("monitor_pid")
+        self.monitor_pid = data.get("monitor_pid", data.get("watcher_pid"))
         self.executor_pid = data.get("executor_pid")
         self.path = str(path)
+
+
+# Ensure the filesystem contains the standard job buckets.
+#
+# Arguments:
+#   fs (FileSystem): Job-root filesystem.
+#
+# Returns:
+#   (FileSystem): The same filesystem after bucket creation.
+#
+def ensure_jobs_root(fs: FileSystem) -> FileSystem:
+    for bucket in JOB_BUCKETS:
+        fs.mkdir(fs.join(bucket), exist_ok=True)
+    return fs
+
+
+# Set the global jobs root and initialize its bucket layout.
+#
+# Arguments:
+#   path (str): Filesystem path that will hold all job state.
+#   reset (bool): Whether to delete any existing job state first.
+#
+# Returns:
+#   (FileSystem): Filesystem rooted at the configured jobs path.
+#
+def set_jobs_root(path: str, reset: bool = False) -> FileSystem:
+    root = os.path.abspath(path)
+    if reset and os.path.isdir(root):
+        shutil.rmtree(root)
+    os.makedirs(root, exist_ok=True)
+    global JOBS_ROOT
+    JOBS_ROOT = root
+    os.environ["HKM_JOBS_ROOT"] = root
+    return ensure_jobs_root(FileSystem(root))
 
 
 
@@ -441,38 +477,55 @@ def create_job(
 # Parameters:
 #   command (str): Import path to function.
 #   dependencies (Iterable[Job]): Optional upstream jobs.
-#   inline (bool): Execute immediately in-process when True.
 #   *args (Any): Positional arguments.
 #   **kwargs (Any): Keyword arguments.
 #
 # Returns:
-#   Job | InlineJob: Created job wrapper or inline result.
+#   Job: Created job wrapper.
 #
 def run_job(
     command: str,
     *args: Any,
     dependencies: Iterable[Job] = (),
-    inline: bool = False,
     **kwargs: Any,
-) -> Union[Job, Any]:
-    if inline:
-        mod_path, func_name = command.rsplit(".", 1)
-        mod = __import__(mod_path, fromlist=[func_name])
-        func = getattr(mod, func_name)
-        return func(*args, **kwargs)
-    else:
-        default_fs = FileSystem(JOBS_ROOT)
-        new_job = create_job(
-            default_fs,
-            command,
-            dependencies=dependencies,
-            args=args,
-            kwargs=kwargs
-        )
-        # Ensure a worker is running (up to the max).
-        watcher(launch=True)
-        # return _launch_worker(fs=fs, job_dir=job_dir)
-        return new_job
+) -> Job:
+    default_fs = ensure_jobs_root(FileSystem(JOBS_ROOT))
+    new_job = create_job(
+        default_fs,
+        command,
+        dependencies=dependencies,
+        args=args,
+        kwargs=kwargs
+    )
+    # Ensure a worker is running (up to the max).
+    watcher(launch=True)
+    # return _launch_worker(fs=fs, job_dir=job_dir)
+    return new_job
+
+
+# Run local watchers until the queue is empty.
+#
+# Arguments:
+#   fs (FileSystem | None): Optional filesystem rooted at the jobs directory.
+#   max_workers (int): Maximum number of local watcher processes to use.
+#   poll_interval (float): Delay between watcher passes.
+#
+# Returns:
+#   None
+#
+def drain_jobs(
+    fs: Optional[FileSystem] = None,
+    max_workers: int = 1,
+    poll_interval: float = 0.05,
+) -> None:
+    fs = ensure_jobs_root(fs or FileSystem(JOBS_ROOT))
+    while True:
+        watcher(fs=fs, max_workers=max_workers)
+        pending = sum(len(fs.listdir(bucket)) for bucket in ("waiting", "queued", "running"))
+        active_workers = len(fs.listdir("workers"))
+        if (pending == 0) and (active_workers == 0):
+            return
+        time.sleep(poll_interval)
 
 
 # Watcher that monitors the state of the jobs directory, executes jobs, and cleans.
@@ -489,12 +542,16 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     # Otherwise assume this is the primary process.
     if fs is None:
         fs = FileSystem(JOBS_ROOT)
+    fs = ensure_jobs_root(fs)
     # If a launch is desired, create a process and return.
     if launch:
         # The process will overwrite its own STDOUT and STDERR when ready.
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), fs.root],
-            env={"PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", "")},
+            env={
+                "HKM_JOBS_ROOT": fs.root,
+                "PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", ""),
+            },
         )
         return
     # Check how many registered workers there are.
@@ -668,7 +725,6 @@ def worker(fs: FileSystem, job: Job) -> Job:
                 j = Job(fs=fs, path=fs.join("ids", did))
                 j.status = "FAILED"
                 j.status_reason = f"Upstream job {job.id} failed."
-                j.exit_code = 1
                 j._save()
                 fs.rename(wjob, fs.join("failed", did))
             except:

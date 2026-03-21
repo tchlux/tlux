@@ -27,8 +27,15 @@ def _doc_assignment(reader: ChunkReader, centroids: np.ndarray) -> Dict[int, lis
     return assignments
 
 
-def route_embeddings(docs_dir: str, hkm_dir: str, centroids_path: str, seed: int = 42, file_system: FileSystem | None = None, force_balance: bool = False) -> None:
-    fs = file_system or FileSystem()
+def route_embeddings(
+    docs_dir: str,
+    hkm_dir: str,
+    centroids_path: str,
+    seed: int = 42,
+    fs_root: str | None = None,
+    force_balance: bool = False,
+) -> None:
+    fs = FileSystem() if fs_root is None else FileSystem(root=fs_root)
     centroids = np.load(centroids_path)
     cluster_count = centroids.shape[0]
 

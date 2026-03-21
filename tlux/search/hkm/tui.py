@@ -16,7 +16,6 @@ from __future__ import annotations
 import curses
 import json
 import os
-import shutil
 import textwrap
 import threading
 import time
@@ -26,10 +25,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .builder.launcher import build_search_index
+from . import build_search_index, jobs
 from .fs import FileSystem
-from . import jobs
-from .jobs import JOBS_ROOT, watcher
+from .jobs import JOBS_ROOT, set_jobs_root, watcher
 
 # Robust key codes (macOS curses lacks KEY_TAB)
 KEY_TAB = getattr(curses, "KEY_TAB", 9)
@@ -661,12 +659,7 @@ class HkmTuiApp:
 
         # Isolate jobs under the chosen index root to avoid stale test jobs.
         jobs_root = Path(index_root) / ".hkm_jobs"
-        if jobs_root.exists():
-            shutil.rmtree(jobs_root, ignore_errors=True)
-        jobs_root.mkdir(parents=True, exist_ok=True)
-        for bucket in ("ids", "queued", "running", "succeeded", "failed", "next"):
-            (jobs_root / bucket).mkdir(exist_ok=True)
-        jobs.JOBS_ROOT = str(jobs_root)
+        set_jobs_root(str(jobs_root), reset=True)
         self.jobs_root = jobs_root
         self.jobs_fs = FileSystem(root=str(jobs_root))
         self.job_table = []
@@ -676,11 +669,11 @@ class HkmTuiApp:
         def _run_build() -> None:
             try:
                 build_search_index(
-                    FileSystem(root=fs_root),
-                    docs_dir,
-                    index_root,
-                    workers,
+                    docs_dir=docs_dir,
+                    index_root=index_root,
+                    num_workers=workers,
                     fs_root=fs_root,
+                    jobs_root=str(jobs_root),
                     skip_paths=self.skip_paths,
                 )
             except Exception as exc:
@@ -713,7 +706,7 @@ class HkmTuiApp:
                 pass
         self.watcher_thread = threading.Thread(
             target=watcher,
-            args=(self.jobs_fs, 1.5),
+            args=(self.jobs_fs, 1),
             daemon=True,
         )
         self.watcher_thread.start()

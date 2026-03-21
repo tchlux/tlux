@@ -1,21 +1,21 @@
-"""Hierarchical embedding + token search toolkit."""
+"""HKM library surface."""
 
-# All imports are lazy.
-'''
 from .fs import FileSystem
-from .schema import BuildConfig, QuerySpec, SearchResult, Hit
-from .builder.launcher import build_search_index, build_search_index_inline
+from .jobs import Job, drain_jobs, run_job, set_jobs_root
+from .schema import BuildConfig, Hit, QuerySpec, SearchResult
+from .builder.launcher import build_search_index
 from .search.searcher import Searcher
-from .monitor import proc_usage
 
 __all__ = [
-    "FileSystem",
     "BuildConfig",
+    "FileSystem",
+    "Hit",
+    "Job",
     "QuerySpec",
     "SearchResult",
-    "Hit",
-    "build_search_index",
-    "build_search_index_inline",
     "Searcher",
+    "build_search_index",
+    "drain_jobs",
+    "run_job",
+    "set_jobs_root",
 ]
-'''
