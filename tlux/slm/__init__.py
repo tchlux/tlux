@@ -205,7 +205,9 @@ try:
     value ::= object | array | string | number | ("true" | "false" | "null") ws
     ''', verbose=False)
 except ModuleNotFoundError:
-    pass
+    YES_NO = None
+    ONE_SENTENCE_GRAMMAR = None
+    JSON_ARRAY_GRAMMAR = None
 
 # ------------------------------------------------------------------------------------
 
@@ -426,6 +428,7 @@ def server_chat_complete(
         messages += [{"role": "user", "content": prompt}]
     # Construct the full conversation payload.
     full_messages = ([{"role": "system", "content": system}] if system else []) + messages
+    print("system: ", system, flush=True)
     # Build request body for the chat completions endpoint.
     data = {
         "model": model,
@@ -713,7 +716,8 @@ if __name__ == '__main__':
                             if not analysis_open:
                                 print(_ITALIC_ON, end='', flush=True)
                                 analysis_open = True
-                            print(completion.partial, end='', flush=True)
+                            if completion.partial != "<|end|>":
+                                print(completion.partial, end='', flush=True)
                         if completion.stop_reason and analysis_open:
                             print(f"{_ITALIC_OFF}\n\n", end='', flush=True)
                             analysis_open = False

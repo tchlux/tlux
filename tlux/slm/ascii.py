@@ -26,11 +26,9 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import os
-import re
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 CONFIG_FILE = Path.home() / ".ascii_replacements"
 EXCLUDE_CACHE = Path.home() / ".ascii_exclusions"
