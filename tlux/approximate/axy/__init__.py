@@ -665,7 +665,7 @@ if __name__ == "__main__":
     nm = (len(functions) * n) # // 3
     new_model = True
     use_a = True
-    use_x = True
+    use_x = False
     use_y = True
     use_yi = True and (len(functions) == 1)
     use_nearest_neighbor = False

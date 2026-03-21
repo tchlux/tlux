@@ -2113,6 +2113,18 @@ CONTAINS
     ! Compute the gradient from the output through the aggregation operation.
     SUBROUTINE COMPUTE_AGGREGATION_GRADIENT(OUT)
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: OUT
+
+      ! TODO: Figure out how to modify the gradients so that AY_SCALE and AY_SHIFT go to 1 and 0.
+      ! 
+      ! ! Set up pointers to the AY_SHIFT and AY_SCALE vectors.
+      ! REAL(KIND=RT), POINTER, DIMENSION(:) :: AY_SHIFT, AY_SCALE
+      ! AY_SHIFT(1:CONFIG%ADO) => MODEL(CONFIG%AOSS:CONFIG%AOSE)
+      ! AY_SCALE(1:CONFIG%ADO) => MODEL(CONFIG%AOMS:CONFIG%AOME)
+      ! ! TODO: Loop over OUT and add a gradient component to make (AY_SHIFT = 0) and (AY_SCALE = 1).
+      ! DO I = ONE, SIZE(OUT, 2, KIND=INT64)
+      !    OUT(:,I) = (OUT(:,I) - AY_SHIFT(:)) / AY_SCALE(:)
+      ! END DO
+
       !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, CW, CWS, YSUM) IF(NT > 1)
       DO I = ONE, SIZE(SIZES, KIND=INT64)
          GS = AGG_STARTS(I)
@@ -3935,7 +3947,7 @@ CONTAINS
       ! Store the start time of this routine (to make sure updates can
       !  be shown to the user at a reasonable frequency).
       CALL SYSTEM_CLOCK(CONFIG%FIT_LAST_INTERRUPT_TIME, CLOCK_RATE, CLOCK_MAX)
-      IF (.NOT. CONTINUING_FIT) THEN
+      fit_initialization : IF (.NOT. CONTINUING_FIT) THEN
          ! Establis the amount of time to wait between interrupts.
          CONFIG%FIT_WAIT_TIME = CLOCK_RATE * CONFIG%INTERRUPT_DELAY_SEC
          ! Initialize the info / error code to 0.
@@ -3943,7 +3955,7 @@ CONTAINS
          ! Cap the "number [of variables] to update" at the model size.
          CONFIG%NUM_TO_UPDATE = MAX(ONE, MIN(CONFIG%NUM_TO_UPDATE, CONFIG%NUM_VARS))
          ! Set the "total rank", the number of internal state components.
-         CONFIG%FIT_TOTAL_RANK = CONFIG%MDS*CONFIG%MNS + CONFIG%ADS*CONFIG%ANS
+         CONFIG%FIT_TOTAL_RANK = CONFIG%MDS*CONFIG%MNS*CONFIG%MNC + CONFIG%ADS*CONFIG%ANS*CONFIG%ANC
          ! Compute the minimum number of model variables to update.
          CONFIG%FIT_MIN_TO_UPDATE = MAX(1,INT(CONFIG%MIN_UPDATE_RATIO * REAL(CONFIG%NUM_VARS,RT)))
          ! Set the initial "number of steps taken since best" counter.
@@ -4032,7 +4044,7 @@ CONTAINS
             CONFIG%FIT_LAST_INTERRUPT_TIME = CURRENT_TIME
             RETURN
          END IF
-      END IF
+      END IF fit_initialization
       ! 
       ! TODO: Compute batches once, reuse for all of fit.
       ! 
@@ -4076,7 +4088,7 @@ CONTAINS
          ! Compute all indices (for parallelism) related to this batch.
          !$OMP PARALLEL DO NUM_THREADS(CONFIG%FIT_NT) PRIVATE(BATCH, BS, BE, BT, SS, SE, BSA, BEA, TN) &
          !$OMP& REDUCTION(+:SUM_SQUARED_ERROR) IF(CONFIG%FIT_NT > 1)
-         DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
+         data_parallel_loop : DO BATCH = 1, SIZE(BATCHM_STARTS, KIND=INT64)
             IF (INFO .NE. 0) CYCLE
             BS = BATCHM_STARTS(BATCH)
             BE = BATCHM_ENDS(BATCH)
@@ -4159,7 +4171,7 @@ CONTAINS
                  A_EMB_TEMP(:,:,TN:TN), M_EMB_TEMP(:,:,TN:TN), &
                  EMB_OUTS(:,BS:BE), EMB_GRADS(:,BS:BE))
             IF (INFO .NE. 0) CYCLE
-         END DO
+         END DO data_parallel_loop
          CONFIG%NUM_THREADS = TT
          IF (INFO .NE. 0) RETURN
          ! 
