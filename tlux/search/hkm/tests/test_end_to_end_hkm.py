@@ -55,11 +55,17 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     assert index_manifest["source_root"] == str(docs_src)
     assert index_manifest["docs_path"] == "docs"
     assert index_manifest["hkm_path"] == "hkm"
+    assert index_manifest["max_n_gram"] == 3
+    assert index_manifest["n_gram_fp_rate"] == pytest.approx(0.01)
     assert index_manifest["metadata_schema"][0] == ["source_path", "bytes"]
 
     root_node = json.loads((Path(hkm_root) / "node.json").read_text(encoding="utf-8"))
     assert "children" in root_node
     assert "preview_files" in root_node
+    assert root_node["n_gram_counter_path"] == "n_gram_counter.bytes"
+    assert root_node["n_gram_exists_path"] == "n_gram_exists.bytes"
+    assert (Path(hkm_root) / "n_gram_counter.bytes").exists()
+    assert (Path(hkm_root) / "n_gram_exists.bytes").exists()
 
     hits = searcher.search({"mode": "token", "text": "0", "top_k": 5})
     assert hits.docs, "token search should return at least one hit"
@@ -97,9 +103,12 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
         assert node_path.exists(), f"node manifest missing for {child}"
         node = json.loads(node_path.read_text())
         assert "doc_count" in node
+        assert (child / "n_gram_counter.bytes").exists()
         if not node.get("is_leaf", False):
             assert (child / "centroids.npy").exists()
             assert node["children"], "non-leaf should have children"
+        else:
+            assert (child / "n_gram_exists.bytes").exists()
         if "preview_random.npy" in node.get("preview_files", []):
             assert (child / "preview_random.npy").exists()
         if "preview_diverse.npy" in node.get("preview_files", []):
@@ -174,3 +183,28 @@ def test_leaf_neighbors_use_best_passage_match(tmp_path: Path, monkeypatch) -> N
     assert hits[0].anchor_span == (0, 32)
     assert hits[0].span == (0, 32)
     assert "0 1 2 3" in hits[0].anchor_preview_text
+
+
+def test_token_search_uses_hierarchical_filters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    for i, text in enumerate(["1 2 3 4", "1 2 9 10", "20 21 22 23", "30 31 32 33"]):
+        (docs_src / f"doc{i}.txt").write_text(text, encoding="utf-8")
+
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(tmp_path),
+        num_workers=2,
+        max_k=2,
+        leaf_doc_limit=1,
+        seed=0,
+    )
+    drain_jobs(FileSystem(root=str(tmp_path / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    searcher = Searcher.from_index_root(str(tmp_path))
+    hits = searcher.search({"token_sequence": [1, 2], "top_k": 10})
+    assert sorted(hit.source_path for hit in hits.docs) == ["doc0.txt", "doc1.txt"]
+    assert not searcher.search({"token_sequence": [99, 100], "top_k": 10}).docs

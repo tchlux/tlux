@@ -8,7 +8,7 @@ HKM is a Python library for building and searching a hierarchical chunk index ov
 - Local-machine usage is the default: enqueue jobs and let local workers execute them.
 - Distributed usage uses the same job directory on a shared filesystem and workers started on every participating host.
 - The current index format is the directory-based `.hkmchunk` layout written by [`builder/chunk_io.py`](builder/chunk_io.py).
-- The current query surface supports token and semantic text queries, plus low-level token-sequence and embedding inputs.
+- The current query surface supports hierarchical token pruning plus semantic text queries, with exact token verification at leaves.
 - Metadata filters, preview streaming, and richer retrieval planning are not current supported features even if older prototype code mentioned them.
 
 ## Installation
@@ -90,12 +90,16 @@ index_root/
         ...
   hkm/
     node.json
+    n_gram_counter.bytes
+    n_gram_exists.bytes
     stats.json
     centroids.npy
     preview_random.npy
     preview_diverse.npy
     cluster_0000/
       node.json
+      n_gram_counter.bytes
+      n_gram_exists.bytes
       data/
       stats.json
       ...
@@ -103,10 +107,12 @@ index_root/
 
 `.hkmchunk` directories are the canonical current storage unit. Search and build code should agree with that format exactly.
 
-The canonical query-time manifests are:
+The canonical query-time manifests and token artifacts are:
 
-- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, and relative `docs/` + `hkm/` paths
-- `node.json` at each HKM node with child order, counts, preview files, and whether local `data/` exists
+- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, `max_n_gram`, `n_gram_fp_rate`, and relative `docs/` + `hkm/` paths
+- `node.json` at each HKM node with child order, counts, preview files, token artifact paths, and whether local `data/` exists
+- `n_gram_counter.bytes` at each node with the node's merged unique-count sketch
+- `n_gram_exists.bytes` at each searchable node with the node's Bloom filter for token-pruned descent
 
 Search results currently return:
 

@@ -43,8 +43,23 @@ def test_end_to_end_token_sequence(monkeypatch):
             "embedder_backend": "fake",
             "metadata_schema": [["name", "str"], ["num_bytes", "float"]],
             "build_config": {},
+            "max_n_gram": 3,
+            "n_gram_fp_rate": 0.01,
             "docs_path": "docs",
             "hkm_path": "hkm",
+        }), encoding="utf-8")
+        (Path(tmpdir) / "hkm" / "node.json").write_text(json.dumps({
+            "depth": 0,
+            "doc_count": 2,
+            "embedding_count": 2,
+            "is_leaf": True,
+            "children": [],
+            "preview_files": [],
+            "has_data": True,
+            "chunk_roots": ["../docs"],
+            "n_gram_counter_path": "",
+            "n_gram_exists_path": "",
+            "estimated_unique_ngrams": 0,
         }), encoding="utf-8")
         searcher = Searcher.from_index_root(tmpdir, fs=fs)
         hits = searcher.search({"token_sequence": [2, 3], "top_k": 10})

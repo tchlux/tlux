@@ -55,6 +55,8 @@ def build_search_index(
     metadata_schema: str = "[['source_path','bytes'],['file_kind','str'],['num_bytes','float'],['tags','list'],['attrs','dict']]",
     max_k: int = 8,
     leaf_doc_limit: int = 1024,
+    max_n_gram: int = 3,
+    n_gram_fp_rate: float = 0.01,
     seed: int = 42,
     fs_root: str | None = None,
     jobs_root: str | None = None,
@@ -101,8 +103,12 @@ def build_search_index(
             "num_workers": num_workers,
             "max_cluster_count": max_k,
             "leaf_doc_limit": leaf_doc_limit,
+            "max_n_gram": max_n_gram,
+            "n_gram_fp_rate": n_gram_fp_rate,
             "seed": seed,
         },
+        "max_n_gram": max_n_gram,
+        "n_gram_fp_rate": n_gram_fp_rate,
         "docs_path": "docs",
         "hkm_path": "hkm",
     }, indent=2), encoding="utf-8")
@@ -129,6 +135,7 @@ def build_search_index(
             manifest_path=str(manifest_path),
             fs_root=fs_root,
             metadata_schema=metadata_schema,
+            n_gram=max_n_gram,
             doc_id_base=doc_id_base,
         )
         worker_jobs.append(job)
@@ -145,6 +152,8 @@ def build_search_index(
         index_root,
         max_cluster_count=max_k,
         leaf_doc_limit=leaf_doc_limit,
+        max_n_gram=max_n_gram,
+        n_gram_fp_rate=n_gram_fp_rate,
         seed=seed,
         fs_root=fs_root,
         max_depth=3,

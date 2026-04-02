@@ -149,6 +149,7 @@ def default_worker(
     worker_index: int = 0,
     total_workers: int = 1,
     chunk_size_limit: int = 8 * 2**20,
+    n_gram: int = 3,
     manifest_path: str | None = None,
     fs_root: str | None = None,
     doc_id_base: int = 0,
@@ -201,6 +202,7 @@ def default_worker(
         get_document_batches(),
         parsed_schema,
         chunk_size_limit=chunk_size_limit,
+        n_gram=n_gram,
         fs_root=fs_root,
         document_id_base=doc_id_base,
     )
