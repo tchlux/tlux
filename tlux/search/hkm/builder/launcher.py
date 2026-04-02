@@ -7,6 +7,8 @@ import argparse
 from pathlib import Path
 from typing import List
 
+from ..embedder import get_backend
+
 try:
     from ..jobs import Job, run_job, set_jobs_root
 except ImportError:
@@ -50,7 +52,7 @@ def build_search_index(
     index_root: str,
     num_workers: int,
     tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
-    metadata_schema: str = "[['name','str'],['num_bytes','float']]",
+    metadata_schema: str = "[['source_path','bytes'],['file_kind','str'],['num_bytes','float'],['tags','list'],['attrs','dict']]",
     max_k: int = 8,
     leaf_doc_limit: int = 1024,
     seed: int = 42,
@@ -73,6 +75,11 @@ def build_search_index(
     if jobs_root is None:
         jobs_root = os.path.join(index_root, ".hkm_jobs")
     set_jobs_root(jobs_root)
+    try:
+        metadata_schema_value = json.loads(metadata_schema)
+    except Exception:
+        import ast
+        metadata_schema_value = ast.literal_eval(metadata_schema)
 
     docs_dir_path = Path(docs_dir)
     skip_list = [Path(p).resolve() for p in (skip_paths or [])]
@@ -84,6 +91,21 @@ def build_search_index(
     os.makedirs(docs_root_out, exist_ok=True)
     hkm_root = os.path.join(index_root, "hkm")
     os.makedirs(hkm_root, exist_ok=True)
+    Path(index_root, "index.json").write_text(json.dumps({
+        "version": 1,
+        "source_root": os.path.abspath(docs_dir),
+        "jobs_root": os.path.abspath(jobs_root),
+        "embedder_backend": get_backend().name,
+        "metadata_schema": metadata_schema_value,
+        "build_config": {
+            "num_workers": num_workers,
+            "max_cluster_count": max_k,
+            "leaf_doc_limit": leaf_doc_limit,
+            "seed": seed,
+        },
+        "docs_path": "docs",
+        "hkm_path": "hkm",
+    }, indent=2), encoding="utf-8")
 
     # bin-pack files by size across workers
     bins = _bin_pack(all_files, num_workers)
@@ -91,6 +113,7 @@ def build_search_index(
     os.makedirs(manifest_dir, exist_ok=True)
 
     worker_jobs = []
+    doc_id_base = 0
     for worker_id, files in enumerate(bins):
         if not files:
             continue
@@ -106,8 +129,10 @@ def build_search_index(
             manifest_path=str(manifest_path),
             fs_root=fs_root,
             metadata_schema=metadata_schema,
+            doc_id_base=doc_id_base,
         )
         worker_jobs.append(job)
+        doc_id_base += len(files)
 
     consolidate_job = run_job(
         "tlux.search.hkm.builder.consolidate.run_consolidate",

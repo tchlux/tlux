@@ -21,7 +21,7 @@ The intended long-term boundaries are:
 - `jobs.py`: queue ownership, worker lifecycle, status, resource tracking
 - build pipeline: tokenize/embed, consolidate, partition, recurse
 - index format: chunk-directory storage plus HKM cluster tree
-- query layer: load an existing index, execute search, return results
+- query layer: load an existing index, execute search, return stable result records
 - clients: TUI now, future web/app interfaces later
 
 Current cleanup work should preserve those boundaries even when the implementation remains simple.
@@ -30,8 +30,10 @@ Current cleanup work should preserve those boundaries even when the implementati
 
 The current implementation is intentionally narrower than the long-term target:
 
-- search currently supports token-sequence and embedding queries only
+- search currently supports token and semantic text queries, plus low-level token-sequence and embedding inputs
 - the chunk-directory format is the canonical storage contract for now
+- query-time traversal is described by `index.json` and per-node `node.json` manifests
+- result records now carry `source_path`, `preview_text`, and `query_mode` so UIs do not need chunk internals
 - the default embedder backend is single-choice in the docs even though the interface permits swapping
 - local execution is still the easiest path, with distributed execution relying on the same shared-filesystem job model
 

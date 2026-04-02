@@ -41,6 +41,7 @@ def process_documents(
     chunk_size_limit: int = 8 * 2**20,
     n_gram: int = 3,
     fs_root: Optional[str] = None,
+    document_id_base: int = 0,
 ) -> Tuple[str, str]:
     """Tokenize + embed batches, emit chunk directories and summary stats."""
     file_system = FileSystem() if fs_root is None else FileSystem(root=fs_root)
@@ -62,7 +63,7 @@ def process_documents(
         metadata_schema,
         emit_worker_stats=True,
     )
-    document_id = 0
+    document_id = int(document_id_base)
 
     total_docs = 0
     total_chunks = 0
@@ -144,12 +145,13 @@ def process_documents(
 def default_worker(
     document_directory: str,
     output_directory: str,
-    metadata_schema: str = "[('name', 'str'), ('num_bytes', 'int')]",
+    metadata_schema: str = "[['source_path', 'bytes'], ['file_kind', 'str'], ['num_bytes', 'float'], ['tags', 'list'], ['attrs', 'dict']]",
     worker_index: int = 0,
     total_workers: int = 1,
     chunk_size_limit: int = 8 * 2**20,
     manifest_path: str | None = None,
     fs_root: str | None = None,
+    doc_id_base: int = 0,
 ) -> None:
     """Process a shard of files in document_directory or an explicit manifest."""
     try:
@@ -176,11 +178,13 @@ def default_worker(
             except UnicodeDecodeError:
                 continue
             size_bytes = len(text.encode("utf-8"))
+            source_path = os.path.relpath(file, document_directory).replace(os.sep, "/")
             tags = [file.suffix or "none", str(size_bytes % 5)]
             attrs = {"ext": file.suffix or "none", "depth": len(file.parents), "size": size_bytes}
             value_map = {
                 "path": file.name,
                 "name": file.name,
+                "source_path": source_path.encode("utf-8"),
                 "num_bytes": float(size_bytes),
                 "file_kind": file.suffix or "none",
                 "tags": tags,
@@ -198,6 +202,7 @@ def default_worker(
         parsed_schema,
         chunk_size_limit=chunk_size_limit,
         fs_root=fs_root,
+        document_id_base=doc_id_base,
     )
 
 

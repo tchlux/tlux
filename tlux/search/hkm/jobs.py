@@ -498,7 +498,8 @@ def run_job(
         kwargs=kwargs
     )
     # Ensure a worker is running (up to the max).
-    watcher(launch=True)
+    max_workers = max(1, int(os.environ.get("HKM_MAX_WORKERS", "1")))
+    watcher(launch=True, max_workers=max_workers)
     # return _launch_worker(fs=fs, job_dir=job_dir)
     return new_job
 
@@ -543,13 +544,16 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     if fs is None:
         fs = FileSystem(JOBS_ROOT)
     fs = ensure_jobs_root(fs)
+    if (max_workers == 1) and os.environ.get("HKM_MAX_WORKERS", "").isdigit():
+        max_workers = max(1, int(os.environ["HKM_MAX_WORKERS"]))
     # If a launch is desired, create a process and return.
     if launch:
         # The process will overwrite its own STDOUT and STDERR when ready.
         subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), fs.root],
+            [sys.executable, os.path.abspath(__file__), fs.root, str(max_workers)],
             env={
                 "HKM_JOBS_ROOT": fs.root,
+                "HKM_MAX_WORKERS": str(max_workers),
                 "PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", ""),
             },
         )
@@ -760,7 +764,10 @@ if __name__ == "__main__":
             sys.path.insert(0, REPO_ROOT)
         if CODE_ROOT not in sys.path:
             sys.path.insert(0, CODE_ROOT)
-        watcher(fs=FileSystem(sys.argv[1]))
+        watcher(
+            fs=FileSystem(sys.argv[1]),
+            max_workers=int(sys.argv[2]) if (len(sys.argv) > 2 and sys.argv[2].isdigit()) else 1,
+        )
     else:
         print("[jobs.TESTER] begin.", flush=True)
         # Example: spawn a job that computes a simple function, wait, and print result.

@@ -8,7 +8,7 @@ HKM is a Python library for building and searching a hierarchical chunk index ov
 - Local-machine usage is the default: enqueue jobs and let local workers execute them.
 - Distributed usage uses the same job directory on a shared filesystem and workers started on every participating host.
 - The current index format is the directory-based `.hkmchunk` layout written by [`builder/chunk_io.py`](builder/chunk_io.py).
-- The current query surface supports token-sequence search and embedding search.
+- The current query surface supports token and semantic text queries, plus low-level token-sequence and embedding inputs.
 - Metadata filters, preview streaming, and richer retrieval planning are not current supported features even if older prototype code mentioned them.
 
 ## Installation
@@ -31,6 +31,7 @@ The TUI:
 - enqueues build jobs through the library
 - watches local job execution
 - browses the resulting HKM tree
+- runs token or semantic search against a built index
 
 ## Library usage
 
@@ -48,7 +49,7 @@ drain_jobs(FileSystem(root="idx/.hkm_jobs"), max_workers=1)
 root_job.reload()
 
 searcher = Searcher.from_index_root("idx")
-hits = searcher.search({"token_sequence": [101, 202], "top_k": 5})
+hits = searcher.search({"mode": "semantic", "text": "job scheduler", "top_k": 5})
 ```
 
 ## CLI usage
@@ -71,6 +72,7 @@ The build CLI prints the root build job id. Jobs are stored under `idx/.hkm_jobs
 
 ```text
 index_root/
+  index.json
   .hkm_jobs/
   manifests/
     worker_0000.json
@@ -87,17 +89,70 @@ index_root/
         n_gram_counter.bytes
         ...
   hkm/
+    node.json
     stats.json
     centroids.npy
     preview_random.npy
     preview_diverse.npy
     cluster_0000/
+      node.json
       data/
       stats.json
       ...
 ```
 
 `.hkmchunk` directories are the canonical current storage unit. Search and build code should agree with that format exactly.
+
+The canonical query-time manifests are:
+
+- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, and relative `docs/` + `hkm/` paths
+- `node.json` at each HKM node with child order, counts, preview files, and whether local `data/` exists
+
+Search results currently return:
+
+- `doc_id`
+- `score`
+- `span`
+- `source_path`
+- `preview_text`
+- `query_mode`
+
+## Manual TUI validation
+
+Use the repository itself as a corpus:
+
+```bash
+HKM_EMBEDDER=drama tlux/search/hkm/bin/hkm-tui
+```
+
+Set:
+
+- docs dir: `/Users/thomaslux/Git/tlux`
+- index root: `/Users/thomaslux/Git/tlux/tlux/search/hkm/tmp_repo_index`
+- workers: `4`
+
+Skip at least:
+
+- `.git`
+- `tlux/search/hkm/.env`
+- existing `tmp_index*`
+- `__pycache__`
+
+Build the index, browse the tree, then switch to search mode with `/`.
+
+Useful token queries:
+
+- `build_search_index`
+- `ChunkWriter`
+- `watcher(`
+- `Searcher`
+
+Useful semantic queries:
+
+- `job scheduler`
+- `hierarchical k means`
+- `token search`
+- `recursive index builder`
 
 ## Public surface
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Run the HKM curses builder and explorer."""
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+
 from tlux.search.hkm.tui import main
 
 

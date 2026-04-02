@@ -28,6 +28,7 @@ import numpy as np
 from . import build_search_index, jobs
 from .fs import FileSystem
 from .jobs import JOBS_ROOT, set_jobs_root, watcher
+from .search.searcher import Searcher
 
 # Robust key codes (macOS curses lacks KEY_TAB)
 KEY_TAB = getattr(curses, "KEY_TAB", 9)
@@ -114,6 +115,19 @@ class NodeInfo:
     preview_random: List[str]
     preview_diverse: List[str]
     files: List[str]
+
+
+@dataclass
+class BrowserEntry:
+    doc_id: int
+    source_path: str
+    preview_text: str
+    score: float = 0.0
+    mode: str = "browse"
+    span: Tuple[int, int] = (0, 0)
+    anchor_source_path: str = ""
+    anchor_preview_text: str = ""
+    anchor_span: Tuple[int, int] = (0, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,16 +314,16 @@ def _preview_rows(preview_path: Path, limit: int = 3) -> List[str]:
 # 
 def _load_node(node_path: Path) -> NodeInfo:
     stats: Dict = {}
-    stats_path = node_path / "stats.json"
-    if stats_path.exists():
+    node_manifest = node_path / "node.json"
+    if node_manifest.exists():
         try:
-            stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            stats = json.loads(node_manifest.read_text(encoding="utf-8"))
         except Exception:
             stats = {}
-
-    children = [p for p in sorted(node_path.iterdir()) if p.is_dir() and p.name.startswith("cluster_")]
-    preview_random = _preview_rows(node_path / "preview_random.npy")
-    preview_diverse = _preview_rows(node_path / "preview_diverse.npy")
+    children = [node_path / name for name in stats.get("children", [])]
+    preview_files = set(stats.get("preview_files", []))
+    preview_random = _preview_rows(node_path / "preview_random.npy") if "preview_random.npy" in preview_files else []
+    preview_diverse = _preview_rows(node_path / "preview_diverse.npy") if "preview_diverse.npy" in preview_files else []
     files = sorted(p.name for p in node_path.iterdir() if p.is_file())
 
     return NodeInfo(
@@ -356,10 +370,45 @@ class HkmTuiApp:
         self.browser_path: Optional[Path] = None
         self.browser_info: Optional[NodeInfo] = None
         self.browser_cursor: int = 0
+        self.browser_entries: List[BrowserEntry] = []
+        self.browser_anchor_doc_id: Optional[int] = None
+        self.browser_anchor_entry: Optional[BrowserEntry] = None
+        self.browser_leaf_mode: str = "docs"
+        self.searcher: Optional[Searcher] = None
+        self.search_query: str = ""
+        self.search_mode: str = "semantic"
+        self.search_top_k: int = 10
+        self.search_results = []
+        self.search_cursor: int = 0
+        self.local_max_workers: int = 1
         self.last_job_refresh: float = 0.0
-        curses.curs_set(0)
+        self._set_cursor(0)
         self.stdscr.nodelay(True)
         self._init_colors()
+
+    # Description:
+    #   Best-effort cursor visibility update.
+    # 
+    # Parameters:
+    #   value (int): 0 hide, 1 show.
+    # 
+    def _set_cursor(self, value: int) -> None:
+        try:
+            curses.curs_set(value)
+        except Exception:
+            pass
+
+    # Description:
+    #   Best-effort recovery after curses loses a drawable terminal.
+    # 
+    def _recover_terminal(self) -> None:
+        try:
+            curses.update_lines_cols()
+            self.stdscr.erase()
+            self.stdscr.redrawwin()
+            self.stdscr.refresh()
+        except Exception:
+            pass
 
     def _load_state(self) -> None:
         try:
@@ -411,7 +460,12 @@ class HkmTuiApp:
     def run(self) -> None:
         while True:
             self._refresh_jobs()
-            self._draw()
+            try:
+                self._draw()
+            except curses.error:
+                self._recover_terminal()
+                time.sleep(0.1)
+                continue
             try:
                 key = self.stdscr.getch()
             except KeyboardInterrupt:
@@ -427,8 +481,10 @@ class HkmTuiApp:
                 self._handle_form_key(key)
             elif self.state == "build":
                 self._handle_build_key(key)
-            else:
+            elif self.state == "browse":
                 self._handle_browser_key(key)
+            else:
+                self._handle_search_key(key)
 
     # Description:
     #   Poll job files periodically to update the table.
@@ -445,6 +501,8 @@ class HkmTuiApp:
         self.job_table = sorted(raw_jobs, key=lambda j: (priority.get(j.status, 4), j.job_id))
         if self.state == "build" and self._build_finished():
             self.message = "Build finished. Press ENTER to open the browser."
+        elif self.state == "build" and self._build_failed():
+            self.message = "Build failed. Press r to return to the form."
 
     # Description:
     #   Draw the appropriate screen for the current state.
@@ -452,16 +510,26 @@ class HkmTuiApp:
     def _draw(self) -> None:
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
+        if h < 8 or w < 40:
+            self._write_line(0, "HKM TUI: terminal too small or temporarily unavailable.")
+            self.stdscr.refresh()
+            return
         title = "HKM Builder + Explorer"
         self.stdscr.attron(curses.color_pair(1))
         self.stdscr.addstr(0, 2, title)
         self.stdscr.attroff(curses.color_pair(1))
         if self.state == "form":
+            self._set_cursor(1)
             self._draw_form(h, w)
         elif self.state == "build":
+            self._set_cursor(0)
             self._draw_build(h, w)
-        else:
+        elif self.state == "browse":
+            self._set_cursor(0)
             self._draw_browser(h, w)
+        else:
+            self._set_cursor(1)
+            self._draw_search(h, w)
         if self.message:
             self._write_line(h - 1, self.message, color=2)
         self.stdscr.refresh()
@@ -471,6 +539,13 @@ class HkmTuiApp:
     # 
     def _draw_form(self, height: int, width: int) -> None:
         y = 2
+        cursor_y = 2
+        cursor_x = 2
+        footer_y = height - 2
+        warning_y = footer_y - 2
+        skip_y = warning_y - 2
+        suggestions_y = y + (2 * len(self.fields)) + 1
+        suggestions_bottom = max(suggestions_y - 1, skip_y - 1)
         for idx, field in enumerate(self.fields):
             label = f"{field.label}: "
             val_display = field.value if field.value else "<empty>"
@@ -485,6 +560,8 @@ class HkmTuiApp:
                 self.stdscr.attroff(curses.color_pair(6) | curses.A_DIM)
             if idx == self.active_field:
                 self.stdscr.attroff(curses.color_pair(3))
+                cursor_y = y
+                cursor_x = min(width - 3, 4 + len(label) + len(field.value))
             y += 2
 
         active = self.fields[self.active_field]
@@ -493,7 +570,7 @@ class HkmTuiApp:
             if active.suggestion_idx >= len(active.suggestions):
                 active.suggestion_idx = 0
             total_sugs = len(active.suggestions)
-            available_lines = max(0, height - (y + 2) - 2)  # start two rows below header, leave 2-line buffer
+            available_lines = max(0, suggestions_bottom - (y + 2))
             display_max = min(total_sugs, available_lines)
             start = 0
             # Scroll window to keep cursor near bottom without hiding earlier entries.
@@ -541,12 +618,11 @@ class HkmTuiApp:
         if warn_line:
             self.stdscr.attron(curses.color_pair(4))
             lines = textwrap.wrap(warn_line, width - 4) or [warn_line]
-            start_y = height - 3 - len(lines)
+            start_y = max(warning_y, footer_y - 1 - len(lines))
             for i, line in enumerate(lines):
                 self.stdscr.addstr(start_y + i, 2, line)
             self.stdscr.attroff(curses.color_pair(4))
-        else:
-            start_y = height - 2
+        self._write_line(warning_y - 1, "")
         if self.skip_paths:
             skip_text = "Skipping: " + ", ".join([
                 "." + s[len(str(Path.cwd())):] for s in
@@ -554,10 +630,13 @@ class HkmTuiApp:
             ])
             if len(self.skip_paths) > 3:
                 skip_text += f" (+{len(self.skip_paths)-3} more)"
-            self.stdscr.addstr(start_y - 2, 2, skip_text[: width - 4])
+            self.stdscr.addstr(skip_y, 2, skip_text[: width - 4])
+        else:
+            self._write_line(skip_y, "")
 
-        footer = "TAB next | ENTER build | up/down suggestions | right accept | left undo | q quit"
-        self.stdscr.addstr(height - 2, 2, footer[: width - 4])
+        footer = "TAB next | s skip | ENTER build | up/down suggestions | right accept | left undo | q quit"
+        self.stdscr.addstr(footer_y, 2, footer[: width - 4])
+        self.stdscr.move(cursor_y, cursor_x)
 
     # Description:
     #   Handle keypresses on the launch form.
@@ -648,6 +727,9 @@ class HkmTuiApp:
             self.message = "Docs directory does not exist."
             return
         self.message = "Launching build jobs..."
+        self.build_error = None
+        self.local_max_workers = max(1, workers)
+        os.environ["HKM_MAX_WORKERS"] = str(self.local_max_workers)
 
         # Choose a safe FileSystem root that encloses docs and index.
         try:
@@ -704,9 +786,11 @@ class HkmTuiApp:
                 self.jobs_fs.mkdir(self.jobs_fs.join(bucket), exist_ok=True)
             except Exception:
                 pass
+        def _launch_watchers() -> None:
+            for _ in range(self.local_max_workers):
+                watcher(self.jobs_fs, self.local_max_workers, launch=True)
         self.watcher_thread = threading.Thread(
-            target=watcher,
-            args=(self.jobs_fs, 1),
+            target=_launch_watchers,
             daemon=True,
         )
         self.watcher_thread.start()
@@ -813,7 +897,7 @@ class HkmTuiApp:
 
         # Spacer then footer
         self._write_line(height - 3, "")
-        footer = "ENTER: browse when finished | arrows: move | TAB: refresh | q: quit"
+        footer = "ENTER: browse when finished | r: return on failure | arrows: move | TAB: refresh | q: quit"
         self._write_line(height - 2, footer)
         if self.build_error:
             err_lines = textwrap.wrap(self.build_error, width - 4) or [self.build_error]
@@ -832,8 +916,13 @@ class HkmTuiApp:
         elif key in (curses.KEY_ENTER, 10, 13):
             if self._build_finished():
                 self._enter_browser()
+            elif self._build_failed():
+                self.message = "Build failed. Press r to return to the form."
             else:
                 self.message = "Build still running; wait for jobs to finish."
+        elif key in (ord("r"), ord("R")) and (self._build_failed() or self.build_error):
+            self.state = "form"
+            self.message = "Returned to form."
         elif key in (KEY_TAB, 9):
             self.last_job_refresh = 0.0  # force refresh
 
@@ -851,7 +940,11 @@ class HkmTuiApp:
     #   Check whether building appears to be complete.
     # 
     def _build_finished(self) -> bool:
+        if self.build_error:
+            return True
         if not self.job_table:
+            return False
+        if self._build_failed():
             return False
         pending = any(j.status in {"QUEUED", "WAITING", "RUNNING"} for j in self.job_table)
         if pending:
@@ -859,6 +952,18 @@ class HkmTuiApp:
         index_root = Path(self._field_value("index"))
         hkm_root = index_root / "hkm"
         return hkm_root.exists()
+
+    # Description:
+    #   Check whether the build has reached a terminal failed state.
+    # 
+    # Returns:
+    #   (bool): True when a job failed and no jobs remain pending.
+    # 
+    def _build_failed(self) -> bool:
+        if not self.job_table:
+            return False
+        pending = any(j.status in {"QUEUED", "WAITING", "RUNNING"} for j in self.job_table)
+        return (not pending) and any(j.status == "FAILED" for j in self.job_table)
 
     # Description:
     #   Switch into the browser view once build completes.
@@ -872,8 +977,53 @@ class HkmTuiApp:
         self.browser_path = hkm_root
         self.browser_info = _load_node(hkm_root)
         self.browser_cursor = 0
+        self.browser_anchor_doc_id = None
+        self.browser_anchor_entry = None
+        self.browser_leaf_mode = "docs"
         self.state = "browse"
-        self.message = "Browse mode: arrows navigate, ENTER descend, BACKSPACE up."
+        self.searcher = Searcher.from_index_root(str(index_root))
+        self._refresh_browser_entries()
+        self.message = "Browse mode: arrows navigate, ENTER descend, / search."
+
+    # Description:
+    #   Refresh document entries for leaf browsing from the Searcher surface.
+    # 
+    def _refresh_browser_entries(self) -> None:
+        self.browser_entries = []
+        if not self.browser_info or not self.searcher or not self.browser_info.stats.get("is_leaf", False):
+            return
+        if self.browser_leaf_mode == "neighbors":
+            if self.browser_anchor_doc_id is not None:
+                self.browser_entries = [
+                    BrowserEntry(
+                        hit.doc_id,
+                        hit.source_path,
+                        hit.preview_text,
+                        hit.score,
+                        hit.query_mode,
+                        hit.span,
+                        hit.anchor_source_path,
+                        hit.anchor_preview_text,
+                        hit.anchor_span,
+                    )
+                    for hit in self.searcher.leaf_neighbors(self.browser_path, self.browser_anchor_doc_id, top_k=12)
+                ]
+                return
+        self.browser_entries = [
+            BrowserEntry(hit.doc_id, hit.source_path, hit.preview_text, hit.score, hit.query_mode, hit.span)
+            for hit in self.searcher.leaf_docs(self.browser_path)
+        ]
+
+    # Description:
+    #   Return the currently selected browser entry for leaf views.
+    # 
+    # Returns:
+    #   (BrowserEntry | None): Active entry when browsing leaf content.
+    # 
+    def _selected_browser_entry(self) -> Optional[BrowserEntry]:
+        if not self.browser_entries:
+            return None
+        return self.browser_entries[min(self.browser_cursor, len(self.browser_entries) - 1)]
 
     # Description:
     #   Draw the index browser view with stats and previews.
@@ -884,10 +1034,17 @@ class HkmTuiApp:
             return
         node = self.browser_info
         self.stdscr.addstr(2, 2, f"Node: {str(node.path)[: width - 6]}")
-        self.stdscr.addstr(3, 2, "Children (ENTER to descend, BACKSPACE to ascend):")
-        max_children = max(3, min(len(node.children), height - 12))
+        leaf = bool(node.stats.get("is_leaf", False))
+        self.stdscr.addstr(3, 2, "Documents:" if leaf else "Children (ENTER to descend, BACKSPACE to ascend):")
+        rows = self.browser_entries if leaf else node.children
+        max_children = max(3, min(len(rows), height - 12))
         for i in range(max_children):
-            label = node.children[i].name if i < len(node.children) else ""
+            if leaf and i < len(self.browser_entries):
+                entry = self.browser_entries[i]
+                score = f" [{entry.score:.3f}]" if self.browser_leaf_mode == "neighbors" else ""
+                label = f"{entry.source_path or '<unknown>'}{score}"
+            else:
+                label = node.children[i].name if i < len(node.children) else ""
             if i == self.browser_cursor:
                 self.stdscr.attron(curses.A_REVERSE)
             self.stdscr.addstr(4 + i, 4, label[: width - 8])
@@ -898,27 +1055,56 @@ class HkmTuiApp:
         stats_x = width // 2
         stats_lines = [
             f"doc_count: {node.stats.get('doc_count', 'n/a')}",
-            f"emb_count: {node.stats.get('emb_count', 'n/a')}",
+            f"emb_count: {node.stats.get('embedding_count', node.stats.get('emb_count', 'n/a'))}",
             f"depth: {node.stats.get('depth', 'n/a')}",
-            f"leaf: {node.stats.get('leaf', 'n/a')}",
+            f"leaf: {node.stats.get('is_leaf', node.stats.get('leaf', 'n/a'))}",
             f"files: {', '.join(node.files[:4])}",
         ]
+        selected = self._selected_browser_entry()
+        if selected is not None:
+            stats_lines.extend([
+                f"selected: {selected.source_path or '<unknown>'}",
+                f"doc_id: {selected.doc_id}",
+                f"mode: {self.browser_leaf_mode}",
+                f"doc_span: {selected.span[0]}:{selected.span[1]}",
+            ])
+        if self.browser_leaf_mode == "neighbors" and self.browser_anchor_entry is not None:
+            stats_lines.extend([
+                f"neighbors_for: {self.browser_anchor_entry.source_path or '<unknown>'}",
+                f"anchor_doc_id: {self.browser_anchor_entry.doc_id}",
+            ])
+        if self.browser_leaf_mode == "neighbors" and selected is not None:
+            stats_lines.append(f"anchor_span: {selected.anchor_span[0]}:{selected.anchor_span[1]}")
         for i, line in enumerate(stats_lines):
             self.stdscr.addstr(stats_y + i, stats_x, line[: width - stats_x - 2])
 
         preview_y = stats_y + len(stats_lines) + 1
-        self.stdscr.addstr(preview_y, stats_x, "Preview random:")
-        for i, line in enumerate(node.preview_random[:3]):
-            self.stdscr.addstr(preview_y + 1 + i, stats_x, line[: width - stats_x - 2])
-        div_y = preview_y + 1 + max(1, len(node.preview_random[:3])) + 1
-        self.stdscr.addstr(div_y, stats_x, "Preview diverse:")
-        for i, line in enumerate(node.preview_diverse[:3]):
-            self.stdscr.addstr(div_y + 1 + i, stats_x, line[: width - stats_x - 2])
+        if self.browser_leaf_mode == "neighbors" and selected is not None and selected.anchor_preview_text:
+            self.stdscr.addstr(preview_y, stats_x, "Anchor preview:")
+            for i, line in enumerate(textwrap.wrap(selected.anchor_preview_text, max(20, width - stats_x - 2))[:3]):
+                self.stdscr.addstr(preview_y + 1 + i, stats_x, line[: width - stats_x - 2])
+            preview_y += 5
+        if selected is not None:
+            self.stdscr.addstr(preview_y, stats_x, "Document preview:")
+            for i, line in enumerate(textwrap.wrap(selected.preview_text, max(20, width - stats_x - 2))[:6]):
+                self.stdscr.addstr(preview_y + 1 + i, stats_x, line[: width - stats_x - 2])
+        else:
+            self.stdscr.addstr(preview_y, stats_x, "Preview random:")
+            for i, line in enumerate(node.preview_random[:3]):
+                self.stdscr.addstr(preview_y + 1 + i, stats_x, line[: width - stats_x - 2])
+            div_y = preview_y + 1 + max(1, len(node.preview_random[:3])) + 1
+            self.stdscr.addstr(div_y, stats_x, "Preview diverse:")
+            for i, line in enumerate(node.preview_diverse[:3]):
+                self.stdscr.addstr(div_y + 1 + i, stats_x, line[: width - stats_x - 2])
 
-        if not node.children and not node.files and not node.stats:
+        if not node.children and not node.files and not node.stats and not self.browser_entries:
             self.stdscr.addstr(preview_y, 2, "Empty node (no stats or children found).")
 
-        footer = "UP/DOWN: select child | ENTER: descend | BACKSPACE: up | TAB: refresh | q: quit"
+        footer = (
+            "UP/DOWN: select doc | n: neighbors for selected doc | d: return to docs | BACKSPACE: up | /: search | TAB: refresh | q: quit"
+            if leaf else
+            "UP/DOWN: select child | ENTER: descend | BACKSPACE: up | /: search | TAB: refresh | q: quit"
+        )
         self.stdscr.addstr(height - 2, 2, footer[: width - 4])
 
     # Description:
@@ -928,23 +1114,110 @@ class HkmTuiApp:
         if self.browser_info is None:
             return
         node = self.browser_info
-        if key in (curses.KEY_DOWN, ord("j")) and node.children:
-            self.browser_cursor = min(self.browser_cursor + 1, len(node.children) - 1)
-        elif key in (curses.KEY_UP, ord("k")) and node.children:
+        leaf = bool(node.stats.get("is_leaf", False))
+        rows = self.browser_entries if leaf else node.children
+        if key in (curses.KEY_DOWN, ord("j")) and rows:
+            self.browser_cursor = min(self.browser_cursor + 1, len(rows) - 1)
+        elif key in (curses.KEY_UP, ord("k")) and rows:
             self.browser_cursor = max(0, self.browser_cursor - 1)
-        elif key in (curses.KEY_ENTER, 10, 13) and node.children:
+        elif key in (curses.KEY_ENTER, 10, 13) and node.children and not leaf:
             self.browser_path = node.children[self.browser_cursor]
             self.browser_info = _load_node(self.browser_path)
             self.browser_cursor = 0
+            self.browser_anchor_doc_id = None
+            self.browser_anchor_entry = None
+            self.browser_leaf_mode = "docs"
+            self._refresh_browser_entries()
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             parent = self.browser_path.parent if self.browser_path else None
-            if parent and (parent / "stats.json").exists():
+            if parent and (parent / "node.json").exists():
                 self.browser_path = parent
                 self.browser_info = _load_node(parent)
                 self.browser_cursor = 0
+                self.browser_anchor_doc_id = None
+                self.browser_anchor_entry = None
+                self.browser_leaf_mode = "docs"
+                self._refresh_browser_entries()
+        elif key in (ord("n"), ord("N")) and leaf and self._selected_browser_entry() is not None:
+            self.browser_anchor_entry = self._selected_browser_entry()
+            self.browser_anchor_doc_id = self.browser_anchor_entry.doc_id
+            self.browser_leaf_mode = "neighbors"
+            self.browser_cursor = 0
+            self._refresh_browser_entries()
+            self.message = f"Neighbor mode for {self.browser_anchor_entry.source_path or '<unknown>'}. Press d to return."
+        elif key in (ord("d"), ord("D")) and leaf:
+            self.browser_anchor_doc_id = None
+            self.browser_anchor_entry = None
+            self.browser_leaf_mode = "docs"
+            self.browser_cursor = 0
+            self._refresh_browser_entries()
+            self.message = "Document mode."
+        elif key in (ord("/"), ord("s"), ord("S")):
+            self.state = "search"
+            self.message = "Search mode: ENTER run | m toggle mode | +/- top_k | b browse."
         elif key in (KEY_TAB, 9):
             if self.browser_path:
                 self.browser_info = _load_node(self.browser_path)
+                self._refresh_browser_entries()
+
+    def _run_search(self) -> None:
+        if not self.searcher or not self.search_query.strip():
+            self.search_results = []
+            return
+        result = self.searcher.search({"text": self.search_query, "mode": self.search_mode, "top_k": self.search_top_k})
+        self.search_results = result.docs
+        self.search_cursor = 0
+        self.message = f"{len(self.search_results)} results."
+
+    def _draw_search(self, height: int, width: int) -> None:
+        self._write_line(2, f"Query: {self.search_query}")
+        self._write_line(3, f"Mode: {self.search_mode} | Top K: {self.search_top_k}")
+        list_width = max(30, width // 2 - 2)
+        self._write_line(5, "Results:")
+        max_rows = max(3, height - 8)
+        for i, hit in enumerate(self.search_results[:max_rows]):
+            line = f"{hit.source_path or '<unknown>'} [{hit.score:.3f}] {hit.preview_text}"
+            if i == self.search_cursor:
+                self.stdscr.attron(curses.A_REVERSE)
+            self.stdscr.addstr(6 + i, 2, line[: list_width - 2].ljust(list_width - 2))
+            if i == self.search_cursor:
+                self.stdscr.attroff(curses.A_REVERSE)
+        preview = self.search_results[self.search_cursor].preview_text if self.search_results else "No results."
+        preview_x = list_width + 4
+        self.stdscr.addstr(5, preview_x, "Preview:")
+        for i, line in enumerate(textwrap.wrap(preview, max(20, width - preview_x - 2))[: max_rows]):
+            self.stdscr.addstr(6 + i, preview_x, line[: width - preview_x - 2])
+        footer = "Type query | ENTER run | m mode | +/- top_k | UP/DOWN result | b browse | q quit"
+        self.stdscr.addstr(height - 2, 2, footer[: width - 4])
+        self.stdscr.move(2, min(width - 3, 9 + len(self.search_query)))
+
+    def _handle_search_key(self, key: int) -> None:
+        if key in (ord("b"), ord("B")):
+            self.state = "browse"
+            return
+        if key in (ord("m"), ord("M")):
+            self.search_mode = "token" if self.search_mode == "semantic" else "semantic"
+            return
+        if key in (ord("+"), ord("=")):
+            self.search_top_k += 1
+            return
+        if key == ord("-"):
+            self.search_top_k = max(1, self.search_top_k - 1)
+            return
+        if key in (curses.KEY_DOWN, ord("j")) and self.search_results:
+            self.search_cursor = min(self.search_cursor + 1, len(self.search_results) - 1)
+            return
+        if key in (curses.KEY_UP, ord("k")) and self.search_results:
+            self.search_cursor = max(0, self.search_cursor - 1)
+            return
+        if key in (curses.KEY_ENTER, 10, 13):
+            self._run_search()
+            return
+        if key in (curses.KEY_BACKSPACE, 127, 8):
+            self.search_query = self.search_query[:-1]
+            return
+        if 32 <= key <= 126:
+            self.search_query += chr(key)
 
 
 # --------------------------------------------------------------------------- #

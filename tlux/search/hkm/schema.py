@@ -55,6 +55,7 @@ class QuerySpec:
     * ``token_sequence`` - low-level token IDs (reserved for later HKM path).  
     """
     text: str = ""
+    mode: str = "semantic"
     embeddings: List = field(default_factory=list)
     token_sequence: List[int] = field(default_factory=list)
     label_include: Dict[str, List[str]] = field(default_factory=dict)
@@ -69,6 +70,12 @@ class Hit:
     doc_id: int
     score: float
     span: Tuple[int, int]
+    source_path: str = ""
+    preview_text: str = ""
+    query_mode: str = ""
+    anchor_span: Tuple[int, int] = (0, 0)
+    anchor_source_path: str = ""
+    anchor_preview_text: str = ""
 
 
 @dataclass

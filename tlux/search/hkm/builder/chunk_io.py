@@ -258,6 +258,7 @@ class ChunkWriter:
             self._embedding_writer,
             self._index_writer,
             self._metadata_writer,
+            self._blob_writer,
         ):
             writer.flush()
 
