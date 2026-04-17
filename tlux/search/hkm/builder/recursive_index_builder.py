@@ -78,6 +78,7 @@ def _write_node_manifest(node_dir: str, docs_dir: str, depth: int, doc_count: in
 def build_cluster_index(
     index_root_directory: str,
     max_cluster_count: int = MAX_CLUSTER_COUNT,
+    leaf_embedding_limit: int = 1024,
     leaf_doc_limit: int = 2,
     max_n_gram: int = 3,
     n_gram_fp_rate: float = 0.01,
@@ -108,7 +109,13 @@ def build_cluster_index(
         np.save(os.path.join(hkm_dir, "preview_diverse.npy"), preview_div)
 
     cluster_limit = min(int(sample.shape[0]) if sample.ndim else 0, max_cluster_count)
-    is_leaf = sample.size == 0 or cluster_limit <= 1 or document_count <= leaf_doc_limit or depth >= max_depth
+    is_leaf = (
+        sample.size == 0
+        or cluster_limit <= 1
+        or embedding_count <= leaf_embedding_limit
+        or (leaf_embedding_limit <= 0 < leaf_doc_limit and document_count <= leaf_doc_limit)
+        or depth >= max_depth
+    )
     children = [] if is_leaf else [f"cluster_{cluster_id:04d}" for cluster_id in range(cluster_limit)]
     stats = {"doc_count": int(document_count), "emb_count": int(embedding_count), "leaf": bool(is_leaf), "depth": depth}
     with open(os.path.join(hkm_dir, "stats.json"), "w", encoding="ascii") as f_stats:
@@ -156,6 +163,7 @@ def build_cluster_index(
             "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
             sub_hkm_dir,
             max_cluster_count,
+            leaf_embedding_limit,
             leaf_doc_limit,
             max_n_gram,
             n_gram_fp_rate,

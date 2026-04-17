@@ -54,6 +54,7 @@ def build_search_index(
     tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
     metadata_schema: str = "[['source_path','bytes'],['file_kind','str'],['num_bytes','float'],['tags','list'],['attrs','dict']]",
     max_k: int = 8,
+    leaf_embedding_limit: int = 1024,
     leaf_doc_limit: int = 1024,
     max_n_gram: int = 3,
     n_gram_fp_rate: float = 0.01,
@@ -102,6 +103,7 @@ def build_search_index(
         "build_config": {
             "num_workers": num_workers,
             "max_cluster_count": max_k,
+            "leaf_embedding_limit": leaf_embedding_limit,
             "leaf_doc_limit": leaf_doc_limit,
             "max_n_gram": max_n_gram,
             "n_gram_fp_rate": n_gram_fp_rate,
@@ -151,6 +153,7 @@ def build_search_index(
         "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
         index_root,
         max_cluster_count=max_k,
+        leaf_embedding_limit=leaf_embedding_limit,
         leaf_doc_limit=leaf_doc_limit,
         max_n_gram=max_n_gram,
         n_gram_fp_rate=n_gram_fp_rate,

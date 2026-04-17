@@ -33,6 +33,7 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
         index_root=str(tmp_path),
         num_workers=2,
         max_k=2,
+        leaf_embedding_limit=1,
         leaf_doc_limit=1,
         seed=0,
     )
@@ -58,6 +59,8 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     assert index_manifest["max_n_gram"] == 3
     assert index_manifest["n_gram_fp_rate"] == pytest.approx(0.01)
     assert index_manifest["metadata_schema"][0] == ["source_path", "bytes"]
+    assert index_manifest["build_config"]["leaf_embedding_limit"] == 1
+    assert index_manifest["build_config"]["leaf_doc_limit"] == 1
 
     root_node = json.loads((Path(hkm_root) / "node.json").read_text(encoding="utf-8"))
     assert "children" in root_node
@@ -197,6 +200,7 @@ def test_token_search_uses_hierarchical_filters(tmp_path: Path, monkeypatch) -> 
         index_root=str(tmp_path),
         num_workers=2,
         max_k=2,
+        leaf_embedding_limit=1,
         leaf_doc_limit=1,
         seed=0,
     )
@@ -208,3 +212,30 @@ def test_token_search_uses_hierarchical_filters(tmp_path: Path, monkeypatch) -> 
     hits = searcher.search({"token_sequence": [1, 2], "top_k": 10})
     assert sorted(hit.source_path for hit in hits.docs) == ["doc0.txt", "doc1.txt"]
     assert not searcher.search({"token_sequence": [99, 100], "top_k": 10}).docs
+
+
+def test_leaf_split_uses_embedding_count_not_doc_count(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    for i, start in enumerate((0, 1000)):
+        (docs_src / f"doc{i}.txt").write_text(" ".join(str(v) for v in range(start, start + 80)), encoding="utf-8")
+
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(tmp_path),
+        num_workers=1,
+        max_k=2,
+        leaf_embedding_limit=4,
+        leaf_doc_limit=100,
+        seed=0,
+    )
+    drain_jobs(FileSystem(root=str(tmp_path / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    root_node = json.loads((tmp_path / "hkm" / "node.json").read_text(encoding="utf-8"))
+    assert root_node["doc_count"] == 2
+    assert root_node["embedding_count"] == 8
+    assert not root_node["is_leaf"]
+    assert root_node["children"]
