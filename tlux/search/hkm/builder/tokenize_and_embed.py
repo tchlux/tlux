@@ -13,12 +13,12 @@ import numpy as np
 
 try:
     from .. import embedder
-    from ..fs import FileSystem
+    from ..fs import FileSystem, make_filesystem
     from ..tools.unique_count_estimator import UniqueCounter
     from ..tools.rank_estimator import RankEstimator
 except ImportError:  # pragma: no cover
     from tlux.search.hkm import embedder
-    from tlux.search.hkm.fs import FileSystem
+    from tlux.search.hkm.fs import FileSystem, make_filesystem
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
     from tlux.search.hkm.tools.rank_estimator import RankEstimator
 
@@ -44,7 +44,7 @@ def process_documents(
     document_id_base: int = 0,
 ) -> Tuple[str, str]:
     """Tokenize + embed batches, emit chunk directories and summary stats."""
-    file_system = FileSystem() if fs_root is None else FileSystem(root=fs_root)
+    file_system = make_filesystem(fs_root)
     document_output_directory = file_system.mkdir(document_output_directory, exist_ok=True)
     summary_output_directory = file_system.mkdir(summary_output_directory, exist_ok=True)
     print(f"[worker] start output_dir={document_output_directory} summary_dir={summary_output_directory}", flush=True)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # File system abstraction used by the HKM search toolkit.
 # 
 # This module provides a minimal, test-friendly file system interface.
@@ -16,6 +18,7 @@
 
 import os
 import shutil
+import importlib
 from dataclasses import dataclass
 from typing import List
 
@@ -186,6 +189,37 @@ class FileSystem:
                     ) from e
         else:
             os.remove(path)
+
+
+# Return the configured filesystem class, defaulting to FileSystem.
+#
+# Arguments:
+#   ().
+#
+# Returns:
+#   (type[FileSystem]): Filesystem class to instantiate.
+#
+def filesystem_class() -> type[FileSystem]:
+    spec = os.environ.get("HKM_FILESYSTEM_CLASS", "").strip()
+    if not spec:
+        return FileSystem
+    module_name, _, class_name = spec.rpartition(".")
+    if not module_name:
+        raise ValueError(f"Invalid HKM_FILESYSTEM_CLASS {spec!r}.")
+    return getattr(importlib.import_module(module_name), class_name)
+
+
+# Construct the configured filesystem rooted at *root*.
+#
+# Arguments:
+#   root (str | None): Optional filesystem root.
+#
+# Returns:
+#   (FileSystem): Filesystem instance.
+#
+def make_filesystem(root: str | None = None) -> FileSystem:
+    cls = filesystem_class()
+    return cls() if root is None else cls(root=root)
 
 if __name__ == "__main__":
     # Sanity check: write-read-rename cycle

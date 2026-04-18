@@ -1,25 +1,15 @@
-import tempfile
 from pathlib import Path
 
 from tlux.search.hkm import jobs
-
-
-def _setup_jobs_root() -> str:
-    root = Path(tempfile.mkdtemp()) / "jobs"
-    root.mkdir(parents=True, exist_ok=True)
-    fs = jobs.FileSystem(str(root))
-    for bucket in ("ids", "waiting", "queued", "running", "succeeded", "failed", "next"):
-        fs.mkdir(fs.join(bucket), exist_ok=True)
-    jobs.JOBS_ROOT = str(root)
-    return str(root)
+from tlux.search.hkm.tests.support import setup_jobs_root
 
 
 def test_resources_capture_cpu(tmp_path) -> None:
     old = jobs.JOBS_ROOT
     try:
-        _setup_jobs_root()
+        setup_jobs_root(tmp_path / "jobs")
         job = jobs.run_job("tlux.search.hkm.tests.job_runner_helper.job_cpu_burner")
-        jobs.watcher(fs=jobs.FileSystem(jobs.JOBS_ROOT), max_workers=1)
+        jobs.watcher(fs=setup_jobs_root(jobs.JOBS_ROOT), max_workers=1)
         job.wait_for_completion(poll_interval=0.05)
         assert job.status == "SUCCEEDED"
         res_path = Path(job.path) / "resources"

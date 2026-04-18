@@ -10,7 +10,7 @@ from typing import List
 import numpy as np
 
 from .chunk_io import ChunkReader
-from ..fs import FileSystem
+from ..fs import FileSystem, make_filesystem
 from ..schema import DOC_INDEX_DTYPE
 
 
@@ -46,7 +46,7 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
 
 def run_consolidate(index_root: str, fs_root: str | None = None) -> None:
     """Entry point for job execution."""
-    fs = FileSystem() if fs_root is None else FileSystem(root=fs_root)
+    fs = make_filesystem(fs_root)
     consolidate(fs, index_root)
 
 
@@ -56,4 +56,4 @@ if __name__ == "__main__":  # pragma: no cover
     parser = argparse.ArgumentParser(description="Consolidate worker chunk outputs.")
     parser.add_argument("index_root")
     args = parser.parse_args()
-    consolidate(FileSystem(), args.index_root)
+    consolidate(make_filesystem(), args.index_root)

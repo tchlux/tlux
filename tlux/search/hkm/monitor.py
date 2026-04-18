@@ -9,6 +9,7 @@
 #     pct = gpu_util_percent()
 #     print(f"GPU utilization: {pct:.1f}%")
 
+from __future__ import annotations
 
 import ctypes as C
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -18,6 +19,17 @@ from .sampler import sample_embeddings
 
 MAX_CLUSTER_COUNT: int = 1024
 RANDOM_SEED: int = 42
+
+
+def _wait_for_paths(paths: List[Path], timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while True:
+        if all(path.exists() for path in paths):
+            return
+        if time.time() >= deadline:
+            missing = [str(path) for path in paths if not path.exists()]
+            raise FileNotFoundError(f"Timed out waiting for published paths: {missing}")
+        time.sleep(0.005)
 
 
 def _count_documents(docs_dir: str) -> int:
@@ -131,6 +143,11 @@ def build_cluster_index(
             cluster_centers, _ = kmeans(sample, cluster_limit, seed=seed)
         np.save(os.path.join(hkm_dir, "centroids.npy"), cluster_centers)
     _write_node_manifest(hkm_dir, docs_dir, depth, document_count, embedding_count, is_leaf, children)
+    _wait_for_paths([
+        Path(hkm_dir) / "n_gram_counter.bytes",
+        Path(hkm_dir) / "node.json",
+        *([Path(hkm_dir) / "centroids.npy"] if (not is_leaf) else []),
+    ])
 
     assignment_jobs: List[Any] = []
     for worker_index, chunk_path in enumerate(sorted(Path(docs_dir).rglob("*.hkmchunk"))):

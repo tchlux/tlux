@@ -1,19 +1,9 @@
 import os
-import tempfile
 from pathlib import Path
 
 from tlux.search.hkm import jobs
 from tlux.search.hkm.tests.job_runner_helper import run_default_worker_job
-
-
-def _setup_jobs_root() -> str:
-    root = Path(tempfile.mkdtemp()) / "jobs"
-    root.mkdir(parents=True, exist_ok=True)
-    fs = jobs.FileSystem(str(root))
-    for bucket in ("ids", "waiting", "queued", "running", "succeeded", "failed", "next"):
-        fs.mkdir(fs.join(bucket), exist_ok=True)
-    jobs.JOBS_ROOT = str(root)
-    return str(root), fs
+from tlux.search.hkm.tests.support import setup_jobs_root
 
 
 def test_worker_logs_and_resources(tmp_path, monkeypatch):
@@ -26,7 +16,7 @@ def test_worker_logs_and_resources(tmp_path, monkeypatch):
 
     # Fake embedder for speed but still exercise worker path + logging.
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
-    jobs_root, fs = _setup_jobs_root()
+    fs = setup_jobs_root(tmp_path / "jobs")
 
     job = jobs.run_job("tlux.search.hkm.tests.job_runner_helper.run_default_worker_job", str(docs_dir), str(out_dir))
     jobs.watcher(fs=fs, max_workers=1)

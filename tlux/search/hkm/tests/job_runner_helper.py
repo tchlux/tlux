@@ -21,6 +21,13 @@ def job_with_output() -> int:
     return 0
 
 
+def job_fail() -> int:
+    print("[job_fail] start")
+    time.sleep(0.05)
+    print("[job_fail] fail")
+    return 1
+
+
 def job_cpu_burner() -> int:
     end = time.time() + 5.0
     val = 0.0

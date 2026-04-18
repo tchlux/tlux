@@ -13,7 +13,7 @@ import numpy as np
 
 from ..builder.chunk_io import ChunkReader
 from ..embedder import get_backend
-from ..fs import FileSystem
+from ..fs import FileSystem, make_filesystem
 from ..schema import Hit, QuerySpec, SearchResult
 from ..tools.value_seen_estimator import ValueObserver
 
@@ -57,7 +57,7 @@ class Searcher:
     @classmethod
     def from_index_root(cls, index_root: str, fs: FileSystem | None = None) -> "Searcher":
         root_path = Path(index_root).resolve()
-        fs = fs or FileSystem(root=str(root_path))
+        fs = fs or make_filesystem(str(root_path))
         manifest = root_path / "index.json"
         if not manifest.exists():
             raise FileNotFoundError(f"Missing canonical index manifest: {manifest}")

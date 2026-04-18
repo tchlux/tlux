@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -13,10 +14,21 @@ import numpy as np
 
 from .chunk_io import ChunkReader, ChunkWriter
 from .sampler import sample_embeddings
-from ..fs import FileSystem
+from ..fs import FileSystem, make_filesystem
 from ..tools.preview import select_diverse, select_random
 from ..tools.unique_count_estimator import UniqueCounter
 from ..tools.value_seen_estimator import ValueObserver
+
+
+def _wait_for_paths(paths: List[Path], timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while True:
+        if all(path.exists() for path in paths):
+            return
+        if time.time() >= deadline:
+            missing = [str(path) for path in paths if not path.exists()]
+            raise FileNotFoundError(f"Timed out waiting for published paths: {missing}")
+        time.sleep(0.005)
 
 
 def _doc_assignment(reader: ChunkReader, centroids: np.ndarray) -> Dict[int, list]:
@@ -58,7 +70,7 @@ def route_chunk(
     fs_root: str | None = None,
     force_balance: bool = False,
 ) -> None:
-    fs = FileSystem() if fs_root is None else FileSystem(root=fs_root)
+    fs = make_filesystem(fs_root)
     reader = ChunkReader(str(chunk_path), metadata_schema=[])
     centroids = np.load(centroids_path) if centroids_path else np.empty((0, 0), dtype=np.float32)
     node_counter = _load_counter(os.path.join(hkm_dir, "n_gram_counter.bytes"))
@@ -109,7 +121,7 @@ def route_embeddings(
     fs_root: str | None = None,
     force_balance: bool = False,
 ) -> None:
-    fs = FileSystem() if fs_root is None else FileSystem(root=fs_root)
+    fs = make_filesystem(fs_root)
     centroids = np.load(centroids_path)
     cluster_count = centroids.shape[0]
     writers: Dict[int, ChunkWriter] = {}
@@ -176,6 +188,7 @@ def finalize_node(
         "estimated_unique_ngrams": int(math.ceil(node_counter.estimate(0.0)[0])),
     })
     node_manifest_path.write_text(json.dumps(node, separators=(",", ":")), encoding="utf-8")
+    published = [node_dir / "n_gram_counter.bytes", node_dir / "n_gram_exists.bytes", node_manifest_path]
     depth = int(node.get("depth", 0)) + 1
     for cid, child_name in enumerate(node.get("children", [])):
         child_dir = node_dir / child_name
@@ -210,4 +223,6 @@ def finalize_node(
             "n_gram_exists_path": "",
             "estimated_unique_ngrams": int(math.ceil(child_counter.estimate(0.0)[0])),
         }, separators=(",", ":")), encoding="utf-8")
+        published.extend([child_dir / "n_gram_counter.bytes", child_dir / "node.json"])
+    _wait_for_paths(published)
     shutil.rmtree(temp_root, ignore_errors=True)

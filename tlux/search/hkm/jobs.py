@@ -16,6 +16,8 @@
 # >>> print(job.stdout)
 #
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -28,10 +30,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 try:
-    from .fs import FileSystem
+    from .fs import FileSystem, make_filesystem
     from .monitor import proc_usage # pyright: ignore
 except:
-    from tlux.search.hkm.fs import FileSystem
+    from tlux.search.hkm.fs import FileSystem, make_filesystem
     from tlux.search.hkm.monitor import proc_usage # pyright: ignore
 
 CODE_ROOT: str = os.path.abspath(os.path.dirname(__file__))
@@ -40,6 +42,7 @@ JOBS_ROOT: str = os.environ.get("HKM_JOBS_ROOT", os.path.join(CODE_ROOT, "jobs")
 JOB_BUCKETS: tuple[str, ...] = ("ids", "waiting", "queued", "running", "succeeded", "failed", "next", "workers")
 ID_WIDTH: int = 9
 STATUS_VALUES: set[str] = {"WAITING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
+ORPHAN_GRACE_SECONDS: float = 0.1
 if __name__ == "__main__":
     MODULE_PATH: str = os.path.splitext(os.path.basename(__file__))[0]
 else:
@@ -77,10 +80,15 @@ class Job:
     #   active_job (subprocess.Popen | None): Optional running process handle.
     #
     def __init__(self, fs: FileSystem, path: Union[str, Path], *,
-                 active_job: Optional[subprocess.Popen] = None) -> None:
+                 active_job: Optional[subprocess.Popen] = None,
+                 config: Optional[Dict[str, Any]] = None) -> None:
         self._fs: FileSystem = fs
         self.job = active_job
-        self._load(Path(path))
+        self.path = str(path)
+        if config is None:
+            self._load(Path(path))
+        else:
+            self._load_config(Path(path), config)
         if active_job is not None:
             self.hostname = socket.gethostname()
             self.monitor_pid = active_job.pid
@@ -322,20 +330,16 @@ class Job:
         if self.path:
             return self._load(self.path)
 
-    # Load job metadata from job_config file and initialize attributes.
+    # Load in-memory job metadata and initialize attributes.
     #
     # Parameters:
     #   path (Path): Path to the job directory.
+    #   data (Dict[str, Any]): Job metadata payload.
     #
-    # Raises:
-    #   FileNotFoundError: If job_config is missing.
-    #   RuntimeError: If status is invalid or data is corrupt.
+    # Returns:
+    #   (None): Attributes updated in place.
     #
-    def _load(self, path: str | Path) -> None:
-        cfg_path = self._fs.join(str(path), "job_config")
-        if not self._fs.exists(cfg_path):
-            raise FileNotFoundError(f"job_config missing at '{cfg_path}'.")
-        data: Dict[str, Any] = json.loads(self._fs.read(cfg_path).decode())
+    def _load_config(self, path: str | Path, data: Dict[str, Any]) -> None:
         status: str = data.get("status", "")
         if status not in STATUS_VALUES:
             raise RuntimeError(f"Corrupt status '{status}' for job '{path}'.")
@@ -351,6 +355,21 @@ class Job:
         self.monitor_pid = data.get("monitor_pid", data.get("watcher_pid"))
         self.executor_pid = data.get("executor_pid")
         self.path = str(path)
+
+    # Load job metadata from job_config file and initialize attributes.
+    #
+    # Parameters:
+    #   path (Path): Path to the job directory.
+    #
+    # Raises:
+    #   FileNotFoundError: If job_config is missing.
+    #   RuntimeError: If status is invalid or data is corrupt.
+    #
+    def _load(self, path: str | Path) -> None:
+        cfg_path = self._fs.join(str(path), "job_config")
+        if not self._fs.exists(cfg_path):
+            raise FileNotFoundError(f"job_config missing at '{cfg_path}'.")
+        self._load_config(path, json.loads(self._fs.read(cfg_path).decode()))
 
 
 # Ensure the filesystem contains the standard job buckets.
@@ -384,7 +403,159 @@ def set_jobs_root(path: str, reset: bool = False) -> FileSystem:
     global JOBS_ROOT
     JOBS_ROOT = root
     os.environ["HKM_JOBS_ROOT"] = root
-    return ensure_jobs_root(FileSystem(root))
+    return ensure_jobs_root(make_filesystem(root))
+
+
+# Return the first visible bucket name containing *job_id*.
+#
+# Arguments:
+#   fs (FileSystem): Job-root filesystem.
+#   job_id (str): Job identifier.
+#
+# Returns:
+#   (str | None): Matching uppercase status or None.
+#
+def job_status(fs: FileSystem, job_id: str) -> str | None:
+    for status in ("FAILED", "SUCCEEDED", "RUNNING", "QUEUED", "WAITING"):
+        if fs.exists(fs.join(status.lower(), job_id)):
+            return status
+    return None
+
+
+# Move a waiting job into failed with a persisted reason.
+#
+# Arguments:
+#   fs (FileSystem): Job-root filesystem.
+#   job_id (str): Job identifier.
+#   reason (str): Failure reason.
+#
+# Returns:
+#   (None): Waiting job failed if still claimable.
+#
+def fail_waiting_job(fs: FileSystem, job_id: str, reason: str) -> None:
+    waiting_path = fs.join("waiting", job_id)
+    failed_path = fs.join("failed", job_id)
+    if not fs.rename(waiting_path, failed_path):
+        return
+    job = Job(fs=fs, path=fs.join("ids", job_id))
+    job.status = "FAILED"
+    job.status_reason = reason
+    job.end_ts = time.time()
+    job._save()
+
+
+# Reconcile waiting jobs until they converge to queued or failed states.
+#
+# Arguments:
+#   fs (FileSystem): Job-root filesystem.
+#
+# Returns:
+#   (None): Waiting jobs updated in place.
+#
+def reconcile_waiting_jobs(fs: FileSystem) -> None:
+    waiting_ids = sorted(fs.listdir("waiting")) if fs.exists("waiting") else []
+    active = any(fs.listdir(bucket) for bucket in ("workers", "queued", "running"))
+    now = time.time()
+    for job_id in waiting_ids:
+        upstream_dir = fs.join("ids", job_id, "upstream_jobs")
+        upstream_ids = sorted(fs.listdir(upstream_dir)) if fs.exists(upstream_dir) else []
+        orphan_path = fs.join("ids", job_id, "orphaned_at")
+        failed_upstreams = [upstream_id for upstream_id in upstream_ids if job_status(fs, upstream_id) == "FAILED"]
+        if failed_upstreams:
+            fail_waiting_job(fs, job_id, f"Upstream job {failed_upstreams[0]} failed.")
+            continue
+        if not upstream_ids:
+            if fs.rename(fs.join("waiting", job_id), fs.join("queued", job_id)):
+                job = Job(fs=fs, path=fs.join("ids", job_id))
+                job.status = "QUEUED"
+                job._save()
+            if fs.exists(orphan_path):
+                try:
+                    fs.remove(orphan_path)
+                except Exception:
+                    pass
+            continue
+        if active:
+            if fs.exists(orphan_path):
+                try:
+                    fs.remove(orphan_path)
+                except Exception:
+                    pass
+            continue
+        if not fs.exists(orphan_path):
+            fs.write(orphan_path, str(now).encode(), overwrite=True)
+            continue
+        if now - float(fs.read(orphan_path).decode()) >= ORPHAN_GRACE_SECONDS:
+            fail_waiting_job(fs, job_id, "WAITING remained blocked with no active watchers or runnable jobs.")
+
+
+# Fail running jobs whose watcher process has disappeared.
+#
+# Arguments:
+#   fs (FileSystem): Job-root filesystem.
+#
+# Returns:
+#   (None): Stale running jobs moved to failed.
+#
+def reap_running_jobs(fs: FileSystem) -> None:
+    running_ids = sorted(fs.listdir("running")) if fs.exists("running") else []
+    for job_id in running_ids:
+        try:
+            job = Job(fs=fs, path=fs.join("ids", job_id))
+        except Exception:
+            continue
+        pid = getattr(job, "monitor_pid", None)
+        if pid is None:
+            if (
+                getattr(job, "executor_pid", None) is None
+                and (
+                    ((job.start_ts is not None) and (time.time() - float(job.start_ts) >= ORPHAN_GRACE_SECONDS))
+                    or ((job.start_ts is None) and (job.submit_ts is not None) and (time.time() - float(job.submit_ts) >= ORPHAN_GRACE_SECONDS))
+                )
+            ):
+                if not fs.rename(fs.join("running", job_id), fs.join("failed", job_id)):
+                    continue
+                job.status = "FAILED"
+                job.status_reason = "Watcher claimed the job but disappeared before launching it."
+                job.exit_code = -9 if job.exit_code is None else job.exit_code
+                job.end_ts = time.time()
+                job._save()
+            continue
+        try:
+            os.kill(int(pid), 0)
+            continue
+        except OSError:
+            pass
+        for target_pid in (getattr(job, "executor_pid", None),):
+            if target_pid:
+                try:
+                    os.kill(int(target_pid), signal.SIGKILL)
+                except Exception:
+                    pass
+        if not fs.rename(fs.join("running", job_id), fs.join("failed", job_id)):
+            continue
+        job.status = "FAILED"
+        job.status_reason = "Watcher disappeared while the job was RUNNING."
+        job.exit_code = -9 if job.exit_code is None else job.exit_code
+        job.end_ts = time.time()
+        job._save()
+
+
+# Wait until a renamed path is visible on disk for direct file access.
+#
+# Arguments:
+#   path (str): Absolute path expected to appear.
+#   timeout (float): Maximum wait in seconds.
+#
+# Returns:
+#   (None): Path is now visible.
+#
+def wait_for_path(path: str, timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while not os.path.exists(path):
+        if time.time() >= deadline:
+            raise FileNotFoundError(f"Timed out waiting for path visibility: {path}")
+        time.sleep(0.005)
 
 
 
@@ -441,6 +612,7 @@ def create_job(
     cfg: Dict[str, Any] = {
         "id": job_id,
         "status": bucket.upper(),
+        "status_reason": "",
         "exit_code": None,
         "submit_ts": now_ts,
         "start_ts": None,
@@ -469,7 +641,7 @@ def create_job(
     if not fs.mkdir(job_state_dir, exist_ok=False):
         raise RuntimeError(f"Failed to assign job dir into {repr(bucket)}: {job_id_dir} -> {job_state_dir}")
     # Return the Job object.
-    return Job(fs=fs, path=job_id_dir)
+    return Job(fs=fs, path=job_id_dir, config=cfg)
 
 
 # Run a job using the default file system rooted at JOBS_ROOT.
@@ -489,7 +661,7 @@ def run_job(
     dependencies: Iterable[Job] = (),
     **kwargs: Any,
 ) -> Job:
-    default_fs = ensure_jobs_root(FileSystem(JOBS_ROOT))
+    default_fs = ensure_jobs_root(make_filesystem(JOBS_ROOT))
     new_job = create_job(
         default_fs,
         command,
@@ -499,7 +671,8 @@ def run_job(
     )
     # Ensure a worker is running (up to the max).
     max_workers = max(1, int(os.environ.get("HKM_MAX_WORKERS", "1")))
-    watcher(launch=True, max_workers=max_workers)
+    if os.environ.get("HKM_DISABLE_WATCHER_LAUNCH", "") != "1":
+        watcher(launch=True, max_workers=max_workers)
     # return _launch_worker(fs=fs, job_dir=job_dir)
     return new_job
 
@@ -519,7 +692,7 @@ def drain_jobs(
     max_workers: int = 1,
     poll_interval: float = 0.05,
 ) -> None:
-    fs = ensure_jobs_root(fs or FileSystem(JOBS_ROOT))
+    fs = ensure_jobs_root(fs or make_filesystem(JOBS_ROOT))
     while True:
         watcher(fs=fs, max_workers=max_workers)
         pending = sum(len(fs.listdir(bucket)) for bucket in ("waiting", "queued", "running"))
@@ -542,7 +715,7 @@ def drain_jobs(
 def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=False) -> None:
     # Otherwise assume this is the primary process.
     if fs is None:
-        fs = FileSystem(JOBS_ROOT)
+        fs = make_filesystem(JOBS_ROOT)
     fs = ensure_jobs_root(fs)
     if (max_workers == 1) and os.environ.get("HKM_MAX_WORKERS", "").isdigit():
         max_workers = max(1, int(os.environ["HKM_MAX_WORKERS"]))
@@ -552,6 +725,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), fs.root, str(max_workers)],
             env={
+                **os.environ,
                 "HKM_JOBS_ROOT": fs.root,
                 "HKM_MAX_WORKERS": str(max_workers),
                 "PYTHONPATH": CODE_ROOT + ":" + REPO_ROOT + ":" + os.environ.get("PYTHONPATH", ""),
@@ -580,6 +754,7 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
             except Exception:
                 pass
     registered_watchers = live_watchers
+    reap_running_jobs(fs)
     if len(registered_watchers) >= max_workers:
         # a = "are" if len(registered_watchers) > 1 else "is"
         # w = "watchers" if len(registered_watchers) > 1 else "watcher"
@@ -604,30 +779,21 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
     sys.stderr = out_file
     # Check for queued jobs, execute "worker" on first available.
     #   - reserve a queued job by moving it from 'queued' to 'running' (if successful, it is owned).
-    while ((next_jid := next(iter(fs.listdir("queued")+[None]))) is not None):
+    while ((next_jid := next(iter(sorted(fs.listdir("queued")) + [None]))) is not None):
         if os.getppid() == 1:
             break
-        # Move the job to "running" to claim it.
         try:
-            fs.rename(fs.join("queued", next_jid), fs.join("running", next_jid))
             job = Job(fs=fs, path=fs.join("ids", next_jid))
+            if not fs.rename(fs.join("queued", next_jid), fs.join("running", next_jid)):
+                continue
+            wait_for_path(fs.join("running", next_jid))
             worker(fs=fs, job=job)
         except: # Exception as e:
             # print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
             continue
     # All jobs completed, moving on to cleanup, indicate by saying this watcher is no longer active.
     fs.remove(wdir)
-    # Check for unsatisfiable jobs (waiting with nothing running).
-    if fs.exists("waiting"):
-        while ((next_jid := next(iter(fs.listdir("waiting")+[None]))) is not None) and (len(fs.listdir("running")) == 0):
-            try:
-                fs.rename(fs.join("waiting", next_jid), fs.join("failed", next_jid))
-                job = Job(fs=fs, path=fs.join("ids", next_jid))
-                job.status = "FAILED"
-                job.status_reason = "WAITING but no jobs are RUNNING"
-                job._save()
-            except:
-                pass
+    reconcile_waiting_jobs(fs)
     # Reset standard output streams.
     sys.stdout = stdout
     sys.stderr = stderr
@@ -738,14 +904,17 @@ def worker(fs: FileSystem, job: Job) -> Job:
             try:
                 j = Job(fs=fs, path=fs.join("ids", did))
                 if (j.status != "FAILED"):
+                    if not fs.rename(wjob, fs.join("queued", did)):
+                        continue
                     j.status = "QUEUED"
                     j._save()
-                    fs.rename(wjob, fs.join("queued", did))
                     # Ensure a watcher exists to execute the job.
-                    watcher(fs=fs, launch=True)
+                    if os.environ.get("HKM_DISABLE_WATCHER_LAUNCH", "") != "1":
+                        watcher(fs=fs, launch=True)
             except: # Exception as e:
                 # print(f"[jobs.WORKER] Failed to move downstream {did} into QUEUED state: {e}", file=sys.stderr, flush=True)
                 pass
+    reconcile_waiting_jobs(fs)
     # TODO: Log the downstreams into the config at time of launching and delete the next directory (since it will not be watched further).
     # # Remove the "next" directory indicating it has been processed.
     # fs.remove(next_dir)
@@ -765,7 +934,7 @@ if __name__ == "__main__":
         if CODE_ROOT not in sys.path:
             sys.path.insert(0, CODE_ROOT)
         watcher(
-            fs=FileSystem(sys.argv[1]),
+            fs=make_filesystem(sys.argv[1]),
             max_workers=int(sys.argv[2]) if (len(sys.argv) > 2 and sys.argv[2].isdigit()) else 1,
         )
     else:
