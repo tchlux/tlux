@@ -1,5 +1,7 @@
 # Incremental Builds
 
+Status: next.
+
 Goal: avoid full rebuilds when only part of a dataset changed.
 
 Why it matters:

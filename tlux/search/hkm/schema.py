@@ -2,7 +2,7 @@
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 
 # ---------------------------------------------------------------------------
 # Configuration constants
@@ -82,6 +82,8 @@ class QuerySpec:
     label_include: Dict[str, List[str]] = field(default_factory=dict)
     numeric_range: Dict[str, Tuple] = field(default_factory=dict)
     top_k: int = 10
+    offset: int = 0
+    filters: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -131,3 +133,8 @@ class SearchResult:
     """Container for search hits."""
 
     docs: List[Hit]
+    offset: int = 0
+    limit: int = 10
+    count: int = 0
+    next_offset: int | None = None
+    query: Dict[str, Any] = field(default_factory=dict)

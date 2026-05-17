@@ -66,6 +66,28 @@ Search an existing index:
 tlux/search/hkm/bin/hkm-search idx query.json
 ```
 
+`query.json` uses the stable v1 query shape:
+
+```json
+{
+  "text": "job scheduler",
+  "mode": "hybrid",
+  "top_k": 10,
+  "offset": 0,
+  "filters": {
+    "path_include": ["*.py"],
+    "path_exclude": ["tests/*"],
+    "file_kind": [".py"]
+  }
+}
+```
+
+`mode` defaults to `hybrid` and may be `token`, `semantic`, or `hybrid`.
+`top_k` is the page size, `offset` is zero-based pagination, and filters are
+optional metadata filters over source path globs and file kind suffixes.
+The CLI prints one JSON object with `docs`, `offset`, `limit`, `count`,
+`next_offset`, and the normalized `query`.
+
 The build CLI prints the root build job id. Jobs are stored under `idx/.hkm_jobs` by default.
 
 ## Current on-disk layout
@@ -116,6 +138,8 @@ The canonical query-time manifests and token artifacts are:
 
 Search results currently return:
 
+- `offset`, `limit`, `count`, `next_offset`, and normalized `query`
+- `docs`, each containing:
 - `doc_id`
 - `score`
 - `span`

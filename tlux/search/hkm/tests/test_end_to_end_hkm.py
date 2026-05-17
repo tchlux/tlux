@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -243,6 +244,52 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
     searcher._merge_hybrid_hit(grouped, duplicate)
     assert len(grouped) == 1
     assert {"token", "semantic", "path", "title", "preview"} <= set(grouped[default_hits[0].source_path].match_reasons)
+
+    page = searcher.search({"text": "alpha", "top_k": 1})
+    assert page.offset == 0
+    assert page.limit == 1
+    assert page.count >= 1
+    assert page.query["mode"] == "hybrid"
+    assert page.docs[0].source_path == "alpha_report.txt"
+    if page.next_offset is not None:
+        next_page = searcher.search({"text": "alpha", "top_k": 1, "offset": page.next_offset})
+        assert next_page.offset == page.next_offset
+        assert next_page.docs[0].source_path != page.docs[0].source_path
+
+    filtered = searcher.search({
+        "text": "alpha",
+        "top_k": 3,
+        "filters": {"path_include": ["alpha_*"], "file_kind": ["txt"]},
+    })
+    assert [hit.source_path for hit in filtered.docs] == ["alpha_report.txt"]
+    assert not searcher.search({
+        "text": "alpha",
+        "top_k": 3,
+        "filters": {"path_exclude": ["alpha_*"], "file_kind": [".txt"]},
+    }).docs[0].source_path == "alpha_report.txt"
+
+    for query in (
+        {"text": "alpha", "mode": "bad"},
+        {"text": "alpha", "top_k": 0},
+        {"text": "alpha", "offset": -1},
+        {"text": "alpha", "filters": {"path_include": "alpha_*"}},
+        {"text": ""},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            searcher.search(query)
+
+    query_path = tmp_path / "query.json"
+    query_path.write_text(json.dumps({
+        "text": "alpha",
+        "top_k": 1,
+        "filters": {"path_include": ["alpha_*"]},
+    }), encoding="utf-8")
+    command = [str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"), str(index_root), str(query_path)]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert set(payload) == {"docs", "offset", "limit", "count", "next_offset", "query"}
+    assert payload["docs"][0]["source_path"] == "alpha_report.txt"
+    assert payload["docs"][0]["document"]["file_kind"] == ".txt"
 
 
 def test_content_hash_is_stable_when_doc_id_changes(tmp_path: Path, monkeypatch) -> None:

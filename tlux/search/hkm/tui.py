@@ -376,7 +376,7 @@ class HkmTuiApp:
         self.browser_leaf_mode: str = "docs"
         self.searcher: Optional[Searcher] = None
         self.search_query: str = ""
-        self.search_mode: str = "semantic"
+        self.search_mode: str = "hybrid"
         self.search_top_k: int = 10
         self.search_results = []
         self.search_cursor: int = 0
@@ -1196,7 +1196,8 @@ class HkmTuiApp:
             self.state = "browse"
             return
         if key in (ord("m"), ord("M")):
-            self.search_mode = "token" if self.search_mode == "semantic" else "semantic"
+            modes = ["hybrid", "token", "semantic"]
+            self.search_mode = modes[(modes.index(self.search_mode) + 1) % len(modes)]
             return
         if key in (ord("+"), ord("=")):
             self.search_top_k += 1

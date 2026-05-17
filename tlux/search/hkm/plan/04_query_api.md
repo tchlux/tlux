@@ -1,6 +1,6 @@
 # Query API
 
-Status: next.
+Status: done.
 
 Goal: provide one stable query surface for CLI, TUI, and future UIs.
 
@@ -24,3 +24,13 @@ Done when:
 - `hkm-search INDEX query.json` works with a documented stable schema.
 - UIs can render results without reading chunk internals.
 - Query validation errors are explicit and actionable.
+
+Completed:
+
+- `Searcher.search()` normalizes and validates a stable v1 query shape with
+  hybrid default search, explicit modes, metadata filters, and offset
+  pagination.
+- `SearchResult` includes page metadata and the normalized query alongside
+  stable hit records.
+- `hkm-search` prints one JSON response object matching the library result
+  schema, and the TUI uses hybrid search by default.

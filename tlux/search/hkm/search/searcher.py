@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import struct
@@ -17,6 +18,20 @@ from ..embedder import get_backend
 from ..fs import FileSystem, make_filesystem
 from ..schema import DocumentRecord, Hit, QuerySpec, SearchResult
 from ..tools.value_seen_estimator import ValueObserver
+
+VALID_QUERY_KEYS = {
+    "text",
+    "mode",
+    "embeddings",
+    "token_sequence",
+    "label_include",
+    "numeric_range",
+    "top_k",
+    "offset",
+    "filters",
+}
+VALID_MODES = {"hybrid", "token", "semantic"}
+VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
 
 
 def _seq_to_bytes(seq: List[int]) -> bytes:
@@ -82,6 +97,63 @@ def _decode_int(value: object) -> int:
         return 0
 
 
+# Normalize a file-kind value for exact metadata filtering.
+#
+# Arguments:
+#   value (str): File kind or suffix.
+#
+# Returns:
+#   (str): Lowercase suffix-style kind.
+#
+def _normalize_file_kind(value: str) -> str:
+    kind = value.strip().lower()
+    if kind and kind != "none" and not kind.startswith("."):
+        kind = "." + kind
+    return kind
+
+
+# Convert a hit to the stable JSON-compatible response shape.
+#
+# Arguments:
+#   hit (Hit): Search result hit.
+#
+# Returns:
+#   (Dict[str, object]): JSON-compatible hit record.
+#
+def hit_to_dict(hit: Hit) -> Dict[str, object]:
+    return {
+        "doc_id": hit.doc_id,
+        "score": hit.score,
+        "span": hit.span,
+        "source_path": hit.source_path,
+        "preview_text": hit.preview_text,
+        "query_mode": hit.query_mode,
+        "match_reasons": hit.match_reasons,
+        "semantic_score": hit.semantic_score,
+        "token_score": hit.token_score,
+        "document": asdict(hit.document),
+    }
+
+
+# Convert a search result to the stable JSON-compatible response shape.
+#
+# Arguments:
+#   result (SearchResult): Search result container.
+#
+# Returns:
+#   (Dict[str, object]): JSON-compatible response record.
+#
+def search_result_to_dict(result: SearchResult) -> Dict[str, object]:
+    return {
+        "docs": [hit_to_dict(hit) for hit in result.docs],
+        "offset": result.offset,
+        "limit": result.limit,
+        "count": result.count,
+        "next_offset": result.next_offset,
+        "query": result.query,
+    }
+
+
 @dataclass
 class Searcher:
     fs: FileSystem
@@ -124,6 +196,9 @@ class Searcher:
             self._doc_index = np.load(Path(self.docs_root) / "doc_index.npy")
             self._doc_rows = {int(row["doc_id"]): row for row in self._doc_index}
         return self._doc_index
+
+    def _doc_count(self) -> int:
+        return int(self._load_doc_index().shape[0])
 
     def _chunk_reader(self, chunk_path: str, metadata_schema: List[Tuple[str, type]]) -> ChunkReader:
         if chunk_path not in self._reader_cache:
@@ -348,29 +423,143 @@ class Searcher:
                 continue
             self._search_token_node(child_dir, target, token_sequence, query_text, hits)
 
-    def search(self, query_dict) -> SearchResult:
-        spec = query_dict if isinstance(query_dict, QuerySpec) else QuerySpec(
-            text=query_dict.get("text", ""),
-            mode=query_dict.get("mode", "hybrid"),
-            embeddings=query_dict.get("embeddings", []),
-            token_sequence=query_dict.get("token_sequence", []),
-            label_include=query_dict.get("label_include", {}),
-            numeric_range=query_dict.get("numeric_range", {}),
-            top_k=query_dict.get("top_k", 10),
+    # Normalize and validate the public query dictionary.
+    #
+    # Arguments:
+    #   query (dict | QuerySpec): Raw query request.
+    #
+    # Returns:
+    #   (QuerySpec): Normalized query request.
+    #
+    def _query_spec(self, query: Dict[str, object] | QuerySpec) -> QuerySpec:
+        if isinstance(query, QuerySpec):
+            spec = query
+        else:
+            if not isinstance(query, dict):
+                raise TypeError("query must be a dict or QuerySpec")
+            unknown = set(query) - VALID_QUERY_KEYS
+            if unknown:
+                raise ValueError(f"unknown query keys: {sorted(unknown)}")
+            spec = QuerySpec(
+                text=str(query.get("text", "")),
+                mode=str(query.get("mode", "hybrid")),
+                embeddings=query.get("embeddings", []),
+                token_sequence=query.get("token_sequence", []),
+                label_include=query.get("label_include", {}),
+                numeric_range=query.get("numeric_range", {}),
+                top_k=query.get("top_k", 10),
+                offset=query.get("offset", 0),
+                filters=query.get("filters", {}),
+            )
+        spec.text = str(spec.text or "")
+        spec.mode = str(spec.mode or "hybrid")
+        try:
+            spec.top_k = int(spec.top_k)
+            spec.offset = int(spec.offset)
+        except (TypeError, ValueError):
+            raise ValueError("top_k and offset must be integers")
+        if spec.mode not in VALID_MODES:
+            raise ValueError(f"mode must be one of {sorted(VALID_MODES)}")
+        if spec.top_k < 1:
+            raise ValueError("top_k must be at least 1")
+        if spec.offset < 0:
+            raise ValueError("offset must be non-negative")
+        if not isinstance(spec.filters, dict):
+            raise ValueError("filters must be an object")
+        unknown_filters = set(spec.filters) - VALID_FILTERS
+        if unknown_filters:
+            raise ValueError(f"unknown filters: {sorted(unknown_filters)}")
+        for name, values in spec.filters.items():
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise ValueError(f"filters.{name} must be a list of strings")
+        spec.filters = {
+            "path_include": list(spec.filters.get("path_include", [])),
+            "path_exclude": list(spec.filters.get("path_exclude", [])),
+            "file_kind": [_normalize_file_kind(value) for value in spec.filters.get("file_kind", [])],
+        }
+        if not (spec.text.strip() or spec.token_sequence or spec.embeddings):
+            raise ValueError("query requires text, token_sequence, or embeddings")
+        return spec
+
+    # Convert a normalized query to a stable JSON-compatible record.
+    #
+    # Arguments:
+    #   spec (QuerySpec): Normalized query.
+    #
+    # Returns:
+    #   (Dict[str, object]): Public query record.
+    #
+    def _query_dict(self, spec: QuerySpec) -> Dict[str, object]:
+        return {
+            "text": spec.text,
+            "mode": spec.mode,
+            "token_sequence": list(spec.token_sequence),
+            "embeddings": spec.embeddings,
+            "top_k": spec.top_k,
+            "offset": spec.offset,
+            "filters": spec.filters,
+        }
+
+    # Check whether a hit satisfies normalized metadata filters.
+    #
+    # Arguments:
+    #   hit (Hit): Candidate hit.
+    #   filters (Dict[str, List[str]]): Normalized filters.
+    #
+    # Returns:
+    #   (bool): True when the hit should remain in the result set.
+    #
+    def _filter_hit(self, hit: Hit, filters: Dict[str, List[str]]) -> bool:
+        source_path = hit.source_path or ""
+        includes = filters.get("path_include", [])
+        excludes = filters.get("path_exclude", [])
+        if includes and not any(fnmatch.fnmatch(source_path, pattern) for pattern in includes):
+            return False
+        if excludes and any(fnmatch.fnmatch(source_path, pattern) for pattern in excludes):
+            return False
+        kinds = filters.get("file_kind", [])
+        if kinds and _normalize_file_kind(hit.document.file_kind) not in kinds:
+            return False
+        return True
+
+    # Apply filters and offset pagination to ranked hits.
+    #
+    # Arguments:
+    #   hits (List[Hit]): Ranked candidate hits.
+    #   spec (QuerySpec): Normalized query.
+    #
+    # Returns:
+    #   (SearchResult): Stable paginated result.
+    #
+    def _page(self, hits: List[Hit], spec: QuerySpec) -> SearchResult:
+        filtered = [hit for hit in hits if self._filter_hit(hit, spec.filters)]
+        end = spec.offset + spec.top_k
+        return SearchResult(
+            docs=filtered[spec.offset:end],
+            offset=spec.offset,
+            limit=spec.top_k,
+            count=len(filtered),
+            next_offset=end if end < len(filtered) else None,
+            query=self._query_dict(spec),
         )
+
+    def search(self, query_dict) -> SearchResult:
+        spec = self._query_spec(query_dict)
+        candidate_count = self._doc_count()
         if spec.token_sequence:
-            return SearchResult(docs=self._search_tokens(spec.token_sequence, spec.top_k, spec.text))
+            return self._page(self._search_tokens(spec.token_sequence, candidate_count, spec.text), spec)
         if spec.embeddings:
-            return SearchResult(docs=self._search_embeddings(np.asarray(spec.embeddings[0], dtype=np.float32), spec.top_k, spec.text))
+            hits = self._search_embeddings(np.asarray(spec.embeddings[0], dtype=np.float32), candidate_count, spec.text)
+            return self._page(hits, spec)
         if spec.text and spec.mode == "token":
-            return SearchResult(docs=self._search_tokens(self._backend().tokenize([spec.text])[0], spec.top_k, spec.text))
+            return self._page(self._search_tokens(self._backend().tokenize([spec.text])[0], candidate_count, spec.text), spec)
         if spec.text and spec.mode == "semantic":
             query_ids = self._backend().tokenize([spec.text])
             query_emb = self._backend().embed(query_ids, role="query")[0]
-            return SearchResult(docs=self._search_embeddings(query_emb, spec.top_k, spec.text))
+            return self._page(self._search_embeddings(query_emb, candidate_count, spec.text), spec)
         if spec.text and spec.mode == "hybrid":
-            return SearchResult(docs=self._search_hybrid(spec.text, spec.top_k))
-        return SearchResult(docs=[])
+            return self._page(self._search_hybrid(spec.text, candidate_count), spec)
+        return self._page([], spec)
 
     def _search_tokens(self, token_sequence: List[int], top_k: int, query_text: str) -> List[Hit]:
         target = _seq_to_bytes(token_sequence)
@@ -507,7 +696,7 @@ class Searcher:
 #   None.
 #
 # Returns:
-#   (None): Results are printed as JSON lines.
+#   (None): Result is printed as one JSON object.
 #
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search HKM index")
@@ -517,19 +706,7 @@ def main() -> None:
 
     with open(args.query_json, "r", encoding="utf-8") as f_query:
         query = json.load(f_query)
-    for hit in Searcher.from_index_root(args.index_root).search(query).docs:
-        print(json.dumps({
-            "doc_id": hit.doc_id,
-            "score": hit.score,
-            "span": hit.span,
-            "source_path": hit.source_path,
-            "preview_text": hit.preview_text,
-            "query_mode": hit.query_mode,
-            "match_reasons": hit.match_reasons,
-            "semantic_score": hit.semantic_score,
-            "token_score": hit.token_score,
-            "document": asdict(hit.document),
-        }))
+    print(json.dumps(search_result_to_dict(Searcher.from_index_root(args.index_root).search(query))))
 
 
 if __name__ == "__main__":
