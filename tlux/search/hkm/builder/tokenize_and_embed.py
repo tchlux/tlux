@@ -42,6 +42,11 @@ def process_documents(
     n_gram: int = 3,
     fs_root: Optional[str] = None,
     document_id_base: int = 0,
+    max_tokens: int | None = None,
+    ingest_report_path: str | None = None,
+    planned_count: int = 0,
+    skipped_files: List[Dict[str, str]] | None = None,
+    failed_files: List[Dict[str, str]] | None = None,
 ) -> Tuple[str, str]:
     """Tokenize + embed batches, emit chunk directories and summary stats."""
     file_system = make_filesystem(fs_root)
@@ -67,14 +72,33 @@ def process_documents(
 
     total_docs = 0
     total_chunks = 0
+    skipped_files = [] if skipped_files is None else skipped_files
+    failed_files = [] if failed_files is None else failed_files
+
+    def _metadata_path(metadata: List[Union[str, float]]) -> str:
+        for (field_name, field_type), value in zip(metadata_schema, metadata):
+            if field_name == "source_path":
+                if field_type is bytes and isinstance(value, bytes):
+                    return value.decode("utf-8", errors="ignore")
+                return str(value)
+        return ""
+
     for batch_idx, (texts, metadata_list) in enumerate(document_batches):
         print("-"*40, flush=True)
         print(f"Document {batch_idx+1}", flush=True)
         for text, metadata in zip(texts, metadata_list):
             print("  ", repr(str(metadata)[:40]), flush=True)
+            source_path = _metadata_path(metadata)
+            try:
+                tokens = embedder.tokenize([text])[0]
+            except Exception as exc:
+                failed_files.append({"path": source_path, "reason": "tokenize_error", "error": str(exc)})
+                continue
+            if max_tokens is not None and len(tokens) > max_tokens:
+                skipped_files.append({"path": source_path, "reason": "max_tokens"})
+                continue
             total_docs += 1
             document_id += 1
-            tokens = embedder.tokenize([text])[0]
             if len(tokens) == 0:
                 tokens = [0]
             for n in range(1, n_gram + 1):
@@ -115,6 +139,17 @@ def process_documents(
 
     print(f"[worker] processed_docs={total_docs} chunks={total_chunks} out={document_output_directory}", flush=True)
 
+    if ingest_report_path is not None:
+        report = {
+            "planned": int(planned_count),
+            "indexed": total_docs,
+            "skipped": len(skipped_files),
+            "failed": len(failed_files),
+            "skipped_files": skipped_files,
+            "failed_files": failed_files,
+        }
+        Path(ingest_report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
+
     file_system.write(
         file_system.join(summary_output_directory, "n_gram_counter.bytes"),
         ngram_counter.to_bytes(),
@@ -153,6 +188,7 @@ def default_worker(
     manifest_path: str | None = None,
     fs_root: str | None = None,
     doc_id_base: int = 0,
+    max_tokens: int | None = None,
 ) -> None:
     """Process a shard of files in document_directory or an explicit manifest."""
     try:
@@ -171,15 +207,20 @@ def default_worker(
         all_files = [p for p in all_files if p.is_file()]
     # simple byte-balanced selection when manifest not provided falls back to modulo
     my_files = [file for i, file in enumerate(all_files) if (manifest_path is not None) or (i % total_workers == worker_index)]
+    failed_files: List[Dict[str, str]] = []
 
     def get_document_batches() -> Iterable[Tuple[List[str], List[List[Union[str, float]]]]]:
         for file in my_files:
+            source_path = os.path.relpath(file, document_directory).replace(os.sep, "/")
             try:
                 text = file.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
+            except UnicodeDecodeError as exc:
+                failed_files.append({"path": source_path, "reason": "decode_error", "error": str(exc)})
+                continue
+            except OSError as exc:
+                failed_files.append({"path": source_path, "reason": "read_error", "error": str(exc)})
                 continue
             size_bytes = len(text.encode("utf-8"))
-            source_path = os.path.relpath(file, document_directory).replace(os.sep, "/")
             tags = [file.suffix or "none", str(size_bytes % 5)]
             attrs = {"ext": file.suffix or "none", "depth": len(file.parents), "size": size_bytes}
             value_map = {
@@ -205,6 +246,10 @@ def default_worker(
         n_gram=n_gram,
         fs_root=fs_root,
         document_id_base=doc_id_base,
+        max_tokens=max_tokens,
+        ingest_report_path=str(Path(output_directory) / "ingest_report.json"),
+        planned_count=len(my_files),
+        failed_files=failed_files,
     )
 
 

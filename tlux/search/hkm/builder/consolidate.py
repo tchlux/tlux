@@ -2,16 +2,56 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 
 from .chunk_io import ChunkReader
 from ..fs import FileSystem, make_filesystem
 from ..schema import DOC_INDEX_DTYPE
+
+
+# Merge pre-worker and worker ingest reports into the public build summary.
+#
+# Arguments:
+#   index_root (str): Root directory of the index.
+#   workers (List[Path]): Worker output directories.
+#
+# Returns:
+#   (None): Updates manifests/ingest_summary.json when it exists.
+#
+def _merge_ingest_summary(index_root: str, workers: List[Path]) -> None:
+    manifest_dir = Path(index_root) / "manifests"
+    summary_path = manifest_dir / "ingest_summary.json"
+    if not summary_path.exists():
+        return
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    skipped_files = list(summary.get("skipped_files", []))
+    failed_files = list(summary.get("failed_files", []))
+    reasons: Dict[str, int] = dict(summary.get("skip_reasons", {}))
+    indexed = 0
+    for worker_path in workers:
+        report_path = worker_path / "ingest_report.json"
+        if not report_path.exists():
+            continue
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        indexed += int(report.get("indexed", 0))
+        for item in report.get("skipped_files", []):
+            reason = item.get("reason", "worker_skip")
+            reasons[reason] = reasons.get(reason, 0) + 1
+            skipped_files.append(item)
+        failed_files.extend(report.get("failed_files", []))
+    summary["indexed"] = indexed
+    summary["skipped"] = len(skipped_files)
+    summary["failed"] = len(failed_files)
+    summary["skip_reasons"] = reasons
+    summary["skipped_files"] = skipped_files
+    summary["failed_files"] = failed_files
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def consolidate(fs: FileSystem, index_root: str) -> None:
@@ -42,6 +82,7 @@ def consolidate(fs: FileSystem, index_root: str) -> None:
         doc_index = np.stack(rows).astype(DOC_INDEX_DTYPE, copy=False)
         doc_index.sort(order="doc_id")
         np.save(fs.join(docs_root, "doc_index.npy"), doc_index)
+    _merge_ingest_summary(index_root, workers)
 
 
 def run_consolidate(index_root: str, fs_root: str | None = None) -> None:

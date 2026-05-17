@@ -5,13 +5,13 @@ large heterogeneous datasets.
 
 Recommended order:
 
-1. Ingestion policy.
-2. Stable document model.
+1. Ingestion policy. Done.
+2. Stable document model. Next.
 3. Search result quality.
 4. Query API.
 5. Incremental builds.
 6. Operational observability.
 
-The first concrete task should be adding `hkm-index` include/skip controls and a
-default source-code indexing profile, then rebuilding `tlux/search/hkm` without a
-custom Python command.
+The next concrete task should be defining stable document and passage metadata
+so result previews, filtering, deduplication, and incremental rebuilds have a
+durable source identity to build on.
