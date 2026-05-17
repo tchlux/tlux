@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-"""Run the HKM curses builder and explorer."""
+#!/bin/sh
+set -eu
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-
-from tlux.search.hkm.tui import main
-
-
-if __name__ == "__main__":
-    main()
+bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "usage: hkm-tui"
+    exit 0
+fi
+exec "$bin_dir/hkm-python" -c "import sys; sys.argv[0]='hkm-tui'; from tlux.search.hkm.tui import main; main()" "$@"

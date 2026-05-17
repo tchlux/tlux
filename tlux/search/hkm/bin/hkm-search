@@ -1,35 +1,5 @@
-#!/usr/bin/env python3
-"""Search an HKM index."""
+#!/bin/sh
+set -eu
 
-import argparse
-import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-
-from tlux.search.hkm import Searcher
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Search HKM index")
-    parser.add_argument("index_root", help="Index root containing index.json")
-    parser.add_argument("query_json", help="Path to JSON query file")
-    args = parser.parse_args()
-
-    with open(args.query_json, "r", encoding="utf-8") as f:
-        query = json.load(f)
-    hits = Searcher.from_index_root(args.index_root).search(query)
-    for h in hits.docs:
-        print(json.dumps({
-            "doc_id": h.doc_id,
-            "score": h.score,
-            "span": h.span,
-            "source_path": h.source_path,
-            "preview_text": h.preview_text,
-            "query_mode": h.query_mode,
-        }))
-
-
-if __name__ == "__main__":
-    main()
+bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "$bin_dir/hkm-python" -c "import sys; sys.argv[0]='hkm-search'; from tlux.search.hkm.search.searcher import main; main()" "$@"

@@ -42,7 +42,7 @@ JOBS_ROOT: str = os.environ.get("HKM_JOBS_ROOT", os.path.join(CODE_ROOT, "jobs")
 JOB_BUCKETS: tuple[str, ...] = ("ids", "waiting", "queued", "running", "succeeded", "failed", "next", "workers")
 ID_WIDTH: int = 9
 STATUS_VALUES: set[str] = {"WAITING", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED"}
-ORPHAN_GRACE_SECONDS: float = 0.1
+ORPHAN_GRACE_SECONDS: float = 1.0
 if __name__ == "__main__":
     MODULE_PATH: str = os.path.splitext(os.path.basename(__file__))[0]
 else:
@@ -416,6 +416,11 @@ def set_jobs_root(path: str, reset: bool = False) -> FileSystem:
 #   (str | None): Matching uppercase status or None.
 #
 def job_status(fs: FileSystem, job_id: str) -> str | None:
+    cfg_path = fs.join("ids", job_id, "job_config")
+    if fs.exists(cfg_path):
+        status = json.loads(fs.read(cfg_path).decode()).get("status")
+        if status in STATUS_VALUES:
+            return status
     for status in ("FAILED", "SUCCEEDED", "RUNNING", "QUEUED", "WAITING"):
         if fs.exists(fs.join(status.lower(), job_id)):
             return status
@@ -818,6 +823,7 @@ def worker(fs: FileSystem, job: Job) -> Job:
     err_path = fs.join(job.path, "stderr")
     job.start_ts = time.time()
     job.status = "RUNNING"
+    job.monitor_pid = os.getpid()
     job._save()
     with open(out_path, "ab") as so, open(err_path, "ab") as se:
         proc = subprocess.Popen(
@@ -827,7 +833,6 @@ def worker(fs: FileSystem, job: Job) -> Job:
             close_fds=True,
         )
     # Update the job config.
-    job.monitor_pid = os.getpid()
     job.executor_pid = proc.pid
     job._save()
     # --- monitoring loop ---

@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+root="$(CDPATH= cd -- "$(dirname -- "$0")"/.. && pwd)"
+repo="$(CDPATH= cd -- "$root"/../../.. && pwd)"
+
+run_python() {
+    py="$1"
+    shift
+    env -u PYTHONPATH "$py" "$@"
+}
+
+for py in \
+    "$root/.env/bin/python3.13" \
+    "$root/.env/bin/python3.12" \
+    "$root/.env/bin/python" \
+    python3.13 \
+    python3.12 \
+    python3.11 \
+    python3.10
+do
+    if run_python "$py" -c "import numpy" >/dev/null 2>&1; then
+        exec env -u PYTHONPATH PYTHONPATH="$repo" "$py" "$@"
+    fi
+done
+
+echo "No viable HKM Python interpreter found." >&2
+exit 1

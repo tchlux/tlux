@@ -190,9 +190,19 @@ def main() -> None:
         default=os.cpu_count() or 4,
         help="Number of parallel tokenization/embedding workers",
     )
+    parser.add_argument("--max-k", type=int, default=8, help="Max clusters per level")
+    parser.add_argument("--leaf-embedding-limit", type=int, default=1024, help="Embeddings per leaf")
+    parser.add_argument("--leaf-doc-limit", type=int, default=1024, help="Docs per leaf")
     args = parser.parse_args()
 
-    build_search_index(args.docs_dir, args.index_root, args.workers)
+    print(build_search_index(
+        docs_dir=args.docs_dir,
+        index_root=args.index_root,
+        num_workers=args.workers,
+        max_k=args.max_k,
+        leaf_embedding_limit=args.leaf_embedding_limit,
+        leaf_doc_limit=args.leaf_doc_limit,
+    ).id)
 
 
 if __name__ == "__main__":  # pragma: no cover

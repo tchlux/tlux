@@ -2,3 +2,5 @@
 .env
 jobs
 tmp_index
+tmp_hkm_index
+tmp_hkm_source_index

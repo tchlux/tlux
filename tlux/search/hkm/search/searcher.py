@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import struct
@@ -313,3 +314,34 @@ class Searcher:
         self._search_node(Path(self.hkm_root), query_emb, best)
         ranked = sorted(best.items(), key=lambda item: item[1][0])[:top_k]
         return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for doc_id, (dist, span) in ranked]
+
+
+# Run the search CLI against an existing index root.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   (None): Results are printed as JSON lines.
+#
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Search HKM index")
+    parser.add_argument("index_root", help="Index root containing index.json")
+    parser.add_argument("query_json", help="Path to JSON query file")
+    args = parser.parse_args()
+
+    with open(args.query_json, "r", encoding="utf-8") as f_query:
+        query = json.load(f_query)
+    for hit in Searcher.from_index_root(args.index_root).search(query).docs:
+        print(json.dumps({
+            "doc_id": hit.doc_id,
+            "score": hit.score,
+            "span": hit.span,
+            "source_path": hit.source_path,
+            "preview_text": hit.preview_text,
+            "query_mode": hit.query_mode,
+        }))
+
+
+if __name__ == "__main__":
+    main()
