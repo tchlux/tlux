@@ -122,6 +122,8 @@ Search results currently return:
 - `source_path`
 - `preview_text`
 - `query_mode`
+- `document` with stable source path, type, title, byte/token spans, content
+  hash, build timestamps, optional source URL metadata, and stored preview text
 
 ## Manual TUI validation
 

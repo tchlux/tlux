@@ -16,6 +16,27 @@ DESCEND_K = 8
 HEAP_FACTOR = 4
 SHARD_MAX_BYTES = 8 * 2**20
 
+DEFAULT_METADATA_SCHEMA = [
+    ["source_path", "bytes"],
+    ["source_type", "bytes"],
+    ["file_kind", "bytes"],
+    ["title", "bytes"],
+    ["section_path", "bytes"],
+    ["byte_start", "int"],
+    ["byte_end", "int"],
+    ["token_start", "int"],
+    ["token_end", "int"],
+    ["content_hash", "bytes"],
+    ["build_id", "bytes"],
+    ["ingested_at", "bytes"],
+    ["source_id", "bytes"],
+    ["source_url", "bytes"],
+    ["source_date", "bytes"],
+    ["source_token_count", "int"],
+    ["num_bytes", "int"],
+    ["document_preview", "bytes"],
+]
+
 # ----------------------------------------------------------------------
 # Binary layout dtypes (shared by builder & loader)
 
@@ -64,6 +85,29 @@ class QuerySpec:
 
 
 @dataclass
+class DocumentRecord:
+    doc_id: int = 0
+    source_path: str = ""
+    source_type: str = ""
+    file_kind: str = ""
+    title: str = ""
+    section_path: str = ""
+    byte_start: int = 0
+    byte_end: int = 0
+    token_start: int = 0
+    token_end: int = 0
+    content_hash: str = ""
+    build_id: str = ""
+    ingested_at: str = ""
+    source_id: str = ""
+    source_url: str = ""
+    source_date: str = ""
+    source_token_count: int = 0
+    num_bytes: int = 0
+    document_preview: str = ""
+
+
+@dataclass
 class Hit:
     """Single document hit."""
 
@@ -76,6 +120,7 @@ class Hit:
     anchor_span: Tuple[int, int] = (0, 0)
     anchor_source_path: str = ""
     anchor_preview_text: str = ""
+    document: DocumentRecord = field(default_factory=DocumentRecord)
 
 
 @dataclass

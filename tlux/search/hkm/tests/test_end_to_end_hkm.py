@@ -1,5 +1,6 @@
 """End-to-end HKM integration test using the job-managed builder."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -136,9 +137,9 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     assert (first_chunk / "embed_index.npy").exists()
     assert (first_chunk / "metadata.npy").exists()
     assert (first_chunk / "n_gram_counter.bytes").exists()
-    assert (first_chunk / "observer.tags.bytes").exists()
-    assert (first_chunk / "unique.tags.bytes").exists()
-    assert (first_chunk / "unique.attrs.bytes").exists()
+    metadata_dtype = np.load(first_chunk / "metadata.npy", mmap_mode="r").dtype
+    assert "content_hash_blob_start" in metadata_dtype.names
+    assert "document_preview_blob_start" in metadata_dtype.names
 
     (docs_src / "doc5.txt").unlink()
     missing_source = searcher.search({"mode": "token", "text": "777", "top_k": 1})
@@ -151,6 +152,79 @@ def test_searcher_requires_index_manifest(tmp_path: Path) -> None:
     (tmp_path / "hkm").mkdir()
     with pytest.raises(FileNotFoundError):
         Searcher.from_index_root(str(tmp_path))
+
+
+def test_fineweb_manifest_enriches_document_record(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    corpus = tmp_path / "fineweb"
+    docs_src = corpus / "docs"
+    docs_src.mkdir(parents=True)
+    raw = b"1 2 3 4 5\n"
+    doc_path = docs_src / "sample.txt"
+    doc_path.write_bytes(raw)
+    (corpus / "manifest.jsonl").write_text(json.dumps({
+        "file": "docs/sample.txt",
+        "id": "doc-123",
+        "url": "https://example.com/sample",
+        "date": "2020-01-02T03:04:05Z",
+        "token_count": 99,
+    }) + "\n", encoding="utf-8")
+
+    index_root = tmp_path / "idx"
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(index_root),
+        num_workers=1,
+        fs_root=str(index_root),
+    )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    hit = Searcher.from_index_root(str(index_root)).search({"mode": "token", "text": "3", "top_k": 1}).docs[0]
+    assert hit.document.source_path == "sample.txt"
+    assert hit.document.source_type == "web"
+    assert hit.document.source_id == "doc-123"
+    assert hit.document.source_url == "https://example.com/sample"
+    assert hit.document.source_date == "2020-01-02T03:04:05Z"
+    assert hit.document.source_token_count == 99
+    assert hit.document.content_hash == hashlib.sha256(raw).hexdigest()
+    assert hit.document.byte_start == 0
+    assert hit.document.byte_end == len(raw)
+    assert hit.document.token_start == 0
+    assert hit.document.token_end == 5
+    assert hit.document.num_bytes == len(raw)
+
+    doc_path.unlink()
+    missing_source_hit = Searcher.from_index_root(str(index_root)).search({"mode": "token", "text": "4", "top_k": 1}).docs[0]
+    assert "4" in missing_source_hit.preview_text
+
+
+def test_content_hash_is_stable_when_doc_id_changes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    target = docs_src / "target.txt"
+    target.write_text("10 11 12", encoding="utf-8")
+
+    first_root = tmp_path / "idx1"
+    first_job = build_search_index(str(docs_src), str(first_root), 1, fs_root=str(first_root))
+    drain_jobs(FileSystem(root=str(first_root / ".hkm_jobs")), max_workers=1)
+    first_job.reload()
+    assert first_job.status == "SUCCEEDED", first_job.stderr
+    first_hit = Searcher.from_index_root(str(first_root)).search({"mode": "token", "text": "12", "top_k": 1}).docs[0]
+
+    (docs_src / "aaa.txt").write_text("1 2 3 4 5 6 7 8 9", encoding="utf-8")
+    second_root = tmp_path / "idx2"
+    second_job = build_search_index(str(docs_src), str(second_root), 1, fs_root=str(second_root))
+    drain_jobs(FileSystem(root=str(second_root / ".hkm_jobs")), max_workers=1)
+    second_job.reload()
+    assert second_job.status == "SUCCEEDED", second_job.stderr
+    second_hits = Searcher.from_index_root(str(second_root)).search({"mode": "token", "text": "12", "top_k": 3}).docs
+    second_hit = next(hit for hit in second_hits if hit.source_path == "target.txt")
+
+    assert first_hit.doc_id != second_hit.doc_id
+    assert first_hit.document.content_hash == second_hit.document.content_hash
 
 
 def test_leaf_neighbors_use_best_passage_match(tmp_path: Path, monkeypatch) -> None:

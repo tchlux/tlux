@@ -6,10 +6,12 @@ import os
 import json
 import argparse
 import fnmatch
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
 from ..embedder import get_backend
+from ..schema import DEFAULT_METADATA_SCHEMA
 
 try:
     from ..jobs import Job, run_job, set_jobs_root
@@ -69,6 +71,37 @@ DEFAULT_SKIP_SUFFIXES = {
     ".onnx",
     ".gguf",
 }
+DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
+
+
+# Return the current UTC timestamp as a compact ISO string.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   (str): Timestamp ending in Z.
+#
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Resolve the source metadata manifest used for document enrichment.
+#
+# Arguments:
+#   docs_dir (Path): Source document directory.
+#   source_manifest (str | None): Explicit manifest path.
+#
+# Returns:
+#   (str | None): Manifest path when available.
+#
+def _source_manifest_path(docs_dir: Path, source_manifest: str | None) -> str | None:
+    if source_manifest:
+        return str(Path(source_manifest).resolve())
+    for candidate in (docs_dir / "manifest.jsonl", docs_dir.parent / "manifest.jsonl"):
+        if candidate.exists():
+            return str(candidate.resolve())
+    return None
 
 
 def _bin_pack(paths: List[Path], target_bins: int) -> List[List[Path]]:
@@ -193,7 +226,7 @@ def build_search_index(
     index_root: str,
     num_workers: int,
     tokenizer_main: str = "tlux.search.hkm.builder.tokenize_and_embed.default_worker",
-    metadata_schema: str = "[['source_path','bytes'],['file_kind','str'],['num_bytes','float'],['tags','list'],['attrs','dict']]",
+    metadata_schema: str = DEFAULT_METADATA_SCHEMA_TEXT,
     max_k: int = 8,
     leaf_embedding_limit: int = 1024,
     leaf_doc_limit: int = 1024,
@@ -208,6 +241,7 @@ def build_search_index(
     default_skips: bool = True,
     max_file_bytes: int | None = 8 * 2**20,
     max_tokens: int | None = 200_000,
+    source_manifest: str | None = None,
 ) -> Job:
     # Validate input parameters
     if not os.path.exists(docs_dir):
@@ -231,6 +265,8 @@ def build_search_index(
         metadata_schema_value = ast.literal_eval(metadata_schema)
 
     docs_dir_path = Path(docs_dir)
+    source_manifest_path = _source_manifest_path(docs_dir_path, source_manifest)
+    build_id = _utc_now()
     all_files, skipped_files, skip_reasons = _ingest_plan(
         docs_dir_path,
         skip_paths,
@@ -252,6 +288,7 @@ def build_search_index(
         "jobs_root": os.path.abspath(jobs_root),
         "embedder_backend": get_backend().name,
         "metadata_schema": metadata_schema_value,
+        "source_manifest": source_manifest_path,
         "build_config": {
             "num_workers": num_workers,
             "max_cluster_count": max_k,
@@ -260,6 +297,7 @@ def build_search_index(
             "max_n_gram": max_n_gram,
             "n_gram_fp_rate": n_gram_fp_rate,
             "seed": seed,
+            "build_id": build_id,
         },
         "max_n_gram": max_n_gram,
         "n_gram_fp_rate": n_gram_fp_rate,
@@ -302,6 +340,9 @@ def build_search_index(
             n_gram=max_n_gram,
             doc_id_base=doc_id_base,
             max_tokens=max_tokens,
+            source_manifest=source_manifest_path,
+            build_id=build_id,
+            ingested_at=build_id,
         )
         worker_jobs.append(job)
         doc_id_base += len(files)
@@ -360,6 +401,7 @@ def main() -> None:
     parser.add_argument("--exclude", action="append", default=[], help="Relative glob to exclude; repeatable")
     parser.add_argument("--max-file-bytes", type=int, default=8 * 2**20, help="Maximum source file bytes")
     parser.add_argument("--max-tokens", type=int, default=200_000, help="Maximum tokens per document")
+    parser.add_argument("--source-manifest", default=None, help="Optional JSONL source metadata manifest")
     parser.add_argument("--no-default-skips", action="store_true", help="Disable built-in cache/model/binary skips")
     args = parser.parse_args()
 
@@ -376,6 +418,7 @@ def main() -> None:
         default_skips=not args.no_default_skips,
         max_file_bytes=args.max_file_bytes,
         max_tokens=args.max_tokens,
+        source_manifest=args.source_manifest,
     ).id)
 
 

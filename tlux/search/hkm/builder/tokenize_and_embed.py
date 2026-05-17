@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import struct
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
@@ -14,11 +15,13 @@ import numpy as np
 try:
     from .. import embedder
     from ..fs import FileSystem, make_filesystem
+    from ..schema import DEFAULT_METADATA_SCHEMA
     from ..tools.unique_count_estimator import UniqueCounter
     from ..tools.rank_estimator import RankEstimator
 except ImportError:  # pragma: no cover
     from tlux.search.hkm import embedder
     from tlux.search.hkm.fs import FileSystem, make_filesystem
+    from tlux.search.hkm.schema import DEFAULT_METADATA_SCHEMA
     from tlux.search.hkm.tools.unique_count_estimator import UniqueCounter
     from tlux.search.hkm.tools.rank_estimator import RankEstimator
 
@@ -29,8 +32,89 @@ from .chunk_io import (
 ChunkWriter,
 )
 
-DocumentBatch = Iterable[Tuple[List[str], List[List[Union[str, float]]]]]
+DocumentValue = Union[str, float, int, bytes, list, dict, None]
+DocumentBatch = Iterable[Tuple[List[str], List[List[DocumentValue]]]]
 MetadataSchema = List[Tuple[str, type]]
+DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
+
+
+# Return the current UTC timestamp as a compact ISO string.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   (str): Timestamp ending in Z.
+#
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Resolve the source metadata manifest, if one exists.
+#
+# Arguments:
+#   document_directory (str): Directory holding indexed documents.
+#   source_manifest (str | None): Explicit manifest path.
+#
+# Returns:
+#   (Path | None): Manifest path when available.
+#
+def _source_manifest_path(document_directory: str, source_manifest: str | None) -> Path | None:
+    if source_manifest:
+        return Path(source_manifest)
+    root = Path(document_directory)
+    for candidate in (root / "manifest.jsonl", root.parent / "manifest.jsonl"):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# Read a JSONL source manifest and index rows by relative file path.
+#
+# Arguments:
+#   document_directory (str): Directory holding indexed documents.
+#   source_manifest (str | None): Explicit manifest path.
+#
+# Returns:
+#   (dict[str, dict]): Manifest rows keyed by document-relative path.
+#
+def _load_source_manifest(document_directory: str, source_manifest: str | None) -> Dict[str, dict]:
+    manifest_path = _source_manifest_path(document_directory, source_manifest)
+    if manifest_path is None or not manifest_path.exists():
+        return {}
+    rows: Dict[str, dict] = {}
+    doc_root = Path(document_directory).resolve()
+    base = manifest_path.parent.resolve()
+    with manifest_path.open("r", encoding="utf-8") as f_manifest:
+        for line in f_manifest:
+            row = json.loads(line)
+            file_value = str(row.get("file", "")).replace(os.sep, "/")
+            if not file_value:
+                continue
+            keys = {file_value, Path(file_value).name}
+            try:
+                keys.add((base / file_value).resolve().relative_to(doc_root).as_posix())
+            except ValueError:
+                pass
+            for key in keys:
+                rows[key] = row
+    return rows
+
+
+# Update a metadata field when it is present in the active schema.
+#
+# Arguments:
+#   metadata (list): Metadata values aligned to schema.
+#   field_names (dict[str, int]): Metadata field positions.
+#   name (str): Field name.
+#   value (object): New value.
+#
+# Returns:
+#   (None): Mutates metadata in place.
+#
+def _set_metadata(metadata: List[DocumentValue], field_names: Dict[str, int], name: str, value: DocumentValue) -> None:
+    if name in field_names:
+        metadata[field_names[name]] = value
 
 
 def process_documents(
@@ -75,7 +159,9 @@ def process_documents(
     skipped_files = [] if skipped_files is None else skipped_files
     failed_files = [] if failed_files is None else failed_files
 
-    def _metadata_path(metadata: List[Union[str, float]]) -> str:
+    field_names = {name: i for i, (name, _typ) in enumerate(metadata_schema)}
+
+    def _metadata_path(metadata: List[DocumentValue]) -> str:
         for (field_name, field_type), value in zip(metadata_schema, metadata):
             if field_name == "source_path":
                 if field_type is bytes and isinstance(value, bytes):
@@ -97,6 +183,10 @@ def process_documents(
             if max_tokens is not None and len(tokens) > max_tokens:
                 skipped_files.append({"path": source_path, "reason": "max_tokens"})
                 continue
+            _set_metadata(metadata, field_names, "token_start", 0)
+            _set_metadata(metadata, field_names, "token_end", len(tokens))
+            if "source_token_count" in field_names and metadata[field_names["source_token_count"]] in (None, 0):
+                _set_metadata(metadata, field_names, "source_token_count", len(tokens))
             total_docs += 1
             document_id += 1
             if len(tokens) == 0:
@@ -106,30 +196,33 @@ def process_documents(
                     ngram_bytes = b"".join(int(token & 0xFFFFFFFF).to_bytes(4, "little") for token in tokens[i : i + n])
                     ngram_counter.add(ngram_bytes)
             embeddings, embedding_windows = embedder.embed_windows([tokens])
-            doc_metadata: List[Union[int, float]] = []
+            doc_metadata: List[DocumentValue] = []
             for (field_name, field_type), value in zip(metadata_schema, metadata):
                 if field_type is float:
                     value = float(value)
                     number_dists[field_name].add(value)
+                elif field_type is int:
+                    value = None if value is None else int(value)
                 elif field_type is bytes:
-                    if not isinstance(value, bytes):
+                    if value is not None and not isinstance(value, bytes):
                         raise ValueError(f"Expected bytes for field {field_name!r}")
                 elif field_type in (list, dict, tuple):
                     # pass through for ValueObserver handling inside ChunkWriter
                     pass
                 else:
-                    hash_value = int.from_bytes(
-                        hashlib.sha256(str(value).encode("ascii")).digest()[:8], "little"
-                    )
-                    if field_name not in category_ids:
-                        category_ids[field_name] = {}
-                        category_counts[field_name] = {}
-                    category_ids_for_field = category_ids[field_name]
-                    if value not in category_ids_for_field:
-                        category_ids_for_field[value] = hash_value
-                    counts = category_counts[field_name]
-                    counts[hash_value] = counts.get(hash_value, 0) + 1
-                    value = hash_value
+                    if value is not None:
+                        hash_value = int.from_bytes(
+                            hashlib.sha256(str(value).encode("utf-8")).digest()[:8], "little"
+                        )
+                        if field_name not in category_ids:
+                            category_ids[field_name] = {}
+                            category_counts[field_name] = {}
+                        category_ids_for_field = category_ids[field_name]
+                        if value not in category_ids_for_field:
+                            category_ids_for_field[value] = hash_value
+                        counts = category_counts[field_name]
+                        counts[hash_value] = counts.get(hash_value, 0) + 1
+                        value = hash_value
                 doc_metadata.append(value)
             chunk_writer.add_document(document_id, tokens, embeddings, embedding_windows, doc_metadata)
 
@@ -180,7 +273,7 @@ def process_documents(
 def default_worker(
     document_directory: str,
     output_directory: str,
-    metadata_schema: str = "[['source_path', 'bytes'], ['file_kind', 'str'], ['num_bytes', 'float'], ['tags', 'list'], ['attrs', 'dict']]",
+    metadata_schema: str = DEFAULT_METADATA_SCHEMA_TEXT,
     worker_index: int = 0,
     total_workers: int = 1,
     chunk_size_limit: int = 8 * 2**20,
@@ -189,6 +282,9 @@ def default_worker(
     fs_root: str | None = None,
     doc_id_base: int = 0,
     max_tokens: int | None = None,
+    source_manifest: str | None = None,
+    build_id: str | None = None,
+    ingested_at: str | None = None,
 ) -> None:
     """Process a shard of files in document_directory or an explicit manifest."""
     try:
@@ -207,32 +303,48 @@ def default_worker(
         all_files = [p for p in all_files if p.is_file()]
     # simple byte-balanced selection when manifest not provided falls back to modulo
     my_files = [file for i, file in enumerate(all_files) if (manifest_path is not None) or (i % total_workers == worker_index)]
+    source_rows = _load_source_manifest(document_directory, source_manifest)
     failed_files: List[Dict[str, str]] = []
+    build_id = build_id or _utc_now()
+    ingested_at = ingested_at or build_id
 
-    def get_document_batches() -> Iterable[Tuple[List[str], List[List[Union[str, float]]]]]:
+    def get_document_batches() -> Iterable[Tuple[List[str], List[List[DocumentValue]]]]:
         for file in my_files:
             source_path = os.path.relpath(file, document_directory).replace(os.sep, "/")
             try:
-                text = file.read_text(encoding="utf-8")
+                raw = file.read_bytes()
+                text = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 failed_files.append({"path": source_path, "reason": "decode_error", "error": str(exc)})
                 continue
             except OSError as exc:
                 failed_files.append({"path": source_path, "reason": "read_error", "error": str(exc)})
                 continue
-            size_bytes = len(text.encode("utf-8"))
-            tags = [file.suffix or "none", str(size_bytes % 5)]
-            attrs = {"ext": file.suffix or "none", "depth": len(file.parents), "size": size_bytes}
+            size_bytes = len(raw)
+            source_row = source_rows.get(source_path, {})
             value_map = {
                 "path": file.name,
                 "name": file.name,
                 "source_path": source_path.encode("utf-8"),
-                "num_bytes": float(size_bytes),
-                "file_kind": file.suffix or "none",
-                "tags": tags,
-                "attrs": attrs,
+                "source_type": ("web" if source_row.get("url") else "file").encode("utf-8"),
+                "file_kind": (file.suffix or "none").encode("utf-8"),
+                "title": file.stem.encode("utf-8"),
+                "section_path": b"",
+                "byte_start": 0,
+                "byte_end": size_bytes,
+                "token_start": 0,
+                "token_end": 0,
+                "content_hash": hashlib.sha256(raw).hexdigest().encode("ascii"),
+                "build_id": build_id.encode("utf-8"),
+                "ingested_at": ingested_at.encode("utf-8"),
+                "source_id": str(source_row.get("id", "") or "").encode("utf-8"),
+                "source_url": str(source_row.get("url", "") or "").encode("utf-8"),
+                "source_date": str(source_row.get("date", "") or "").encode("utf-8"),
+                "source_token_count": int(source_row.get("token_count", 0) or 0),
+                "num_bytes": size_bytes,
+                "document_preview": text[:512].encode("utf-8"),
             }
-            metadata_row: List[Union[str, float]] = []
+            metadata_row: List[DocumentValue] = []
             for field_name, _field_type in parsed_schema:
                 metadata_row.append(value_map.get(field_name))
             yield [text], [metadata_row]

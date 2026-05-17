@@ -33,7 +33,7 @@ The current implementation is intentionally narrower than the long-term target:
 - search currently supports token and semantic text queries, plus low-level token-sequence and embedding inputs
 - the chunk-directory format is the canonical storage contract for now
 - query-time traversal is described by `index.json` and per-node `node.json` manifests
-- result records now carry `source_path`, `preview_text`, and `query_mode` so UIs do not need chunk internals
+- result records now carry `source_path`, `preview_text`, `query_mode`, and a stable `document` record so UIs do not need chunk internals
 - the default embedder backend is single-choice in the docs even though the interface permits swapping
 - local execution is still the easiest path, with distributed execution relying on the same shared-filesystem job model
 

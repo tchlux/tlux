@@ -1,5 +1,7 @@
 # Stable Document Model
 
+Status: done.
+
 Goal: define durable document and passage metadata for heterogeneous search.
 
 Why it matters:
@@ -23,3 +25,15 @@ Done when:
 - Every hit has stable source and passage identity.
 - The same document can be recognized across rebuilds by content hash.
 - Search result previews can be built from canonical metadata.
+
+Completed:
+
+- Hits now include a canonical document record with source identity, source
+  type, file kind, title, byte spans, token spans, content hash, build id,
+  ingest timestamp, optional source manifest fields, byte counts, and stored
+  preview text.
+- Default ingestion enriches document records from FineWeb-style
+  `manifest.jsonl` files beside the docs root or its parent, with an explicit
+  `--source-manifest` override.
+- Preview generation falls back to stored document preview text when source
+  files are unavailable.

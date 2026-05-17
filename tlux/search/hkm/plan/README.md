@@ -6,12 +6,12 @@ large heterogeneous datasets.
 Recommended order:
 
 1. Ingestion policy. Done.
-2. Stable document model. Next.
-3. Search result quality.
+2. Stable document model. Done.
+3. Search result quality. Next.
 4. Query API.
 5. Incremental builds.
 6. Operational observability.
 
-The next concrete task should be defining stable document and passage metadata
-so result previews, filtering, deduplication, and incremental rebuilds have a
-durable source identity to build on.
+The next concrete task should be search result quality: hybrid ranking,
+deduplication, better snippets, and match reasons on top of the stable document
+records now attached to every hit.

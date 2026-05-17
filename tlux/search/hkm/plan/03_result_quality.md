@@ -1,5 +1,7 @@
 # Search Result Quality
 
+Status: next.
+
 Goal: make results useful, explainable, and ranked well enough for daily use.
 
 Why it matters:

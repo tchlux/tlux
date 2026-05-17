@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import struct
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -15,7 +15,7 @@ import numpy as np
 from ..builder.chunk_io import ChunkReader
 from ..embedder import get_backend
 from ..fs import FileSystem, make_filesystem
-from ..schema import Hit, QuerySpec, SearchResult
+from ..schema import DocumentRecord, Hit, QuerySpec, SearchResult
 from ..tools.value_seen_estimator import ValueObserver
 
 
@@ -38,6 +38,23 @@ def _snippet(text: str, start: int, end: int, radius: int = 120) -> str:
 
 def _default_span(tokens: np.ndarray, limit: int = 64) -> Tuple[int, int]:
     return (0, min(int(tokens.shape[0]), limit))
+
+
+def _decode_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def _decode_int(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -104,14 +121,42 @@ class Searcher:
         return tokens, {name: value for (name, _), value in zip(self.metadata_schema, meta_values)}
 
     def _source_path(self, meta: Dict[str, object]) -> str:
-        value = meta.get("source_path")
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="ignore")
-        if isinstance(value, str):
-            return value
-        return ""
+        return _decode_text(meta.get("source_path"))
 
-    def _preview(self, source_path: str, tokens: np.ndarray, span: Tuple[int, int], query_text: str) -> str:
+    def _document_record(self, doc_id: int, meta: Dict[str, object], tokens: np.ndarray) -> DocumentRecord:
+        source_path = self._source_path(meta)
+        source_url = _decode_text(meta.get("source_url"))
+        file_kind = _decode_text(meta.get("file_kind")) or (Path(source_path).suffix if source_path else "")
+        return DocumentRecord(
+            doc_id=doc_id,
+            source_path=source_path,
+            source_type=_decode_text(meta.get("source_type")) or ("web" if source_url else ("file" if source_path else "")),
+            file_kind=file_kind,
+            title=_decode_text(meta.get("title")),
+            section_path=_decode_text(meta.get("section_path")),
+            byte_start=_decode_int(meta.get("byte_start")),
+            byte_end=_decode_int(meta.get("byte_end")),
+            token_start=_decode_int(meta.get("token_start")),
+            token_end=_decode_int(meta.get("token_end")) or int(tokens.shape[0]),
+            content_hash=_decode_text(meta.get("content_hash")),
+            build_id=_decode_text(meta.get("build_id")),
+            ingested_at=_decode_text(meta.get("ingested_at")),
+            source_id=_decode_text(meta.get("source_id")),
+            source_url=source_url,
+            source_date=_decode_text(meta.get("source_date")),
+            source_token_count=_decode_int(meta.get("source_token_count")),
+            num_bytes=_decode_int(meta.get("num_bytes")),
+            document_preview=_decode_text(meta.get("document_preview")),
+        )
+
+    def _preview(
+        self,
+        source_path: str,
+        tokens: np.ndarray,
+        span: Tuple[int, int],
+        query_text: str,
+        document_preview: str = "",
+    ) -> str:
         needle = self._backend().detokenize([tokens[slice(*span)].tolist()])[0].strip() if span[1] > span[0] else ""
         source_file = Path(self.source_root) / source_path if source_path else None
         if source_file and source_file.exists():
@@ -125,18 +170,29 @@ class Searcher:
                 if idx >= 0:
                     return _snippet(text, idx, idx + len(needle))
             return _snippet(text, 0, min(len(text), 160))
+        if document_preview:
+            if query_text:
+                idx = document_preview.find(query_text)
+                if idx >= 0:
+                    return _snippet(document_preview, idx, idx + len(query_text))
+            if needle:
+                idx = document_preview.find(needle)
+                if idx >= 0:
+                    return _snippet(document_preview, idx, idx + len(needle))
+            return _snippet(document_preview, 0, min(len(document_preview), 160))
         span_tokens = tokens[slice(*span)] if span[1] > span[0] else tokens[: min(len(tokens), 64)]
         return self._backend().detokenize([span_tokens.tolist()])[0].strip()
 
     def _hit(self, doc_id: int, score: float, span: Tuple[int, int], mode: str, query_text: str) -> Hit:
         tokens, meta = self._doc_context(doc_id)
-        source_path = self._source_path(meta)
+        document = self._document_record(doc_id, meta, tokens)
         return Hit(
             doc_id=doc_id,
             score=float(score),
             span=span,
-            source_path=source_path,
-            preview_text=self._preview(source_path, tokens, span, query_text),
+            document=document,
+            source_path=document.source_path,
+            preview_text=self._preview(document.source_path, tokens, span, query_text, document.document_preview),
             query_mode=mode,
         )
 
@@ -188,7 +244,7 @@ class Searcher:
         if doc_id not in docs:
             return []
         anchor_tokens, anchor_meta = self._doc_context(doc_id)
-        anchor_path = self._source_path(anchor_meta)
+        anchor_document = self._document_record(doc_id, anchor_meta, anchor_tokens)
         anchor_windows = docs[doc_id]
         ranked = []
         for other_id, other_windows in docs.items():
@@ -209,8 +265,14 @@ class Searcher:
         for dist, other_id, other_span, anchor_span in ranked[:top_k]:
             hit = self._hit(other_id, 1.0 / (1.0 + dist), other_span, "neighbor", "")
             hit.anchor_span = anchor_span
-            hit.anchor_source_path = anchor_path
-            hit.anchor_preview_text = self._preview(anchor_path, anchor_tokens, anchor_span, "")
+            hit.anchor_source_path = anchor_document.source_path
+            hit.anchor_preview_text = self._preview(
+                anchor_document.source_path,
+                anchor_tokens,
+                anchor_span,
+                "",
+                anchor_document.document_preview,
+            )
             hits.append(hit)
         return hits
 
@@ -340,6 +402,7 @@ def main() -> None:
             "source_path": hit.source_path,
             "preview_text": hit.preview_text,
             "query_mode": hit.query_mode,
+            "document": asdict(hit.document),
         }))
 
 
