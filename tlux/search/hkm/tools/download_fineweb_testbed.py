@@ -1,0 +1,148 @@
+"""Download a tiny FineWeb slice as plain text files for HKM testing.
+
+Fetches embedded rows from Hugging Face dataset viewer pages instead of
+downloading multi-gigabyte parquet shards. The output directory is intentionally
+ignored by git so local test corpora never enter source control.
+
+Example:
+  bin/hkm-python tools/download_fineweb_testbed.py --docs 64
+"""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import os
+import re
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+# Fetch one page of rows from the Hugging Face dataset viewer.
+#
+# Arguments:
+#   dataset (str): Hugging Face dataset id.
+#   config (str): Dataset config name.
+#   split (str): Dataset split name.
+#   page (int): Viewer page index.
+#
+# Returns:
+#   (dict[str, Any]): Viewer sample data.
+#
+def fetch_page(dataset: str, config: str, split: str, page: int) -> dict[str, Any]:
+    url = (
+        f"https://huggingface.co/datasets/{dataset}/viewer/"
+        f"{urllib.parse.quote(config)}/{urllib.parse.quote(split)}?p={page}"
+    )
+    with urllib.request.urlopen(url, timeout=60) as response:
+        source = response.read().decode("utf-8")
+    match = re.search(r'data-target="DatasetViewerContent" data-props="(.*?)"', source)
+    if match is None:
+        match = re.search(r'data-target="DatasetViewer" data-props="(.*?)"', source)
+    if match is None:
+        raise RuntimeError("Could not find embedded dataset viewer rows.")
+    props = json.loads(html.unescape(match.group(1)))
+    data = props["datasetViewerData"] if "datasetViewerData" in props else props["data"]
+    return data["sampleData"]
+
+
+# Convert metadata text into a compact filename-safe token.
+#
+# Arguments:
+#   text (str): Metadata value.
+#
+# Returns:
+#   (str): Lowercase ASCII-ish slug.
+#
+def slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "doc"
+
+
+# Write selected dataset rows as text files and a JSONL manifest.
+#
+# Arguments:
+#   output (Path): Root output directory.
+#   rows (list[dict[str, Any]]): Dataset viewer row wrappers.
+#
+# Returns:
+#   (None): Writes files to disk.
+#
+def write_rows(output: Path, rows: list[dict[str, Any]]) -> None:
+    docs = output / "docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    with (output / "manifest.jsonl").open("w", encoding="utf-8") as manifest:
+        for i, wrapped in enumerate(rows):
+            row = {key: value["value"] for key, value in wrapped["cells"].items()}
+            name = f"{i:05d}_{slug(row.get('dump', 'fineweb'))}_{slug(row.get('url', ''))}.txt"
+            path = docs / name
+            path.write_text(row["text"].strip() + "\n", encoding="utf-8")
+            manifest.write(json.dumps({
+                "file": str(path.relative_to(output)),
+                "row_idx": wrapped["rowIdx"],
+                "id": row.get("id"),
+                "dump": row.get("dump"),
+                "url": row.get("url"),
+                "date": row.get("date"),
+                "token_count": row.get("token_count"),
+            }, sort_keys=True) + "\n")
+
+
+# Select deterministic page offsets spread across the dataset.
+#
+# Arguments:
+#   total (int): Total rows in the split.
+#   count (int): Number of documents wanted.
+#   page_size (int): Number of rows read from each offset.
+#
+# Returns:
+#   (list[int]): Row offsets.
+#
+def offsets(total: int, count: int, page_size: int) -> list[int]:
+    pages = max(1, min(8, count))
+    page_count = max(1, total // page_size)
+    step = max(1, page_count // pages)
+    return [min(page_count - 1, i * step) for i in range(pages)]
+
+
+# Command-line entry point.
+#
+# Arguments:
+#   None.
+#
+# Returns:
+#   (None): Downloads and writes the local testbed.
+#
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Download a tiny FineWeb test corpus")
+    parser.add_argument("--docs", type=int, default=64)
+    parser.add_argument("--dataset", default="HuggingFaceFW/fineweb")
+    parser.add_argument("--config", default="sample-10BT")
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--output", default="data/fineweb_sample")
+    args = parser.parse_args()
+
+    first = fetch_page(args.dataset, args.config, args.split, 0)
+    total = int(first["paginationData"]["numTotalItems"])
+    page_size = int(first["paginationData"]["numItemsPerPage"])
+    per_page = max(1, (args.docs + 7) // 8)
+    rows = []
+    for offset in offsets(total, args.docs, page_size):
+        rows.extend(fetch_page(args.dataset, args.config, args.split, offset)["sampleData"]["rows"][:per_page])
+
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    write_rows(output, rows[:args.docs])
+    (output / "README.txt").write_text(
+        f"{len(rows[:args.docs])} documents from {args.dataset}/{args.config}/{args.split}.\n"
+        f"Generated by: {os.path.relpath(__file__)} --docs {args.docs}\n"
+        "Source: https://huggingface.co/datasets/HuggingFaceFW/fineweb\n",
+        encoding="utf-8",
+    )
+    print(output / "docs")
+
+
+if __name__ == "__main__":
+    main()
