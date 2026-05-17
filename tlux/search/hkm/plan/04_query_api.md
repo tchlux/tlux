@@ -1,5 +1,7 @@
 # Query API
 
+Status: next.
+
 Goal: provide one stable query surface for CLI, TUI, and future UIs.
 
 Why it matters:
@@ -10,7 +12,7 @@ explicit modes and filters.
 
 Scope:
 
-- Make plain text query default to hybrid search.
+- Document and stabilize the existing plain-text hybrid search default.
 - Keep explicit `token`, `semantic`, and `hybrid` modes.
 - Add path and file-kind filters.
 - Add pagination or cursor support.

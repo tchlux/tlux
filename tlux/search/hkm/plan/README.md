@@ -7,11 +7,11 @@ Recommended order:
 
 1. Ingestion policy. Done.
 2. Stable document model. Done.
-3. Search result quality. Next.
-4. Query API.
+3. Search result quality. Done.
+4. Query API. Next.
 5. Incremental builds.
 6. Operational observability.
 
-The next concrete task should be search result quality: hybrid ranking,
-deduplication, better snippets, and match reasons on top of the stable document
-records now attached to every hit.
+The next concrete task should be Query API: stabilize the JSON request and
+response schema now that hybrid ranking, deduplication, snippets, and match
+reasons are available on top of stable document records.

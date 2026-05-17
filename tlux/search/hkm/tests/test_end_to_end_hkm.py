@@ -200,6 +200,51 @@ def test_fineweb_manifest_enriches_document_record(tmp_path: Path, monkeypatch) 
     assert "4" in missing_source_hit.preview_text
 
 
+def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    (docs_src / "alpha_report.txt").write_text("90 91 92 Alpha launch notes and exact preview text", encoding="utf-8")
+    (docs_src / "near_numbers.txt").write_text("0 1 2 3 semantic only baseline", encoding="utf-8")
+    (docs_src / "other.txt").write_text("50 51 52 unrelated", encoding="utf-8")
+
+    index_root = tmp_path / "idx"
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(index_root),
+        num_workers=1,
+        max_k=2,
+        leaf_doc_limit=100,
+        fs_root=str(index_root),
+        seed=0,
+    )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    searcher = Searcher.from_index_root(str(index_root))
+    default_hits = searcher.search({"text": "alpha", "top_k": 3}).docs
+    assert default_hits[0].query_mode == "hybrid"
+    assert default_hits[0].source_path == "alpha_report.txt"
+    assert {"semantic", "path", "title", "preview"} <= set(default_hits[0].match_reasons)
+    assert "Alpha" in default_hits[0].preview_text
+    assert default_hits[0].semantic_score > 0.0
+
+    token_hits = searcher.search({"mode": "token", "text": "90 91", "top_k": 2}).docs
+    semantic_hits = searcher.search({"mode": "semantic", "text": "0 1 2 3", "top_k": 2}).docs
+    hybrid_token_hits = searcher.search({"text": "90 91", "top_k": 2}).docs
+    assert token_hits[0].query_mode == "token"
+    assert semantic_hits[0].query_mode == "semantic"
+    assert hybrid_token_hits[0].token_score > 0.0
+    assert "token" in hybrid_token_hits[0].match_reasons
+
+    duplicate = searcher._hit(default_hits[0].doc_id, 1.0, default_hits[0].span, "token", "alpha")
+    grouped = {default_hits[0].source_path: default_hits[0]}
+    searcher._merge_hybrid_hit(grouped, duplicate)
+    assert len(grouped) == 1
+    assert {"token", "semantic", "path", "title", "preview"} <= set(grouped[default_hits[0].source_path].match_reasons)
+
+
 def test_content_hash_is_stable_when_doc_id_changes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     docs_src = tmp_path / "corpus"

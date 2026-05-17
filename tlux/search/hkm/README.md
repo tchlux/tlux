@@ -8,7 +8,7 @@ HKM is a Python library for building and searching a hierarchical chunk index ov
 - Local-machine usage is the default: enqueue jobs and let local workers execute them.
 - Distributed usage uses the same job directory on a shared filesystem and workers started on every participating host.
 - The current index format is the directory-based `.hkmchunk` layout written by [`builder/chunk_io.py`](builder/chunk_io.py).
-- The current query surface supports hierarchical token pruning plus semantic text queries, with exact token verification at leaves.
+- The current query surface supports hybrid text search, hierarchical token pruning, and semantic text queries, with exact token verification at leaves.
 - Metadata filters, preview streaming, and richer retrieval planning are not current supported features even if older prototype code mentioned them.
 
 ## Installation
@@ -122,6 +122,9 @@ Search results currently return:
 - `source_path`
 - `preview_text`
 - `query_mode`
+- `match_reasons`
+- `semantic_score`
+- `token_score`
 - `document` with stable source path, type, title, byte/token spans, content
   hash, build timestamps, optional source URL metadata, and stored preview text
 

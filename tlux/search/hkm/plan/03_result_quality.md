@@ -1,6 +1,6 @@
 # Search Result Quality
 
-Status: next.
+Status: done.
 
 Goal: make results useful, explainable, and ranked well enough for daily use.
 
@@ -24,3 +24,12 @@ Done when:
 - Plain text queries return sensible top results without choosing a mode.
 - Repeated passages from the same source do not crowd out the result page.
 - Token matches and semantic matches both contribute to ranking.
+
+Completed:
+
+- Plain text query dictionaries now default to hybrid search.
+- Hybrid search merges semantic candidates, token matches, and lightweight
+  source path/title/section/preview evidence.
+- Hybrid results deduplicate by source path, expose match reasons plus semantic
+  and token score fields, and use case-insensitive query-centered snippets.
+- CLI JSON output includes the new additive result fields.

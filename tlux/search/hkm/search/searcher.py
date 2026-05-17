@@ -36,6 +36,31 @@ def _snippet(text: str, start: int, end: int, radius: int = 120) -> str:
     return " ".join(text[lo:hi].split()).strip()
 
 
+# Find the case-insensitive full-query or first-term match in text.
+#
+# Arguments:
+#   text (str): Candidate text to scan.
+#   query_text (str): User query.
+#
+# Returns:
+#   (Tuple[int, int]): Start/end character offsets, or (-1, -1).
+#
+def _match_start(text: str, query_text: str) -> Tuple[int, int]:
+    haystack = text.lower()
+    query = query_text.strip().lower()
+    if not haystack or not query:
+        return (-1, -1)
+    idx = haystack.find(query)
+    if idx >= 0:
+        return (idx, idx + len(query))
+    best = (-1, -1)
+    for term in query.split():
+        idx = haystack.find(term)
+        if idx >= 0 and (best[0] < 0 or idx < best[0]):
+            best = (idx, idx + len(term))
+    return best
+
+
 def _default_span(tokens: np.ndarray, limit: int = 64) -> Tuple[int, int]:
     return (0, min(int(tokens.shape[0]), limit))
 
@@ -161,20 +186,18 @@ class Searcher:
         source_file = Path(self.source_root) / source_path if source_path else None
         if source_file and source_file.exists():
             text = source_file.read_text(encoding="utf-8", errors="ignore")
-            if query_text:
-                idx = text.find(query_text)
-                if idx >= 0:
-                    return _snippet(text, idx, idx + len(query_text))
+            start, end = _match_start(text, query_text)
+            if start >= 0:
+                return _snippet(text, start, end)
             if needle:
                 idx = text.find(needle)
                 if idx >= 0:
                     return _snippet(text, idx, idx + len(needle))
             return _snippet(text, 0, min(len(text), 160))
         if document_preview:
-            if query_text:
-                idx = document_preview.find(query_text)
-                if idx >= 0:
-                    return _snippet(document_preview, idx, idx + len(query_text))
+            start, end = _match_start(document_preview, query_text)
+            if start >= 0:
+                return _snippet(document_preview, start, end)
             if needle:
                 idx = document_preview.find(needle)
                 if idx >= 0:
@@ -194,6 +217,9 @@ class Searcher:
             source_path=document.source_path,
             preview_text=self._preview(document.source_path, tokens, span, query_text, document.document_preview),
             query_mode=mode,
+            match_reasons=[mode] if mode in {"semantic", "token"} else [],
+            semantic_score=float(score) if mode == "semantic" else 0.0,
+            token_score=float(score) if mode == "token" else 0.0,
         )
 
     def _leaf_manifest(self, node_dir: str | Path) -> Tuple[Path, Dict[str, object]]:
@@ -325,7 +351,7 @@ class Searcher:
     def search(self, query_dict) -> SearchResult:
         spec = query_dict if isinstance(query_dict, QuerySpec) else QuerySpec(
             text=query_dict.get("text", ""),
-            mode=query_dict.get("mode", "semantic"),
+            mode=query_dict.get("mode", "hybrid"),
             embeddings=query_dict.get("embeddings", []),
             token_sequence=query_dict.get("token_sequence", []),
             label_include=query_dict.get("label_include", {}),
@@ -342,6 +368,8 @@ class Searcher:
             query_ids = self._backend().tokenize([spec.text])
             query_emb = self._backend().embed(query_ids, role="query")[0]
             return SearchResult(docs=self._search_embeddings(query_emb, spec.top_k, spec.text))
+        if spec.text and spec.mode == "hybrid":
+            return SearchResult(docs=self._search_hybrid(spec.text, spec.top_k))
         return SearchResult(docs=[])
 
     def _search_tokens(self, token_sequence: List[int], top_k: int, query_text: str) -> List[Hit]:
@@ -377,6 +405,101 @@ class Searcher:
         ranked = sorted(best.items(), key=lambda item: item[1][0])[:top_k]
         return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for doc_id, (dist, span) in ranked]
 
+    # Find documents whose stable metadata contains the query text.
+    #
+    # Arguments:
+    #   query_text (str): User query.
+    #
+    # Returns:
+    #   (List[Hit]): Metadata-backed candidate hits.
+    #
+    def _metadata_hits(self, query_text: str) -> List[Hit]:
+        hits: List[Hit] = []
+        self._load_doc_index()
+        for doc_id in sorted(self._doc_rows):
+            tokens, meta = self._doc_context(doc_id)
+            document = self._document_record(doc_id, meta, tokens)
+            fields = {
+                "path": document.source_path,
+                "title": document.title,
+                "section": document.section_path,
+                "preview": document.document_preview,
+            }
+            reasons = [name for name, value in fields.items() if _match_start(value, query_text)[0] >= 0]
+            if reasons:
+                hit = self._hit(doc_id, 0.0, _default_span(tokens), "hybrid", query_text)
+                hit.match_reasons = reasons
+                hits.append(hit)
+        return hits
+
+    # Compute a simple additive hybrid score from evidence fields.
+    #
+    # Arguments:
+    #   hit (Hit): Candidate hit with reason and score components.
+    #
+    # Returns:
+    #   (float): Combined ranking score.
+    #
+    def _hybrid_score(self, hit: Hit) -> float:
+        reasons = set(hit.match_reasons)
+        score = 0.6 * hit.semantic_score + hit.token_score
+        score += 0.75 if "path" in reasons else 0.0
+        score += 0.50 if "title" in reasons else 0.0
+        score += 0.25 if "section" in reasons else 0.0
+        score += 0.35 if "preview" in reasons else 0.0
+        return score
+
+    # Merge a candidate hit into the source-level grouped result map.
+    #
+    # Arguments:
+    #   grouped (Dict[str, Hit]): Source-keyed best hits.
+    #   hit (Hit): New candidate hit.
+    #
+    # Returns:
+    #   (None): Mutates grouped in place.
+    #
+    def _merge_hybrid_hit(self, grouped: Dict[str, Hit], hit: Hit) -> None:
+        key = hit.source_path or str(hit.doc_id)
+        existing = grouped.get(key)
+        if existing is None:
+            hit.query_mode = "hybrid"
+            hit.score = self._hybrid_score(hit)
+            grouped[key] = hit
+            return
+        replace_preview = hit.token_score > existing.token_score or hit.semantic_score > existing.semantic_score
+        existing.semantic_score = max(existing.semantic_score, hit.semantic_score)
+        existing.token_score = max(existing.token_score, hit.token_score)
+        existing.match_reasons = sorted(set(existing.match_reasons) | set(hit.match_reasons))
+        if hit.span != (0, 0) and replace_preview:
+            existing.span = hit.span
+            existing.preview_text = hit.preview_text
+        existing.score = self._hybrid_score(existing)
+
+    # Search by combining semantic, token, and metadata evidence.
+    #
+    # Arguments:
+    #   query_text (str): User query.
+    #   top_k (int): Maximum result count.
+    #
+    # Returns:
+    #   (List[Hit]): Ranked, source-deduplicated hybrid hits.
+    #
+    def _search_hybrid(self, query_text: str, top_k: int) -> List[Hit]:
+        candidate_count = max(top_k * 4, 20)
+        grouped: Dict[str, Hit] = {}
+        query_ids = self._backend().tokenize([query_text])
+        query_tokens = query_ids[0] if query_ids else []
+        query_emb = self._backend().embed(query_ids, role="query")[0]
+        for hit in self._search_embeddings(query_emb, candidate_count, query_text):
+            self._merge_hybrid_hit(grouped, hit)
+        if query_tokens:
+            for hit in self._search_tokens(query_tokens, candidate_count, query_text):
+                self._merge_hybrid_hit(grouped, hit)
+        for hit in self._metadata_hits(query_text):
+            self._merge_hybrid_hit(grouped, hit)
+        hits = sorted(grouped.values(), key=lambda hit: (-hit.score, hit.source_path, hit.doc_id))
+        return hits[:top_k]
+
 
 # Run the search CLI against an existing index root.
 #
@@ -402,6 +525,9 @@ def main() -> None:
             "source_path": hit.source_path,
             "preview_text": hit.preview_text,
             "query_mode": hit.query_mode,
+            "match_reasons": hit.match_reasons,
+            "semantic_score": hit.semantic_score,
+            "token_score": hit.token_score,
             "document": asdict(hit.document),
         }))
 

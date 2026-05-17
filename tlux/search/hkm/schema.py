@@ -76,7 +76,7 @@ class QuerySpec:
     * ``token_sequence`` - low-level token IDs (reserved for later HKM path).  
     """
     text: str = ""
-    mode: str = "semantic"
+    mode: str = "hybrid"
     embeddings: List = field(default_factory=list)
     token_sequence: List[int] = field(default_factory=list)
     label_include: Dict[str, List[str]] = field(default_factory=dict)
@@ -121,6 +121,9 @@ class Hit:
     anchor_source_path: str = ""
     anchor_preview_text: str = ""
     document: DocumentRecord = field(default_factory=DocumentRecord)
+    match_reasons: List[str] = field(default_factory=list)
+    semantic_score: float = 0.0
+    token_score: float = 0.0
 
 
 @dataclass
