@@ -9,9 +9,9 @@ Recommended order:
 2. Stable document model. Done.
 3. Search result quality. Done.
 4. Query API. Done.
-5. Incremental builds. Next.
-6. Operational observability.
+5. Incremental builds. Done.
+6. Operational observability. Next.
 
-The next concrete task should be Incremental Builds: reuse unchanged source
-documents now that ingestion, document identity, ranking, and the public query
-schema are stable.
+The next concrete task should be Operational Observability: make long builds
+and searches inspectable now that ingestion, document identity, ranking, query
+schema, and incremental reuse are stable.

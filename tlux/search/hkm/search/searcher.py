@@ -164,6 +164,7 @@ class Searcher:
     metadata_schema: List[Tuple[str, type]]
     backend_name: str
     max_n_gram: int = 3
+    append_only: bool = False
     _doc_index: np.ndarray | None = field(default=None, init=False, repr=False)
     _doc_rows: Dict[int, np.void] = field(default_factory=dict, init=False, repr=False)
     _reader_cache: Dict[str, ChunkReader] = field(default_factory=dict, init=False, repr=False)
@@ -186,6 +187,7 @@ class Searcher:
             metadata_schema=_parse_metadata_schema(data.get("metadata_schema", [])),
             backend_name=data.get("embedder_backend", "drama"),
             max_n_gram=int(data.get("max_n_gram", data.get("build_config", {}).get("max_n_gram", 3))),
+            append_only=bool(data.get("append_only", False)),
         )
 
     def _backend(self):
@@ -199,6 +201,10 @@ class Searcher:
 
     def _doc_count(self) -> int:
         return int(self._load_doc_index().shape[0])
+
+    def _active_doc_ids(self) -> set[int]:
+        self._load_doc_index()
+        return set(self._doc_rows)
 
     def _chunk_reader(self, chunk_path: str, metadata_schema: List[Tuple[str, type]]) -> ChunkReader:
         if chunk_path not in self._reader_cache:
@@ -322,6 +328,7 @@ class Searcher:
     def _leaf_windows(self, node_dir: str | Path) -> Dict[int, List[Tuple[np.ndarray, Tuple[int, int]]]]:
         path, node = self._leaf_manifest(node_dir)
         docs: Dict[int, List[Tuple[np.ndarray, Tuple[int, int]]]] = {}
+        active = self._active_doc_ids()
         for chunk_root in node.get("chunk_roots", []):
             for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
                 reader = self._chunk_reader(str(chunk_path), [])
@@ -329,6 +336,8 @@ class Searcher:
                     continue
                 for emb, meta in zip(reader.embeddings, reader.embed_index):
                     doc_id = int(meta["document_id"])
+                    if doc_id not in active:
+                        continue
                     span = (int(meta["token_start"]), int(meta["token_end"]))
                     docs.setdefault(doc_id, []).append((emb.astype(np.float32, copy=True), span))
         return docs
@@ -398,16 +407,20 @@ class Searcher:
     def _scan_leaf_tokens(self, node_dir: str | Path, target: bytes, token_sequence: List[int], query_text: str) -> List[Hit]:
         hits = []
         path, node = self._leaf_manifest(node_dir)
+        active = self._active_doc_ids()
         for chunk_root in node.get("chunk_roots", []):
             for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
                 reader = self._chunk_reader(str(chunk_path), [])
                 base = int(reader.chunk_metadata().get("min_document_id", 0) or 0)
                 for idx in range(reader.document_count):
+                    doc_id = base + idx
+                    if doc_id not in active:
+                        continue
                     tokens, _, _, _ = reader[idx]
                     pos = tokens.tobytes().find(target)
                     if pos >= 0:
                         hit_pos = pos // 4
-                        hits.append(self._hit(base + idx, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+                        hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
         return hits
 
     def _search_token_node(self, node_dir: Path, target: bytes, token_sequence: List[int], query_text: str, hits: List[Hit]) -> None:
@@ -565,12 +578,39 @@ class Searcher:
         target = _seq_to_bytes(token_sequence)
         hits: List[Hit] = []
         self._search_token_node(Path(self.hkm_root), target, token_sequence, query_text, hits)
+        if self.append_only:
+            seen = {hit.doc_id for hit in hits}
+            for hit in self._scan_active_tokens(target, token_sequence, query_text):
+                if hit.doc_id not in seen:
+                    hits.append(hit)
+                    seen.add(hit.doc_id)
         hits.sort(key=lambda hit: hit.doc_id)
         return hits[:top_k]
+
+    # Verify token matches against active canonical documents.
+    #
+    # Arguments:
+    #   target (bytes): Encoded query token sequence.
+    #   token_sequence (List[int]): Query token ids.
+    #   query_text (str): Raw query text.
+    #
+    # Returns:
+    #   (List[Hit]): Active document token hits.
+    #
+    def _scan_active_tokens(self, target: bytes, token_sequence: List[int], query_text: str) -> List[Hit]:
+        hits = []
+        for doc_id in sorted(self._active_doc_ids()):
+            tokens, _ = self._doc_context(doc_id)
+            pos = tokens.tobytes().find(target)
+            if pos >= 0:
+                hit_pos = pos // 4
+                hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+        return hits
 
     def _search_node(self, node_dir: Path, query_emb: np.ndarray, best: Dict[int, Tuple[float, Tuple[int, int]]]) -> None:
         node = json.loads((node_dir / "node.json").read_text(encoding="utf-8"))
         if node.get("is_leaf", False):
+            active = self._active_doc_ids()
             for chunk_root in node.get("chunk_roots", []):
                 for chunk_path in sorted((node_dir / chunk_root).rglob("*.hkmchunk")):
                     reader = self._chunk_reader(str(chunk_path), [])
@@ -579,6 +619,8 @@ class Searcher:
                     dists = np.linalg.norm(reader.embeddings - query_emb[None, :], axis=1)
                     for dist, meta in zip(dists, reader.embed_index):
                         doc_id = int(meta["document_id"])
+                        if doc_id not in active:
+                            continue
                         span = (int(meta["token_start"]), int(meta["token_end"]))
                         if doc_id not in best or dist < best[doc_id][0]:
                             best[doc_id] = (float(dist), span)

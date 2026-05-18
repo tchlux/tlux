@@ -34,12 +34,16 @@ def _merge_ingest_summary(index_root: str, workers: List[Path]) -> None:
     failed_files = list(summary.get("failed_files", []))
     reasons: Dict[str, int] = dict(summary.get("skip_reasons", {}))
     indexed = 0
+    cache_hits = int(summary.get("cache_hits", 0))
+    cache_misses = int(summary.get("cache_misses", 0))
     for worker_path in workers:
         report_path = worker_path / "ingest_report.json"
         if not report_path.exists():
             continue
         report = json.loads(report_path.read_text(encoding="utf-8"))
         indexed += int(report.get("indexed", 0))
+        cache_hits += int(report.get("cache_hits", 0))
+        cache_misses += int(report.get("cache_misses", 0))
         for item in report.get("skipped_files", []):
             reason = item.get("reason", "worker_skip")
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -48,6 +52,8 @@ def _merge_ingest_summary(index_root: str, workers: List[Path]) -> None:
     summary["indexed"] = indexed
     summary["skipped"] = len(skipped_files)
     summary["failed"] = len(failed_files)
+    summary["cache_hits"] = cache_hits
+    summary["cache_misses"] = cache_misses
     summary["skip_reasons"] = reasons
     summary["skipped_files"] = skipped_files
     summary["failed_files"] = failed_files

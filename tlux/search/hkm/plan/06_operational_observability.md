@@ -1,5 +1,7 @@
 # Operational Observability
 
+Status: next.
+
 Goal: make long builds and searches inspectable.
 
 Why it matters:

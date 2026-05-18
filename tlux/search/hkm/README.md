@@ -89,6 +89,9 @@ The CLI prints one JSON object with `docs`, `offset`, `limit`, `count`,
 `next_offset`, and the normalized `query`.
 
 The build CLI prints the root build job id. Jobs are stored under `idx/.hkm_jobs` by default.
+Builds are incremental by default when a compatible `manifests/source_snapshot.json`
+exists. Use `--full-rebuild` to rebuild the HKM tree while preserving cached
+document embeddings.
 
 ## Current on-disk layout
 
@@ -96,7 +99,11 @@ The build CLI prints the root build job id. Jobs are stored under `idx/.hkm_jobs
 index_root/
   index.json
   .hkm_jobs/
+  .hkm_cache/
+    embeddings/
   manifests/
+    ingest_summary.json
+    source_snapshot.json
     worker_0000.json
   docs/
     doc_index.npy
@@ -131,7 +138,9 @@ index_root/
 
 The canonical query-time manifests and token artifacts are:
 
-- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, `max_n_gram`, `n_gram_fp_rate`, and relative `docs/` + `hkm/` paths
+- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, `max_n_gram`, `n_gram_fp_rate`, relative `docs/` + `hkm/` paths, and whether the tree has append-only incremental chunks
+- `manifests/source_snapshot.json` with active source paths, content hashes, doc ids, canonical chunk rows, and leaf paths for incremental reuse
+- `.hkm_cache/embeddings/` with reusable per-document tokens, embedding windows, and embeddings keyed by backend/window settings and content hash
 - `node.json` at each HKM node with child order, counts, preview files, token artifact paths, and whether local `data/` exists
 - `n_gram_counter.bytes` at each node with the node's merged unique-count sketch
 - `n_gram_exists.bytes` at each searchable node with the node's Bloom filter for token-pruned descent

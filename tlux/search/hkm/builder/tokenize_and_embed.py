@@ -29,13 +29,15 @@ from .chunk_io import (
     CATEGORY_NULL,
     NUMBER_NULL,
     ChunkReader,
-ChunkWriter,
+    ChunkWriter,
 )
 
 DocumentValue = Union[str, float, int, bytes, list, dict, None]
 DocumentBatch = Iterable[Tuple[List[str], List[List[DocumentValue]]]]
 MetadataSchema = List[Tuple[str, type]]
 DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
+EMBED_CACHE_WINDOWS = (32, 128, 512, 1024)
+EMBED_CACHE_OVERLAP = 0.5
 
 
 # Return the current UTC timestamp as a compact ISO string.
@@ -117,6 +119,94 @@ def _set_metadata(metadata: List[DocumentValue], field_names: Dict[str, int], na
         metadata[field_names[name]] = value
 
 
+# Return a stable cache key for a document embedding artifact.
+#
+# Arguments:
+#   backend_name (str): Active embedder backend.
+#   content_hash (str): SHA256 of the source bytes.
+#
+# Returns:
+#   (str): Hex cache key.
+#
+def _embedding_cache_key(backend_name: str, content_hash: str) -> str:
+    payload = {
+        "backend": backend_name,
+        "windows": EMBED_CACHE_WINDOWS,
+        "overlap": EMBED_CACHE_OVERLAP,
+        "content_hash": content_hash,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("ascii")).hexdigest()
+
+
+# Load cached tokens and embeddings for a source content hash.
+#
+# Arguments:
+#   cache_root (str | None): Embedding cache directory.
+#   backend_name (str): Active embedder backend.
+#   content_hash (str): SHA256 of the source bytes.
+#
+# Returns:
+#   (tuple[list[int], np.ndarray, list[tuple[int, int, int]]] | None): Cached
+#   tokens, embeddings, and window metadata.
+#
+def _load_embedding_cache(
+    cache_root: str | None,
+    backend_name: str,
+    content_hash: str,
+) -> tuple[List[int], np.ndarray, List[Tuple[int, int, int]]] | None:
+    if cache_root is None:
+        return None
+    path = Path(cache_root) / f"{_embedding_cache_key(backend_name, content_hash)}.npz"
+    if not path.exists():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            tokens = data["tokens"].astype(np.uint32, copy=False).tolist()
+            embeddings = data["embeddings"].astype(np.float32, copy=False)
+            windows = [tuple(int(v) for v in row) for row in data["windows"]]
+        return tokens, embeddings, windows
+    except Exception:
+        return None
+
+
+# Persist tokens and embeddings for reuse by later builds.
+#
+# Arguments:
+#   cache_root (str | None): Embedding cache directory.
+#   backend_name (str): Active embedder backend.
+#   content_hash (str): SHA256 of the source bytes.
+#   tokens (list[int]): Tokenized source document.
+#   embeddings (np.ndarray): Window embedding matrix.
+#   windows (list[tuple[int, int, int]]): Embedding window metadata.
+#
+# Returns:
+#   (None): Writes the cache entry when a cache root is configured.
+#
+def _write_embedding_cache(
+    cache_root: str | None,
+    backend_name: str,
+    content_hash: str,
+    tokens: List[int],
+    embeddings: np.ndarray,
+    windows: List[Tuple[int, int, int]],
+) -> None:
+    if cache_root is None:
+        return
+    root = Path(cache_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{_embedding_cache_key(backend_name, content_hash)}.npz"
+    if path.exists():
+        return
+    tmp = path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        tmp,
+        tokens=np.asarray(tokens, dtype=np.uint32),
+        embeddings=embeddings.astype(np.float32, copy=False),
+        windows=np.asarray(windows, dtype=np.uint32),
+    )
+    os.replace(tmp, path)
+
+
 def process_documents(
     document_output_directory: str,
     summary_output_directory: str,
@@ -131,6 +221,7 @@ def process_documents(
     planned_count: int = 0,
     skipped_files: List[Dict[str, str]] | None = None,
     failed_files: List[Dict[str, str]] | None = None,
+    embedding_cache_dir: str | None = None,
 ) -> Tuple[str, str]:
     """Tokenize + embed batches, emit chunk directories and summary stats."""
     file_system = make_filesystem(fs_root)
@@ -156,6 +247,8 @@ def process_documents(
 
     total_docs = 0
     total_chunks = 0
+    cache_hits = 0
+    cache_misses = 0
     skipped_files = [] if skipped_files is None else skipped_files
     failed_files = [] if failed_files is None else failed_files
 
@@ -175,11 +268,24 @@ def process_documents(
         for text, metadata in zip(texts, metadata_list):
             print("  ", repr(str(metadata)[:40]), flush=True)
             source_path = _metadata_path(metadata)
-            try:
-                tokens = embedder.tokenize([text])[0]
-            except Exception as exc:
-                failed_files.append({"path": source_path, "reason": "tokenize_error", "error": str(exc)})
-                continue
+            content_hash = ""
+            if "content_hash" in field_names:
+                raw_hash = metadata[field_names["content_hash"]]
+                content_hash = raw_hash.decode("ascii", errors="ignore") if isinstance(raw_hash, bytes) else str(raw_hash)
+            backend_name = embedder.get_backend().name
+            cached = _load_embedding_cache(embedding_cache_dir, backend_name, content_hash)
+            if cached is None:
+                try:
+                    tokens = embedder.tokenize([text])[0]
+                except Exception as exc:
+                    failed_files.append({"path": source_path, "reason": "tokenize_error", "error": str(exc)})
+                    continue
+                cache_misses += 1
+                embeddings = np.empty((0, 0), dtype=np.float32)
+                embedding_windows: List[Tuple[int, int, int]] = []
+            else:
+                tokens, embeddings, embedding_windows = cached
+                cache_hits += 1
             if max_tokens is not None and len(tokens) > max_tokens:
                 skipped_files.append({"path": source_path, "reason": "max_tokens"})
                 continue
@@ -195,7 +301,20 @@ def process_documents(
                 for i in range(len(tokens) - n + 1):
                     ngram_bytes = b"".join(int(token & 0xFFFFFFFF).to_bytes(4, "little") for token in tokens[i : i + n])
                     ngram_counter.add(ngram_bytes)
-            embeddings, embedding_windows = embedder.embed_windows([tokens])
+            if cached is None:
+                embeddings, embedding_windows = embedder.embed_windows(
+                    [tokens],
+                    window_sizes=list(EMBED_CACHE_WINDOWS),
+                    window_overlap=EMBED_CACHE_OVERLAP,
+                )
+                _write_embedding_cache(
+                    embedding_cache_dir,
+                    backend_name,
+                    content_hash,
+                    tokens,
+                    embeddings,
+                    embedding_windows,
+                )
             doc_metadata: List[DocumentValue] = []
             for (field_name, field_type), value in zip(metadata_schema, metadata):
                 if field_type is float:
@@ -238,6 +357,8 @@ def process_documents(
             "indexed": total_docs,
             "skipped": len(skipped_files),
             "failed": len(failed_files),
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
             "skipped_files": skipped_files,
             "failed_files": failed_files,
         }
@@ -285,6 +406,7 @@ def default_worker(
     source_manifest: str | None = None,
     build_id: str | None = None,
     ingested_at: str | None = None,
+    embedding_cache_dir: str | None = None,
 ) -> None:
     """Process a shard of files in document_directory or an explicit manifest."""
     try:
@@ -297,7 +419,8 @@ def default_worker(
 
     if manifest_path is not None:
         with open(manifest_path, "r", encoding="utf-8") as f_manifest:
-            all_files = [Path(p) for p in json.load(f_manifest)]
+            manifest_rows = json.load(f_manifest)
+            all_files = [Path(row.get("path", row) if isinstance(row, dict) else row) for row in manifest_rows]
     else:
         all_files = sorted(Path(document_directory).rglob("*"))
         all_files = [p for p in all_files if p.is_file()]
@@ -362,6 +485,7 @@ def default_worker(
         ingest_report_path=str(Path(output_directory) / "ingest_report.json"),
         planned_count=len(my_files),
         failed_files=failed_files,
+        embedding_cache_dir=embedding_cache_dir,
     )
 
 
