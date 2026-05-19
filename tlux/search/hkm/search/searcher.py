@@ -342,22 +342,22 @@ class Searcher:
         source_file = Path(self.source_root) / source_path if source_path else None
         if source_file and source_file.exists():
             text = source_file.read_text(encoding="utf-8", errors="ignore")
-            start, end = _match_start(text, query_text)
-            if start >= 0:
-                return _snippet(text, start, end)
             if needle:
                 idx = text.find(needle)
                 if idx >= 0:
                     return _snippet(text, idx, idx + len(needle))
+            start, end = _match_start(text, query_text)
+            if start >= 0:
+                return _snippet(text, start, end)
             return _snippet(text, 0, min(len(text), 160))
         if document_preview:
-            start, end = _match_start(document_preview, query_text)
-            if start >= 0:
-                return _snippet(document_preview, start, end)
             if needle:
                 idx = document_preview.find(needle)
                 if idx >= 0:
                     return _snippet(document_preview, idx, idx + len(needle))
+            start, end = _match_start(document_preview, query_text)
+            if start >= 0:
+                return _snippet(document_preview, start, end)
             return _snippet(document_preview, 0, min(len(document_preview), 160))
         span_tokens = tokens[slice(*span)] if span[1] > span[0] else tokens[: min(len(tokens), 64)]
         return self._backend().detokenize([span_tokens.tolist()])[0].strip()
@@ -492,10 +492,13 @@ class Searcher:
                     if doc_id not in active:
                         continue
                     tokens, _, _, _ = reader[idx]
-                    pos = tokens.tobytes().find(target)
-                    if pos >= 0:
-                        hit_pos = pos // 4
-                        hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+                    token_bytes = tokens.tobytes()
+                    pos = token_bytes.find(target)
+                    while pos >= 0:
+                        if pos % 4 == 0:
+                            hit_pos = pos // 4
+                            hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+                        pos = token_bytes.find(target, pos + 4)
         return hits
 
     def _search_token_node(self, node_dir: Path, target: bytes, token_sequence: List[int], query_text: str, hits: List[Hit]) -> None:
@@ -633,7 +636,7 @@ class Searcher:
 
     def search(self, query_dict) -> SearchResult:
         spec = self._query_spec(query_dict)
-        candidate_count = self._doc_count()
+        candidate_count = max(self._doc_count(), spec.offset + spec.top_k)
         if spec.token_sequence:
             return self._page(self._search_tokens(spec.token_sequence, candidate_count, spec.text), spec)
         if spec.embeddings:
@@ -650,16 +653,19 @@ class Searcher:
         return self._page([], spec)
 
     def _search_tokens(self, token_sequence: List[int], top_k: int, query_text: str) -> List[Hit]:
+        if not token_sequence:
+            return []
         target = _seq_to_bytes(token_sequence)
         hits: List[Hit] = []
         self._search_token_node(Path(self.hkm_root), target, token_sequence, query_text, hits)
         if self.append_only:
-            seen = {hit.doc_id for hit in hits}
+            seen = {(hit.doc_id, hit.span) for hit in hits}
             for hit in self._scan_active_tokens(target, token_sequence, query_text):
-                if hit.doc_id not in seen:
+                key = (hit.doc_id, hit.span)
+                if key not in seen:
                     hits.append(hit)
-                    seen.add(hit.doc_id)
-        hits.sort(key=lambda hit: hit.doc_id)
+                    seen.add(key)
+        hits.sort(key=lambda hit: (hit.doc_id, hit.span))
         return hits[:top_k]
 
     # Verify token matches against active canonical documents.
@@ -676,13 +682,16 @@ class Searcher:
         hits = []
         for doc_id in sorted(self._active_doc_ids()):
             tokens, _ = self._doc_context(doc_id)
-            pos = tokens.tobytes().find(target)
-            if pos >= 0:
-                hit_pos = pos // 4
-                hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+            token_bytes = tokens.tobytes()
+            pos = token_bytes.find(target)
+            while pos >= 0:
+                if pos % 4 == 0:
+                    hit_pos = pos // 4
+                    hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
+                pos = token_bytes.find(target, pos + 4)
         return hits
 
-    def _search_node(self, node_dir: Path, query_emb: np.ndarray, best: Dict[int, Tuple[float, Tuple[int, int]]]) -> None:
+    def _search_node(self, node_dir: Path, query_emb: np.ndarray, ranked: List[Tuple[float, int, Tuple[int, int]]]) -> None:
         node = json.loads((node_dir / "node.json").read_text(encoding="utf-8"))
         if node.get("is_leaf", False):
             active = self._active_doc_ids()
@@ -697,19 +706,18 @@ class Searcher:
                         if doc_id not in active:
                             continue
                         span = (int(meta["token_start"]), int(meta["token_end"]))
-                        if doc_id not in best or dist < best[doc_id][0]:
-                            best[doc_id] = (float(dist), span)
+                        ranked.append((float(dist), doc_id, span))
             return
         centroids = np.load(node_dir / "centroids.npy")
         dists = np.linalg.norm(centroids - query_emb[None, :], axis=1)
         for idx in np.argsort(dists)[: min(2, len(node.get("children", [])))]:
-            self._search_node(node_dir / node["children"][int(idx)], query_emb, best)
+            self._search_node(node_dir / node["children"][int(idx)], query_emb, ranked)
 
     def _search_embeddings(self, query_emb: np.ndarray, top_k: int, query_text: str) -> List[Hit]:
-        best: Dict[int, Tuple[float, Tuple[int, int]]] = {}
-        self._search_node(Path(self.hkm_root), query_emb, best)
-        ranked = sorted(best.items(), key=lambda item: item[1][0])[:top_k]
-        return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for doc_id, (dist, span) in ranked]
+        ranked: List[Tuple[float, int, Tuple[int, int]]] = []
+        self._search_node(Path(self.hkm_root), query_emb, ranked)
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for dist, doc_id, span in ranked[:top_k]]
 
     # Find documents whose stable metadata contains the query text.
     #
@@ -755,17 +763,17 @@ class Searcher:
         score += 0.35 if "preview" in reasons else 0.0
         return score
 
-    # Merge a candidate hit into the source-level grouped result map.
+    # Merge a candidate hit into the passage-level grouped result map.
     #
     # Arguments:
-    #   grouped (Dict[str, Hit]): Source-keyed best hits.
+    #   grouped (Dict[Tuple[int, Tuple[int, int]], Hit]): Passage-keyed best hits.
     #   hit (Hit): New candidate hit.
     #
     # Returns:
     #   (None): Mutates grouped in place.
     #
-    def _merge_hybrid_hit(self, grouped: Dict[str, Hit], hit: Hit) -> None:
-        key = hit.source_path or str(hit.doc_id)
+    def _merge_hybrid_hit(self, grouped: Dict[Tuple[int, Tuple[int, int]], Hit], hit: Hit) -> None:
+        key = (hit.doc_id, hit.span)
         existing = grouped.get(key)
         if existing is None:
             hit.query_mode = "hybrid"
@@ -788,11 +796,11 @@ class Searcher:
     #   top_k (int): Maximum result count.
     #
     # Returns:
-    #   (List[Hit]): Ranked, source-deduplicated hybrid hits.
+    #   (List[Hit]): Ranked passage hits.
     #
     def _search_hybrid(self, query_text: str, top_k: int) -> List[Hit]:
         candidate_count = max(top_k * 4, 20)
-        grouped: Dict[str, Hit] = {}
+        grouped: Dict[Tuple[int, Tuple[int, int]], Hit] = {}
         query_ids = self._backend().tokenize([query_text])
         query_tokens = query_ids[0] if query_ids else []
         query_emb = self._backend().embed(query_ids, role="query")[0]
@@ -803,7 +811,7 @@ class Searcher:
                 self._merge_hybrid_hit(grouped, hit)
         for hit in self._metadata_hits(query_text):
             self._merge_hybrid_hit(grouped, hit)
-        hits = sorted(grouped.values(), key=lambda hit: (-hit.score, hit.source_path, hit.doc_id))
+        hits = sorted(grouped.values(), key=lambda hit: (-hit.score, hit.source_path, hit.doc_id, hit.span))
         return hits[:top_k]
 
 

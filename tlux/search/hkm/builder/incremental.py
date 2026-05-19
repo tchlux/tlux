@@ -141,6 +141,32 @@ def _row_metadata(docs_root: Path, row: np.void, schema: List[Tuple[str, type]])
     return {name: value for (name, _typ), value in zip(schema, values)}
 
 
+# Fail a build that planned files but published no active documents.
+#
+# Arguments:
+#   index_root (Path): Index root.
+#   active_count (int): Count of active document rows.
+#
+# Returns:
+#   (None): Raises when the build would publish an empty active index.
+#
+def _assert_non_empty_build(index_root: Path, active_count: int) -> None:
+    summary_path = index_root / "manifests" / "ingest_summary.json"
+    if not summary_path.exists():
+        return
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    planned = int(summary.get("planned", 0))
+    if planned <= 0 or active_count > 0:
+        return
+    skipped = int(summary.get("skipped", 0))
+    failed = int(summary.get("failed", 0))
+    reasons = dict(summary.get("skip_reasons", {}))
+    raise RuntimeError(
+        f"Build indexed zero documents: planned={planned} skipped={skipped} "
+        f"failed={failed} reasons={reasons}"
+    )
+
+
 # Write the active source snapshot from the current doc_index.
 #
 # Arguments:
@@ -154,9 +180,11 @@ def write_source_snapshot(index_root: str) -> None:
     manifest = json.loads((root / "index.json").read_text(encoding="utf-8"))
     schema = _parse_schema(manifest.get("metadata_schema", []))
     docs_root = root / manifest.get("docs_path", "docs")
+    doc_rows = _doc_rows(root)
+    _assert_non_empty_build(root, len(doc_rows))
     leaf_paths = _leaf_map(root / manifest.get("hkm_path", "hkm"))
     entries = []
-    for doc_id, row in sorted(_doc_rows(root).items()):
+    for doc_id, row in sorted(doc_rows.items()):
         meta = _row_metadata(docs_root, row, schema)
         entries.append({
             "source_path": _text(meta.get("source_path")),

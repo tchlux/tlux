@@ -365,20 +365,29 @@ def build_search_index(
     source_manifest: str | None = None,
     incremental: bool = True,
 ) -> Job:
-    # Validate input parameters
-    if not os.path.exists(docs_dir):
+    docs_dir_path = Path(docs_dir).resolve()
+    index_root_path = Path(index_root).resolve()
+    docs_dir = str(docs_dir_path)
+    index_root = str(index_root_path)
+
+    # Validate input parameters.
+    if not docs_dir_path.exists():
         raise ValueError(f"docs_dir '{docs_dir}' does not exist")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
     if fs_root is None:
         try:
-            fs_root = os.path.commonpath([os.path.abspath(docs_dir), os.path.abspath(index_root)])
+            fs_root = os.path.commonpath([docs_dir, index_root])
         except Exception:
-            fs_root = os.path.abspath(index_root)
+            fs_root = index_root
         if fs_root in ("", os.sep):
-            fs_root = os.path.abspath(index_root)
+            fs_root = index_root
+    else:
+        fs_root = str(Path(fs_root).resolve())
     if jobs_root is None:
-        jobs_root = os.path.join(index_root, ".hkm_jobs")
+        jobs_root = str(index_root_path / ".hkm_jobs")
+    else:
+        jobs_root = str(Path(jobs_root).resolve())
     set_jobs_root(jobs_root)
     try:
         metadata_schema_value = json.loads(metadata_schema)
@@ -386,7 +395,6 @@ def build_search_index(
         import ast
         metadata_schema_value = ast.literal_eval(metadata_schema)
 
-    docs_dir_path = Path(docs_dir)
     source_manifest_path = _source_manifest_path(docs_dir_path, source_manifest)
     build_id = _utc_now()
     backend_name = get_backend().name
@@ -446,8 +454,8 @@ def build_search_index(
         os.makedirs(hkm_root, exist_ok=True)
     Path(index_root, "index.json").write_text(json.dumps({
         "version": 1,
-        "source_root": os.path.abspath(docs_dir),
-        "jobs_root": os.path.abspath(jobs_root),
+        "source_root": docs_dir,
+        "jobs_root": jobs_root,
         "embedder_backend": backend_name,
         "metadata_schema": metadata_schema_value,
         "source_manifest": source_manifest_path,

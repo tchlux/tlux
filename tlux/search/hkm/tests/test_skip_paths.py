@@ -3,7 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from tlux.search.hkm import build_search_index, drain_jobs
+from tlux.search.hkm import Searcher, build_search_index, drain_jobs
 from tlux.search.hkm.fs import FileSystem
 
 
@@ -164,3 +164,48 @@ def test_size_token_and_decode_skips_are_reported(tmp_path, monkeypatch):
     assert summary["skip_reasons"]["max_file_bytes"] == 1
     assert summary["skip_reasons"]["max_tokens"] == 1
     assert summary["failed_files"][0]["reason"] == "decode_error"
+
+
+def test_relative_build_paths_publish_under_index_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    monkeypatch.chdir(tmp_path)
+    docs = Path("data/docs")
+    docs.mkdir(parents=True)
+    docs.joinpath("keep.txt").write_text("1 2 3", encoding="utf-8")
+
+    root_job = build_search_index("data/docs", "data/idx", 1)
+    index_root = tmp_path / "data" / "idx"
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+    assert sorted(index_root.rglob("*.hkmchunk"))
+    assert not (tmp_path / "data" / "data").exists()
+    hits = Searcher.from_index_root("data/idx").search({"mode": "token", "text": "1", "top_k": 10})
+    assert [hit.source_path for hit in hits.docs] == ["keep.txt"]
+
+
+def test_all_worker_skipped_documents_fail_root_build(tmp_path, monkeypatch):
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    docs.joinpath("too_many_tokens.txt").write_text("1 2 3", encoding="utf-8")
+
+    index_root = tmp_path / "idx"
+    root_job = build_search_index(
+        str(docs),
+        str(index_root),
+        1,
+        fs_root=str(index_root),
+        max_tokens=2,
+    )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+
+    assert root_job.status == "FAILED"
+    assert "Build indexed zero documents" in root_job.stderr
+    assert "max_tokens" in root_job.stderr
+    summary = _summary(index_root)
+    assert summary["planned"] == 1
+    assert summary["indexed"] == 0
+    assert summary["skip_reasons"]["max_tokens"] == 1

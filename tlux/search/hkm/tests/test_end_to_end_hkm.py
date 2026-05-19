@@ -240,10 +240,11 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
     assert "token" in hybrid_token_hits[0].match_reasons
 
     duplicate = searcher._hit(default_hits[0].doc_id, 1.0, default_hits[0].span, "token", "alpha")
-    grouped = {default_hits[0].source_path: default_hits[0]}
+    key = (default_hits[0].doc_id, default_hits[0].span)
+    grouped = {key: default_hits[0]}
     searcher._merge_hybrid_hit(grouped, duplicate)
     assert len(grouped) == 1
-    assert {"token", "semantic", "path", "title", "preview"} <= set(grouped[default_hits[0].source_path].match_reasons)
+    assert {"token", "semantic", "path", "title", "preview"} <= set(grouped[key].match_reasons)
 
     page = searcher.search({"text": "alpha", "top_k": 1})
     assert page.offset == 0
@@ -336,6 +337,44 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
     assert payload["node"] == "hkm"
     assert payload["doc_id"] == default_hits[0].doc_id
     assert payload["docs"]
+
+
+def test_single_document_search_returns_passage_hits(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    tokens = []
+    for block in range(80):
+        base = block * 10
+        tokens.extend([base, base + 1, 777, 778, base + 2, base + 3])
+    (docs_src / "fourth_wing.txt").write_text(" ".join(str(token) for token in tokens), encoding="utf-8")
+
+    index_root = tmp_path / "idx"
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(index_root),
+        num_workers=1,
+        max_k=2,
+        leaf_doc_limit=100,
+        leaf_embedding_limit=1000,
+        fs_root=str(index_root),
+        seed=0,
+    )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    searcher = Searcher.from_index_root(str(index_root))
+    semantic_hits = searcher.search({"mode": "semantic", "text": "420 421 777 778 422 423", "top_k": 10}).docs
+    assert len(semantic_hits) == 10
+    assert len({hit.doc_id for hit in semantic_hits}) == 1
+    assert len({hit.span for hit in semantic_hits}) > 1
+    assert len({hit.preview_text for hit in semantic_hits}) > 1
+
+    token_hits = searcher.search({"mode": "token", "text": "777 778", "top_k": 10}).docs
+    assert len(token_hits) == 10
+    assert len({hit.doc_id for hit in token_hits}) == 1
+    assert len({hit.span for hit in token_hits}) == 10
 
 
 def test_open_index_reports_missing_manifest(tmp_path: Path) -> None:
