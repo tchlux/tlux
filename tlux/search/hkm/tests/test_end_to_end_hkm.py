@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tlux.search.hkm import Searcher, build_search_index, drain_jobs
+from tlux.search.hkm import Searcher, build_search_index, drain_jobs, open_index
 from tlux.search.hkm.fs import FileSystem
 
 
@@ -290,6 +290,74 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
     assert set(payload) == {"docs", "offset", "limit", "count", "next_offset", "query"}
     assert payload["docs"][0]["source_path"] == "alpha_report.txt"
     assert payload["docs"][0]["document"]["file_kind"] == ".txt"
+
+    opened = open_index(str(index_root))
+    assert opened.index_root == str(index_root.resolve())
+
+    command = [
+        str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"),
+        str(index_root),
+        "--text",
+        "alpha",
+        "--top-k",
+        "1",
+        "--path-include",
+        "alpha_*",
+    ]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert set(payload) == {"docs", "offset", "limit", "count", "next_offset", "query"}
+    assert payload["docs"][0]["source_path"] == "alpha_report.txt"
+
+    command = [str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"), str(index_root), "--node", "hkm"]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert payload["path"] == "hkm"
+    assert payload["node"]["is_leaf"]
+
+    command = [str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"), str(index_root), "--docs", "hkm"]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert payload["node"] == "hkm"
+    assert "alpha_report.txt" in {hit["source_path"] for hit in payload["docs"]}
+
+    command = [
+        str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"),
+        str(index_root),
+        "--neighbors",
+        "hkm",
+        "--doc-id",
+        str(default_hits[0].doc_id),
+        "--top-k",
+        "2",
+    ]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert payload["node"] == "hkm"
+    assert payload["doc_id"] == default_hits[0].doc_id
+    assert payload["docs"]
+
+
+def test_open_index_reports_missing_manifest(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="Missing canonical index manifest"):
+        open_index(str(tmp_path))
+
+
+def test_open_index_reports_missing_child_node(tmp_path: Path) -> None:
+    (tmp_path / "hkm").mkdir()
+    (tmp_path / "index.json").write_text(json.dumps({
+        "source_root": str(tmp_path),
+        "metadata_schema": [],
+        "hkm_path": "hkm",
+        "docs_path": "docs",
+    }), encoding="utf-8")
+    (tmp_path / "hkm" / "node.json").write_text(json.dumps({
+        "is_leaf": False,
+        "children": ["cluster_0000"],
+    }), encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="Missing child node manifest"):
+        open_index(str(tmp_path))
 
 
 def test_content_hash_is_stable_when_doc_id_changes(tmp_path: Path, monkeypatch) -> None:

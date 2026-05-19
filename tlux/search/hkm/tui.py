@@ -28,7 +28,7 @@ import numpy as np
 from . import build_search_index, jobs
 from .fs import FileSystem
 from .jobs import JOBS_ROOT, set_jobs_root, watcher
-from .search.searcher import Searcher
+from .search.searcher import Searcher, open_index
 
 # Robust key codes (macOS curses lacks KEY_TAB)
 KEY_TAB = getattr(curses, "KEY_TAB", 9)
@@ -514,7 +514,7 @@ class HkmTuiApp:
             self._write_line(0, "HKM TUI: terminal too small or temporarily unavailable.")
             self.stdscr.refresh()
             return
-        title = "HKM Builder + Explorer"
+        title = "HKM Search"
         self.stdscr.attron(curses.color_pair(1))
         self.stdscr.addstr(0, 2, title)
         self.stdscr.attroff(curses.color_pair(1))
@@ -611,10 +611,10 @@ class HkmTuiApp:
         index_path = Path(os.path.expanduser(index_value)) if index_value else None
         warn_line = None
         if index_path and index_path.exists():
-            warn_line = f"Warning: index path {index_path} exists and may be overwritten."
+            warn_line = f"Warning: ENTER build may overwrite {index_path}."
         jobs_path = index_path / ".hkm_jobs" if index_path else None
         if jobs_path and jobs_path.exists():
-            warn_line = f"Warning: {jobs_path} will be cleared before running."
+            warn_line = f"Warning: ENTER build will clear {jobs_path}."
         if warn_line:
             self.stdscr.attron(curses.color_pair(4))
             lines = textwrap.wrap(warn_line, width - 4) or [warn_line]
@@ -634,7 +634,7 @@ class HkmTuiApp:
         else:
             self._write_line(skip_y, "")
 
-        footer = "TAB next | s skip | ENTER build | up/down suggestions | right accept | left undo | q quit"
+        footer = "TAB next | s skip | ENTER build | o open index | up/down suggestions | right accept | left undo | q quit"
         self.stdscr.addstr(footer_y, 2, footer[: width - 4])
         self.stdscr.move(cursor_y, cursor_x)
 
@@ -648,6 +648,9 @@ class HkmTuiApp:
             return
         if key in (KEY_BTAB, 353):
             self.active_field = (self.active_field - 1) % len(self.fields)
+            return
+        if key in (ord("o"), ord("O")):
+            self._open_existing_index()
             return
         if key in (ord("s"), ord("S")) and field.kind == "path":
             # Mark highlighted suggestion (or current value) to skip.
@@ -966,14 +969,15 @@ class HkmTuiApp:
         return (not pending) and any(j.status == "FAILED" for j in self.job_table)
 
     # Description:
-    #   Switch into the browser view once build completes.
+    #   Load an existing index path into browse/search state.
     # 
-    def _enter_browser(self) -> None:
-        index_root = Path(self._field_value("index"))
-        hkm_root = index_root / "hkm"
-        if not hkm_root.exists():
-            self.message = "Index root missing hkm/ directory. Build may have failed."
-            return
+    # Parameters:
+    #   index_root (Path): Index root containing index.json.
+    #   message (str): Status message after loading.
+    # 
+    def _open_browser(self, index_root: Path, message: str) -> None:
+        self.searcher = open_index(str(index_root))
+        hkm_root = Path(self.searcher.hkm_root)
         self.browser_path = hkm_root
         self.browser_info = _load_node(hkm_root)
         self.browser_cursor = 0
@@ -981,9 +985,26 @@ class HkmTuiApp:
         self.browser_anchor_entry = None
         self.browser_leaf_mode = "docs"
         self.state = "browse"
-        self.searcher = Searcher.from_index_root(str(index_root))
         self._refresh_browser_entries()
-        self.message = "Browse mode: arrows navigate, ENTER descend, / search."
+        self.message = message
+
+    # Description:
+    #   Open the index root currently in the form without building.
+    # 
+    def _open_existing_index(self) -> None:
+        try:
+            self._open_browser(Path(self._field_value("index")), "Opened index. Arrows navigate, / search.")
+        except Exception as exc:
+            self.message = f"Open failed: {exc}"
+
+    # Description:
+    #   Switch into the browser view once build completes.
+    # 
+    def _enter_browser(self) -> None:
+        try:
+            self._open_browser(Path(self._field_value("index")), "Browse mode: arrows navigate, ENTER descend, / search.")
+        except Exception as exc:
+            self.message = f"Index open failed: {exc}"
 
     # Description:
     #   Refresh document entries for leaf browsing from the Searcher surface.

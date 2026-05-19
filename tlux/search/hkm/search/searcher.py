@@ -34,6 +34,55 @@ VALID_MODES = {"hybrid", "token", "semantic"}
 VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
 
 
+# Audit a built HKM index for the minimal files needed by query traversal.
+#
+# Arguments:
+#   index_root (str): Root directory containing index.json.
+#
+# Returns:
+#   (Path): Resolved index root path.
+#
+# Raises:
+#   FileNotFoundError: If a required manifest or centroid file is missing.
+#   ValueError: If a node manifest cannot be decoded.
+#
+def audit_index(index_root: str) -> Path:
+    root = Path(index_root).resolve()
+    manifest = root / "index.json"
+    if not manifest.exists():
+        raise FileNotFoundError(f"Missing canonical index manifest: {manifest}")
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    hkm_root = root / data.get("hkm_path", "hkm")
+    root_node = hkm_root / "node.json"
+    if not root_node.exists():
+        raise FileNotFoundError(f"Missing root HKM node manifest: {root_node}")
+    for node_path in sorted(hkm_root.rglob("node.json")):
+        try:
+            node = json.loads(node_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid node manifest: {node_path}: {exc}") from exc
+        node_dir = node_path.parent
+        for child in node.get("children", []):
+            child_node = node_dir / str(child) / "node.json"
+            if not child_node.exists():
+                raise FileNotFoundError(f"Missing child node manifest: {child_node}")
+        if not node.get("is_leaf", False) and not (node_dir / "centroids.npy").exists():
+            raise FileNotFoundError(f"Missing non-leaf centroids: {node_dir / 'centroids.npy'}")
+    return root
+
+
+# Audit and open a built HKM index.
+#
+# Arguments:
+#   index_root (str): Root directory containing index.json.
+#
+# Returns:
+#   (Searcher): Loaded searcher for the existing index.
+#
+def open_index(index_root: str) -> "Searcher":
+    return Searcher.from_index_root(str(audit_index(index_root)))
+
+
 def _seq_to_bytes(seq: List[int]) -> bytes:
     return struct.pack("<" + "I" * len(seq), *[int(x) for x in seq]) if seq else b""
 
@@ -128,6 +177,9 @@ def hit_to_dict(hit: Hit) -> Dict[str, object]:
         "source_path": hit.source_path,
         "preview_text": hit.preview_text,
         "query_mode": hit.query_mode,
+        "anchor_span": hit.anchor_span,
+        "anchor_source_path": hit.anchor_source_path,
+        "anchor_preview_text": hit.anchor_preview_text,
         "match_reasons": hit.match_reasons,
         "semantic_score": hit.semantic_score,
         "token_score": hit.token_score,
@@ -732,6 +784,68 @@ class Searcher:
         return hits[:top_k]
 
 
+# Resolve a user node argument to a concrete HKM node directory.
+#
+# Arguments:
+#   searcher (Searcher): Open index searcher.
+#   node_arg (str): Absolute, index-relative, or hkm-relative node path.
+#
+# Returns:
+#   (Path): Node directory containing node.json.
+#
+def _resolve_node_dir(searcher: Searcher, node_arg: str) -> Path:
+    raw = Path(node_arg or "hkm")
+    candidates = [raw] if raw.is_absolute() else [
+        Path(searcher.index_root) / raw,
+        Path(searcher.hkm_root) / raw,
+    ]
+    if str(raw) in ("", ".", "hkm"):
+        candidates.insert(0, Path(searcher.hkm_root))
+    for candidate in candidates:
+        if (candidate / "node.json").exists():
+            return candidate
+    raise FileNotFoundError(f"Missing node manifest for node path: {node_arg}")
+
+
+# Convert a node path to a stable index-relative display path.
+#
+# Arguments:
+#   searcher (Searcher): Open index searcher.
+#   node_dir (Path): Node directory.
+#
+# Returns:
+#   (str): Relative node path when possible.
+#
+def _relative_node_path(searcher: Searcher, node_dir: Path) -> str:
+    try:
+        return str(node_dir.resolve().relative_to(Path(searcher.index_root).resolve()))
+    except ValueError:
+        return str(node_dir)
+
+
+# Build a query dictionary from direct CLI flags.
+#
+# Arguments:
+#   args (argparse.Namespace): Parsed command-line flags.
+#
+# Returns:
+#   (Dict[str, object]): Query request for Searcher.search().
+#
+def _query_from_args(args: argparse.Namespace) -> Dict[str, object]:
+    filters = {
+        "path_include": args.path_include,
+        "path_exclude": args.path_exclude,
+        "file_kind": args.file_kind,
+    }
+    return {
+        "text": args.text,
+        "mode": args.mode,
+        "top_k": args.top_k,
+        "offset": args.offset,
+        "filters": filters,
+    }
+
+
 # Run the search CLI against an existing index root.
 #
 # Arguments:
@@ -743,12 +857,60 @@ class Searcher:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Search HKM index")
     parser.add_argument("index_root", help="Index root containing index.json")
-    parser.add_argument("query_json", help="Path to JSON query file")
+    parser.add_argument("query_json", nargs="?", help="Path to JSON query file")
+    parser.add_argument("--text", help="Plain-text query")
+    parser.add_argument("--mode", choices=sorted(VALID_MODES), default="hybrid", help="Search mode")
+    parser.add_argument("--top-k", type=int, default=10, help="Maximum results")
+    parser.add_argument("--offset", type=int, default=0, help="Result offset")
+    parser.add_argument("--path-include", action="append", default=[], help="Source path glob to include")
+    parser.add_argument("--path-exclude", action="append", default=[], help="Source path glob to exclude")
+    parser.add_argument("--file-kind", action="append", default=[], help="File suffix to include")
+    parser.add_argument("--node", nargs="?", const="hkm", help="Print a node manifest as JSON")
+    parser.add_argument("--docs", help="Print leaf documents for a node")
+    parser.add_argument("--neighbors", help="Print leaf neighbors for a node")
+    parser.add_argument("--doc-id", type=int, help="Anchor document id for --neighbors")
     args = parser.parse_args()
 
-    with open(args.query_json, "r", encoding="utf-8") as f_query:
-        query = json.load(f_query)
-    print(json.dumps(search_result_to_dict(Searcher.from_index_root(args.index_root).search(query))))
+    actions = [
+        bool(args.query_json),
+        bool(args.text),
+        args.node is not None,
+        bool(args.docs),
+        bool(args.neighbors),
+    ]
+    if sum(actions) != 1:
+        parser.error("choose exactly one of query_json, --text, --node, --docs, or --neighbors")
+    if args.neighbors and args.doc_id is None:
+        parser.error("--neighbors requires --doc-id")
+    try:
+        searcher = open_index(args.index_root)
+        if args.query_json:
+            with open(args.query_json, "r", encoding="utf-8") as f_query:
+                payload = search_result_to_dict(searcher.search(json.load(f_query)))
+        elif args.text:
+            payload = search_result_to_dict(searcher.search(_query_from_args(args)))
+        elif args.node is not None:
+            node_dir = _resolve_node_dir(searcher, args.node)
+            payload = {
+                "path": _relative_node_path(searcher, node_dir),
+                "node": json.loads((node_dir / "node.json").read_text(encoding="utf-8")),
+            }
+        elif args.docs:
+            node_dir = _resolve_node_dir(searcher, args.docs)
+            docs = [hit_to_dict(hit) for hit in searcher.leaf_docs(node_dir)]
+            payload = {"node": _relative_node_path(searcher, node_dir), "count": len(docs), "docs": docs}
+        else:
+            node_dir = _resolve_node_dir(searcher, args.neighbors)
+            docs = [hit_to_dict(hit) for hit in searcher.leaf_neighbors(node_dir, int(args.doc_id), args.top_k)]
+            payload = {
+                "node": _relative_node_path(searcher, node_dir),
+                "doc_id": int(args.doc_id),
+                "count": len(docs),
+                "docs": docs,
+            }
+        print(json.dumps(payload))
+    except Exception as exc:
+        parser.exit(1, f"error: {exc}\n")
 
 
 if __name__ == "__main__":
