@@ -201,6 +201,54 @@ def test_fineweb_manifest_enriches_document_record(tmp_path: Path, monkeypatch) 
     assert "4" in missing_source_hit.preview_text
 
 
+def test_markdown_passages_rank_and_preview_by_passage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs_src = tmp_path / "corpus"
+    docs_src.mkdir()
+    markdown = "\n\n".join([
+        "# Front Matter\n777 1 2 3 early front matter",
+        "## CHAPTER ONE\n" + " ".join(str(v) for v in range(100, 190)),
+        "The repeated marker 777 is here but not close to the target numbers.",
+        "## CHAPTER TWO\n" + " ".join(str(v) for v in range(220, 330)) + " 777",
+        "Another paragraph in chapter two keeps 777 close to 221 and 222.",
+    ])
+    doc_path = docs_src / "book.md"
+    doc_path.write_text(markdown, encoding="utf-8")
+
+    index_root = tmp_path / "idx"
+    root_job = build_search_index(
+        docs_dir=str(docs_src),
+        index_root=str(index_root),
+        num_workers=1,
+        max_k=2,
+        leaf_doc_limit=100,
+        fs_root=str(index_root),
+        seed=0,
+    )
+    drain_jobs(FileSystem(root=str(index_root / ".hkm_jobs")), max_workers=1)
+    root_job.reload()
+    assert root_job.status == "SUCCEEDED", root_job.stderr
+
+    doc_index = np.load(index_root / "docs" / "doc_index.npy")
+    assert doc_index.shape[0] >= 3
+
+    searcher = Searcher.from_index_root(str(index_root))
+    hit = searcher.search({"text": "777 221", "mode": "token", "top_k": 3}).docs[0]
+    assert hit.source_path == "book.md"
+    assert hit.document.section_path.endswith("CHAPTER TWO")
+    assert hit.document.byte_start < hit.document.byte_end
+    assert "221" in hit.preview_text
+    assert "early front matter" not in hit.preview_text
+
+    exact = searcher.search({"text": "220 221", "top_k": 1}).docs[0]
+    assert exact.document.section_path.endswith("CHAPTER TWO")
+    assert "220 221" in exact.preview_text
+
+    doc_path.unlink()
+    missing_source_hit = Searcher.from_index_root(str(index_root)).search({"text": "220 221", "top_k": 1}).docs[0]
+    assert "220 221" in missing_source_hit.preview_text
+
+
 def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     docs_src = tmp_path / "corpus"
@@ -344,7 +392,7 @@ def test_single_document_search_returns_passage_hits(tmp_path: Path, monkeypatch
     docs_src = tmp_path / "corpus"
     docs_src.mkdir()
     tokens = []
-    for block in range(80):
+    for block in range(120):
         base = block * 10
         tokens.extend([base, base + 1, 777, 778, base + 2, base + 3])
     (docs_src / "fourth_wing.txt").write_text(" ".join(str(token) for token in tokens), encoding="utf-8")
@@ -366,20 +414,27 @@ def test_single_document_search_returns_passage_hits(tmp_path: Path, monkeypatch
 
     searcher = Searcher.from_index_root(str(index_root))
     semantic_hits = searcher.search({"mode": "semantic", "text": "420 421 777 778 422 423", "top_k": 10}).docs
-    assert len(semantic_hits) == 10
-    assert len({hit.doc_id for hit in semantic_hits}) == 1
-    assert len({hit.span for hit in semantic_hits}) > 1
+    assert len(semantic_hits) >= 2
+    assert len({hit.doc_id for hit in semantic_hits}) > 1
     assert len({hit.preview_text for hit in semantic_hits}) > 1
 
     token_hits = searcher.search({"mode": "token", "text": "777 778", "top_k": 10}).docs
-    assert len(token_hits) == 10
-    assert len({hit.doc_id for hit in token_hits}) == 1
-    assert len({hit.span for hit in token_hits}) == 10
+    assert len(token_hits) >= 2
+    assert len({hit.doc_id for hit in token_hits}) > 1
+    assert all("token" in hit.match_reasons for hit in token_hits)
 
 
 def test_open_index_reports_missing_manifest(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="Missing canonical index manifest"):
         open_index(str(tmp_path))
+
+
+def test_drama_backend_is_local_only() -> None:
+    source = (Path(__file__).resolve().parents[1] / "libs" / "drama" / "inference.py").read_text(encoding="utf-8")
+    assert "HF_HUB_OFFLINE" in source
+    assert "TRANSFORMERS_OFFLINE" in source
+    assert "local_files_only=True" in source
+    assert "requires a local cached facebook/drama-base model" in source
 
 
 def test_resolve_index_root_accepts_parent_or_hkm_dir(tmp_path: Path) -> None:

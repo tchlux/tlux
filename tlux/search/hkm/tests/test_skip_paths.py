@@ -56,7 +56,7 @@ def test_hkm_index_cli_accepts_repeatable_skip(tmp_path):
 
     index_root = tmp_path / "idx"
     env = dict(os.environ, HKM_FAKE_EMBEDDER="1")
-    subprocess.run(
+    completed = subprocess.run(
         [
             str(Path(__file__).parents[1] / "bin" / "hkm-index"),
             str(index_root),
@@ -74,6 +74,13 @@ def test_hkm_index_cli_accepts_repeatable_skip(tmp_path):
     )
 
     assert _manifest_files(index_root) == [str(keep)]
+    root_job_id = completed.stdout.strip().splitlines()[0]
+    root_config_path = index_root / ".hkm_jobs" / "ids" / root_job_id / "job_config"
+    root_config = json.loads(root_config_path.read_text(encoding="utf-8"))
+    assert root_config["status"] == "SUCCEEDED"
+    assert (index_root / "hkm" / "node.json").exists()
+    for bucket in ("waiting", "queued", "running"):
+        assert not list((index_root / ".hkm_jobs" / bucket).iterdir())
 
 
 def test_default_skips_exclude_generated_and_binary_artifacts(tmp_path, monkeypatch):

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import struct
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
@@ -38,6 +40,120 @@ MetadataSchema = List[Tuple[str, type]]
 DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
 EMBED_CACHE_WINDOWS = (32, 128, 512, 1024)
 EMBED_CACHE_OVERLAP = 0.5
+PASSAGE_TARGET_WORDS = 360
+PASSAGE_MAX_WORDS = 520
+
+
+@dataclass
+class Passage:
+    text: str
+    section_path: str
+    byte_start: int
+    byte_end: int
+
+
+# Count whitespace-delimited words in a text block.
+#
+# Arguments:
+#   text (str): Text to count.
+#
+# Returns:
+#   (int): Approximate word count.
+#
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+# Return passages grouped by markdown sections and paragraph boundaries.
+#
+# Arguments:
+#   text (str): Decoded UTF-8 file contents.
+#   suffix (str): Lowercase source file suffix.
+#
+# Returns:
+#   (list[Passage]): Stable passage records with source byte offsets.
+#
+def split_text_passages(text: str, suffix: str = "") -> List[Passage]:
+    if not text:
+        return []
+    heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    headings: List[str] = []
+    paragraphs: List[Passage] = []
+    current: List[str] = []
+    current_start = 0
+    current_end = 0
+    current_section = ""
+    byte_pos = 0
+
+    def flush_paragraph() -> None:
+        nonlocal current, current_start, current_end, current_section
+        raw_body = "".join(current)
+        leading = len(raw_body) - len(raw_body.lstrip())
+        body = raw_body.strip()
+        if body:
+            words = list(re.finditer(r"\S+", body))
+            if len(words) > PASSAGE_MAX_WORDS:
+                for start_idx in range(0, len(words), PASSAGE_TARGET_WORDS):
+                    chunk_words = words[start_idx : start_idx + PASSAGE_TARGET_WORDS]
+                    char_start = chunk_words[0].start()
+                    char_end = chunk_words[-1].end()
+                    byte_start = current_start + len(raw_body[: leading + char_start].encode("utf-8"))
+                    byte_end = current_start + len(raw_body[: leading + char_end].encode("utf-8"))
+                    paragraphs.append(Passage(body[char_start:char_end], current_section, byte_start, byte_end))
+            else:
+                byte_start = current_start + len(raw_body[:leading].encode("utf-8"))
+                paragraphs.append(Passage(body, current_section, byte_start, current_end))
+        current = []
+
+    for line in text.splitlines(keepends=True):
+        line_start = byte_pos
+        line_end = line_start + len(line.encode("utf-8"))
+        byte_pos = line_end
+        match = heading_re.match(line.strip()) if suffix in {".md", ".markdown"} else None
+        if match:
+            flush_paragraph()
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            headings[:] = headings[: level - 1] + [title]
+            current_section = " / ".join(headings)
+            continue
+        if not line.strip():
+            flush_paragraph()
+            continue
+        if not current:
+            current_start = line_start
+            current_section = " / ".join(headings)
+        current.append(line)
+        current_end = line_end
+    flush_paragraph()
+    if not paragraphs:
+        return [Passage(text.strip(), "", 0, len(text.encode("utf-8")))]
+
+    groups: List[Passage] = []
+    active: List[Passage] = []
+    active_words = 0
+
+    def flush_group() -> None:
+        nonlocal active, active_words
+        if not active:
+            return
+        body = "\n\n".join(item.text for item in active).strip()
+        groups.append(Passage(body, active[0].section_path, active[0].byte_start, active[-1].byte_end))
+        active = []
+        active_words = 0
+
+    for paragraph in paragraphs:
+        words = _word_count(paragraph.text)
+        section_changed = active and paragraph.section_path != active[-1].section_path
+        too_large = active and active_words >= PASSAGE_TARGET_WORDS and active_words + words > PASSAGE_MAX_WORDS
+        if section_changed or too_large:
+            flush_group()
+        active.append(paragraph)
+        active_words += words
+        if active_words >= PASSAGE_MAX_WORDS:
+            flush_group()
+    flush_group()
+    return groups
 
 
 # Return the current UTC timestamp as a compact ISO string.
@@ -133,6 +249,7 @@ def _embedding_cache_key(backend_name: str, content_hash: str) -> str:
         "backend": backend_name,
         "windows": EMBED_CACHE_WINDOWS,
         "overlap": EMBED_CACHE_OVERLAP,
+        "passage_index_version": 2,
         "content_hash": content_hash,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("ascii")).hexdigest()
@@ -251,6 +368,7 @@ def process_documents(
     cache_misses = 0
     skipped_files = [] if skipped_files is None else skipped_files
     failed_files = [] if failed_files is None else failed_files
+    token_offsets_by_source: Dict[str, int] = {}
 
     field_names = {name: i for i, (name, _typ) in enumerate(metadata_schema)}
 
@@ -272,8 +390,11 @@ def process_documents(
             if "content_hash" in field_names:
                 raw_hash = metadata[field_names["content_hash"]]
                 content_hash = raw_hash.decode("ascii", errors="ignore") if isinstance(raw_hash, bytes) else str(raw_hash)
+            cache_hash = content_hash
+            if "byte_start" in field_names and "byte_end" in field_names:
+                cache_hash = f"{content_hash}:{metadata[field_names['byte_start']]}:{metadata[field_names['byte_end']]}"
             backend_name = embedder.get_backend().name
-            cached = _load_embedding_cache(embedding_cache_dir, backend_name, content_hash)
+            cached = _load_embedding_cache(embedding_cache_dir, backend_name, cache_hash)
             if cached is None:
                 try:
                     tokens = embedder.tokenize([text])[0]
@@ -289,8 +410,17 @@ def process_documents(
             if max_tokens is not None and len(tokens) > max_tokens:
                 skipped_files.append({"path": source_path, "reason": "max_tokens"})
                 continue
-            _set_metadata(metadata, field_names, "token_start", 0)
-            _set_metadata(metadata, field_names, "token_end", len(tokens))
+            if "token_start" in field_names and "token_end" in field_names:
+                start_value = metadata[field_names["token_start"]]
+                end_value = metadata[field_names["token_end"]]
+                if start_value in (None, 0) and end_value in (None, 0):
+                    start_value = token_offsets_by_source.get(source_path, 0)
+                    _set_metadata(metadata, field_names, "token_start", start_value)
+                    _set_metadata(metadata, field_names, "token_end", int(start_value) + len(tokens))
+                token_offsets_by_source[source_path] = max(
+                    token_offsets_by_source.get(source_path, 0),
+                    int(metadata[field_names["token_end"]] or 0),
+                )
             if "source_token_count" in field_names and metadata[field_names["source_token_count"]] in (None, 0):
                 _set_metadata(metadata, field_names, "source_token_count", len(tokens))
             total_docs += 1
@@ -310,7 +440,7 @@ def process_documents(
                 _write_embedding_cache(
                     embedding_cache_dir,
                     backend_name,
-                    content_hash,
+                    cache_hash,
                     tokens,
                     embeddings,
                     embedding_windows,
@@ -444,33 +574,36 @@ def default_worker(
                 failed_files.append({"path": source_path, "reason": "read_error", "error": str(exc)})
                 continue
             size_bytes = len(raw)
+            source_hash = hashlib.sha256(raw).hexdigest()
             source_row = source_rows.get(source_path, {})
-            value_map = {
-                "path": file.name,
-                "name": file.name,
-                "source_path": source_path.encode("utf-8"),
-                "source_type": ("web" if source_row.get("url") else "file").encode("utf-8"),
-                "file_kind": (file.suffix or "none").encode("utf-8"),
-                "title": file.stem.encode("utf-8"),
-                "section_path": b"",
-                "byte_start": 0,
-                "byte_end": size_bytes,
-                "token_start": 0,
-                "token_end": 0,
-                "content_hash": hashlib.sha256(raw).hexdigest().encode("ascii"),
-                "build_id": build_id.encode("utf-8"),
-                "ingested_at": ingested_at.encode("utf-8"),
-                "source_id": str(source_row.get("id", "") or "").encode("utf-8"),
-                "source_url": str(source_row.get("url", "") or "").encode("utf-8"),
-                "source_date": str(source_row.get("date", "") or "").encode("utf-8"),
-                "source_token_count": int(source_row.get("token_count", 0) or 0),
-                "num_bytes": size_bytes,
-                "document_preview": text[:512].encode("utf-8"),
-            }
-            metadata_row: List[DocumentValue] = []
-            for field_name, _field_type in parsed_schema:
-                metadata_row.append(value_map.get(field_name))
-            yield [text], [metadata_row]
+            passages = split_text_passages(text, file.suffix.lower())
+            for passage in passages:
+                value_map = {
+                    "path": file.name,
+                    "name": file.name,
+                    "source_path": source_path.encode("utf-8"),
+                    "source_type": ("web" if source_row.get("url") else "file").encode("utf-8"),
+                    "file_kind": (file.suffix or "none").encode("utf-8"),
+                    "title": file.stem.encode("utf-8"),
+                    "section_path": passage.section_path.encode("utf-8"),
+                    "byte_start": passage.byte_start,
+                    "byte_end": passage.byte_end,
+                    "token_start": 0,
+                    "token_end": 0,
+                    "content_hash": source_hash.encode("ascii"),
+                    "build_id": build_id.encode("utf-8"),
+                    "ingested_at": ingested_at.encode("utf-8"),
+                    "source_id": str(source_row.get("id", "") or "").encode("utf-8"),
+                    "source_url": str(source_row.get("url", "") or "").encode("utf-8"),
+                    "source_date": str(source_row.get("date", "") or "").encode("utf-8"),
+                    "source_token_count": int(source_row.get("token_count", 0) or 0),
+                    "num_bytes": size_bytes,
+                    "document_preview": passage.text[:512].encode("utf-8"),
+                }
+                metadata_row: List[DocumentValue] = []
+                for field_name, _field_type in parsed_schema:
+                    metadata_row.append(value_map.get(field_name))
+                yield [passage.text], [metadata_row]
 
     process_documents(
         output_directory,

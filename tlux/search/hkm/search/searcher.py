@@ -6,7 +6,9 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import struct
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -121,6 +123,18 @@ def _snippet(text: str, start: int, end: int, radius: int = 120) -> str:
     lo = max(0, start - radius)
     hi = min(len(text), max(end, start) + radius)
     return " ".join(text[lo:hi].split()).strip()
+
+
+# Return lowercase word terms used for snippets and short-query guards.
+#
+# Arguments:
+#   text (str): Raw query text.
+#
+# Returns:
+#   (list[str]): Lowercase alphanumeric terms.
+#
+def _text_terms(text: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9]+", text.lower())
 
 
 # Find the case-insensitive full-query or first-term match in text.
@@ -337,13 +351,18 @@ class Searcher:
         span: Tuple[int, int],
         query_text: str,
         document_preview: str = "",
+        document: DocumentRecord | None = None,
     ) -> str:
         needle = self._backend().detokenize([tokens[slice(*span)].tolist()])[0].strip() if span[1] > span[0] else ""
         source_file = Path(self.source_root) / source_path if source_path else None
         if source_file and source_file.exists():
-            text = source_file.read_text(encoding="utf-8", errors="ignore")
+            if document is not None and document.byte_end > document.byte_start:
+                raw = source_file.read_bytes()[document.byte_start : document.byte_end]
+                text = raw.decode("utf-8", errors="ignore")
+            else:
+                text = source_file.read_text(encoding="utf-8", errors="ignore")
             if needle:
-                idx = text.find(needle)
+                idx = text.lower().find(needle.lower())
                 if idx >= 0:
                     return _snippet(text, idx, idx + len(needle))
             start, end = _match_start(text, query_text)
@@ -371,7 +390,7 @@ class Searcher:
             span=span,
             document=document,
             source_path=document.source_path,
-            preview_text=self._preview(document.source_path, tokens, span, query_text, document.document_preview),
+            preview_text=self._preview(document.source_path, tokens, span, query_text, document.document_preview, document),
             query_mode=mode,
             match_reasons=[mode] if mode in {"semantic", "token"} else [],
             semantic_score=float(score) if mode == "semantic" else 0.0,
@@ -457,6 +476,7 @@ class Searcher:
                 anchor_span,
                 "",
                 anchor_document.document_preview,
+                anchor_document,
             )
             hits.append(hit)
         return hits
@@ -643,7 +663,7 @@ class Searcher:
             hits = self._search_embeddings(np.asarray(spec.embeddings[0], dtype=np.float32), candidate_count, spec.text)
             return self._page(hits, spec)
         if spec.text and spec.mode == "token":
-            return self._page(self._search_tokens(self._backend().tokenize([spec.text])[0], candidate_count, spec.text), spec)
+            return self._page(self._search_lexical_text(spec.text, candidate_count), spec)
         if spec.text and spec.mode == "semantic":
             query_ids = self._backend().tokenize([spec.text])
             query_emb = self._backend().embed(query_ids, role="query")[0]
@@ -666,6 +686,90 @@ class Searcher:
                     hits.append(hit)
                     seen.add(key)
         hits.sort(key=lambda hit: (hit.doc_id, hit.span))
+        return hits[:top_k]
+
+    # Find the best token window covering query terms in one passage.
+    #
+    # Arguments:
+    #   tokens (np.ndarray): Passage token ids.
+    #   query_tokens (list[int]): Query token ids.
+    #
+    # Returns:
+    #   (tuple[float, tuple[int, int], bool] | None): Score, span, exact flag.
+    #
+    def _lexical_match(self, tokens: np.ndarray, query_tokens: List[int]) -> Tuple[float, Tuple[int, int], bool] | None:
+        if not query_tokens or tokens.size == 0:
+            return None
+        target = _seq_to_bytes(query_tokens)
+        token_bytes = tokens.tobytes()
+        pos = token_bytes.find(target)
+        if pos >= 0 and pos % 4 == 0:
+            start = pos // 4
+            return 1.0, (start, start + len(query_tokens)), True
+
+        needed = list(dict.fromkeys(int(token) for token in query_tokens))
+        positions: Dict[int, List[int]] = {}
+        for token in needed:
+            found = np.flatnonzero(tokens == token).astype(np.int64).tolist()
+            if found:
+                positions[token] = found
+        if not positions:
+            return None
+
+        covered = len(positions)
+        coverage = covered / float(len(needed))
+        events = sorted((idx, token) for token, found in positions.items() for idx in found)
+        counts: Counter[int] = Counter()
+        left = 0
+        best = (events[0][0], events[0][0])
+        if covered == len(needed):
+            best_width = tokens.size + 1
+            for right, (idx, token) in enumerate(events):
+                counts[token] += 1
+                while len(counts) == len(needed):
+                    lo = events[left][0]
+                    width = idx - lo + 1
+                    if width < best_width:
+                        best = (lo, idx)
+                        best_width = width
+                    left_token = events[left][1]
+                    counts[left_token] -= 1
+                    if counts[left_token] <= 0:
+                        del counts[left_token]
+                    left += 1
+        else:
+            best = (events[0][0], events[min(len(events) - 1, covered - 1)][0])
+        span_len = max(1, best[1] - best[0] + 1)
+        proximity = min(1.0, len(query_tokens) / float(span_len))
+        rarity = sum(1.0 / max(1.0, float(len(found)) ** 0.5) for found in positions.values()) / float(covered)
+        score = min(0.95, 0.58 * coverage + 0.27 * proximity + 0.15 * rarity)
+        return score, (int(best[0]), int(best[1]) + 1), False
+
+    # Search active passages with phrase and term-level lexical scoring.
+    #
+    # Arguments:
+    #   query_text (str): Raw query text.
+    #   top_k (int): Maximum result count.
+    #
+    # Returns:
+    #   (list[Hit]): Lexically ranked passage hits.
+    #
+    def _search_lexical_text(self, query_text: str, top_k: int) -> List[Hit]:
+        query_tokens = self._backend().tokenize([query_text])[0]
+        if not query_tokens:
+            return []
+        hits: List[Hit] = []
+        for doc_id in sorted(self._active_doc_ids()):
+            tokens, _ = self._doc_context(doc_id)
+            match = self._lexical_match(tokens, query_tokens)
+            if match is None:
+                continue
+            score, span, exact = match
+            hit = self._hit(doc_id, score, span, "token", query_text)
+            hit.match_reasons = ["token", "phrase" if exact else "terms"]
+            hit.token_score = score
+            hits.append(hit)
+        hits.sort(key=lambda hit: (-hit.score, hit.source_path, hit.doc_id, hit.span))
         return hits[:top_k]
 
     # Verify token matches against active canonical documents.
@@ -716,8 +820,13 @@ class Searcher:
     def _search_embeddings(self, query_emb: np.ndarray, top_k: int, query_text: str) -> List[Hit]:
         ranked: List[Tuple[float, int, Tuple[int, int]]] = []
         self._search_node(Path(self.hkm_root), query_emb, ranked)
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-        return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for dist, doc_id, span in ranked[:top_k]]
+        best: Dict[int, Tuple[float, int, Tuple[int, int]]] = {}
+        for item in ranked:
+            dist, doc_id, _span = item
+            if doc_id not in best or dist < best[doc_id][0]:
+                best[doc_id] = item
+        ranked_docs = sorted(best.values(), key=lambda item: (item[0], item[1], item[2]))
+        return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for dist, doc_id, span in ranked_docs[:top_k]]
 
     # Find documents whose stable metadata contains the query text.
     #
@@ -756,11 +865,12 @@ class Searcher:
     #
     def _hybrid_score(self, hit: Hit) -> float:
         reasons = set(hit.match_reasons)
-        score = 0.6 * hit.semantic_score + hit.token_score
-        score += 0.75 if "path" in reasons else 0.0
-        score += 0.50 if "title" in reasons else 0.0
-        score += 0.25 if "section" in reasons else 0.0
-        score += 0.35 if "preview" in reasons else 0.0
+        score = 0.45 * hit.semantic_score + 0.55 * hit.token_score
+        score += 0.12 if "phrase" in reasons else 0.0
+        score += 0.10 if "path" in reasons else 0.0
+        score += 0.08 if "title" in reasons else 0.0
+        score += 0.06 if "section" in reasons else 0.0
+        score += 0.06 if "preview" in reasons else 0.0
         return score
 
     # Merge a candidate hit into the passage-level grouped result map.
@@ -773,14 +883,19 @@ class Searcher:
     #   (None): Mutates grouped in place.
     #
     def _merge_hybrid_hit(self, grouped: Dict[Tuple[int, Tuple[int, int]], Hit], hit: Hit) -> None:
-        key = (hit.doc_id, hit.span)
+        key = (hit.doc_id, (0, 0))
+        span_key = (hit.doc_id, hit.span)
+        if key not in grouped and span_key in grouped:
+            key = span_key
         existing = grouped.get(key)
         if existing is None:
             hit.query_mode = "hybrid"
             hit.score = self._hybrid_score(hit)
             grouped[key] = hit
             return
-        replace_preview = hit.token_score > existing.token_score or hit.semantic_score > existing.semantic_score
+        replace_preview = hit.token_score > existing.token_score or (
+            existing.token_score <= 0.0 and hit.semantic_score > existing.semantic_score
+        )
         existing.semantic_score = max(existing.semantic_score, hit.semantic_score)
         existing.token_score = max(existing.token_score, hit.token_score)
         existing.match_reasons = sorted(set(existing.match_reasons) | set(hit.match_reasons))
@@ -799,7 +914,7 @@ class Searcher:
     #   (List[Hit]): Ranked passage hits.
     #
     def _search_hybrid(self, query_text: str, top_k: int) -> List[Hit]:
-        candidate_count = max(top_k * 4, 20)
+        candidate_count = max(top_k * 8, 50)
         grouped: Dict[Tuple[int, Tuple[int, int]], Hit] = {}
         query_ids = self._backend().tokenize([query_text])
         query_tokens = query_ids[0] if query_ids else []
@@ -807,11 +922,20 @@ class Searcher:
         for hit in self._search_embeddings(query_emb, candidate_count, query_text):
             self._merge_hybrid_hit(grouped, hit)
         if query_tokens:
-            for hit in self._search_tokens(query_tokens, candidate_count, query_text):
+            for hit in self._search_lexical_text(query_text, candidate_count):
                 self._merge_hybrid_hit(grouped, hit)
         for hit in self._metadata_hits(query_text):
             self._merge_hybrid_hit(grouped, hit)
-        hits = sorted(grouped.values(), key=lambda hit: (-hit.score, hit.source_path, hit.doc_id, hit.span))
+        terms = _text_terms(query_text)
+        hits = list(grouped.values())
+        if len(terms) <= 1 and any(hit.token_score > 0.0 for hit in hits):
+            hits = [
+                hit for hit in hits
+                if hit.token_score > 0.0
+                or hit.semantic_score >= 0.62
+                or bool(set(hit.match_reasons) - {"semantic", "token"})
+            ]
+        hits = sorted(hits, key=lambda hit: (-hit.score, hit.source_path, hit.doc_id, hit.span))
         return hits[:top_k]
 
 

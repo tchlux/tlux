@@ -6,14 +6,46 @@ from sentence_transformers import SentenceTransformer
 
 # Load once at module scope
 this_dir = os.path.dirname(__file__)
-model = SentenceTransformer("facebook/drama-base", trust_remote_code=True)
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 tokenizer = Tokenizer.from_file(os.path.join(this_dir, "tokenizer.json"))
+model = None
 
 # Special tokens
 FIRST_TOKEN    = 128000
 LAST_TOKEN     = 128001
 MAX_SEQ_LEN    = 8192
+
+
+# Load the sentence-transformer model only when embeddings are requested.
+#
+# Args:
+#     None.
+#
+# Returns:
+#     SentenceTransformer: Locally cached drama embedding model.
+#
+def get_model() -> SentenceTransformer:
+    global model
+    if model is not None:
+        return model
+    try:
+        model = SentenceTransformer("facebook/drama-base", trust_remote_code=True, local_files_only=True)
+    except TypeError:
+        try:
+            model = SentenceTransformer("facebook/drama-base", trust_remote_code=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "HKM drama embedder requires a local cached facebook/drama-base model; "
+                "run libs/drama/setup.sh before querying with HKM_EMBEDDER=drama."
+            ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "HKM drama embedder requires a local cached facebook/drama-base model; "
+            "run libs/drama/setup.sh before querying with HKM_EMBEDDER=drama."
+        ) from exc
+    return model
 
 
 # Tokenizes a list of texts using batch encoding and strips BOS/EOS.
@@ -58,6 +90,7 @@ def embed(
 ) -> np.ndarray:
     assert role in {"doc", "query"}, "role must be 'doc' or 'query'"
     sentences = detokenize(token_ids)
+    model = get_model()
     if role == "doc":
         result = model.encode_document(sentences)
     else:

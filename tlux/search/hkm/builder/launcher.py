@@ -8,17 +8,21 @@ import argparse
 import fnmatch
 import hashlib
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
 from ..embedder import get_backend
+from ..fs import FileSystem
 from ..schema import DEFAULT_METADATA_SCHEMA
+from .tokenize_and_embed import split_text_passages
 
 try:
-    from ..jobs import Job, run_job, set_jobs_root
+    from ..jobs import Job, drain_jobs, run_job, set_jobs_root
 except ImportError:
-    from tlux.search.hkm.jobs import Job, run_job, set_jobs_root
+    from tlux.search.hkm.fs import FileSystem
+    from tlux.search.hkm.jobs import Job, drain_jobs, run_job, set_jobs_root
 
 
 DEFAULT_SKIP_PARTS = {
@@ -230,6 +234,22 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Estimate how many passage records a source file will publish.
+#
+# Arguments:
+#   path (Path): UTF-8 source file.
+#
+# Returns:
+#   (int): Passage count, or one record for unreadable files.
+#
+def _passage_count(path: Path) -> int:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return 1
+    return max(1, len(split_text_passages(text, path.suffix.lower())))
+
+
 # Load the current source snapshot, if it is compatible enough for reuse.
 #
 # Arguments:
@@ -283,7 +303,9 @@ def _classify_incremental(
     files: List[Path],
     snapshot: dict,
 ) -> tuple[List[dict], List[Path], int, int]:
-    old = {item["source_path"]: item for item in snapshot.get("documents", [])}
+    old: Dict[str, List[dict]] = {}
+    for item in snapshot.get("documents", []):
+        old.setdefault(item["source_path"], []).append(item)
     current_paths = set()
     reused: List[dict] = []
     work: List[Path] = []
@@ -292,9 +314,9 @@ def _classify_incremental(
         rel_path = path.relative_to(docs_dir).as_posix()
         current_paths.add(rel_path)
         digest = _file_hash(path)
-        previous = old.get(rel_path)
-        if previous and previous.get("content_hash") == digest:
-            reused.append(previous)
+        previous = old.get(rel_path, [])
+        if previous and all(item.get("content_hash") == digest for item in previous):
+            reused.extend(previous)
         else:
             changed += 1 if previous else 0
             work.append(path)
@@ -526,7 +548,7 @@ def build_search_index(
             embedding_cache_dir=cache_dir,
         )
         worker_jobs.append(job)
-        doc_id_base += len(files)
+        doc_id_base += sum(_passage_count(path) for path in files)
 
     if snapshot is not None:
         plan_path = Path(manifest_dir) / "incremental_plan.json"
@@ -612,22 +634,42 @@ def main() -> None:
     parser.add_argument("--full-rebuild", action="store_true", help="Ignore incremental snapshot and rebuild the index")
     args = parser.parse_args()
 
-    print(build_search_index(
-        docs_dir=args.docs_dir,
-        index_root=args.index_root,
-        num_workers=args.workers,
-        max_k=args.max_k,
-        leaf_embedding_limit=args.leaf_embedding_limit,
-        leaf_doc_limit=args.leaf_doc_limit,
-        skip_paths=args.skip,
-        include_globs=args.include,
-        exclude_globs=args.exclude,
-        default_skips=not args.no_default_skips,
-        max_file_bytes=args.max_file_bytes,
-        max_tokens=args.max_tokens,
-        source_manifest=args.source_manifest,
-        incremental=not args.full_rebuild,
-    ).id)
+    old_disable = os.environ.get("HKM_DISABLE_WATCHER_LAUNCH")
+    os.environ["HKM_DISABLE_WATCHER_LAUNCH"] = "1"
+    try:
+        root_job = build_search_index(
+            docs_dir=args.docs_dir,
+            index_root=args.index_root,
+            num_workers=args.workers,
+            max_k=args.max_k,
+            leaf_embedding_limit=args.leaf_embedding_limit,
+            leaf_doc_limit=args.leaf_doc_limit,
+            skip_paths=args.skip,
+            include_globs=args.include,
+            exclude_globs=args.exclude,
+            default_skips=not args.no_default_skips,
+            max_file_bytes=args.max_file_bytes,
+            max_tokens=args.max_tokens,
+            source_manifest=args.source_manifest,
+            incremental=not args.full_rebuild,
+        )
+        print(root_job.id, flush=True)
+        jobs_root = Path(args.index_root).resolve() / ".hkm_jobs"
+        drain_jobs(FileSystem(root=str(jobs_root)), max_workers=args.workers)
+        root_job.reload()
+    finally:
+        if old_disable is None:
+            os.environ.pop("HKM_DISABLE_WATCHER_LAUNCH", None)
+        else:
+            os.environ["HKM_DISABLE_WATCHER_LAUNCH"] = old_disable
+
+    if root_job.status == "SUCCEEDED":
+        return
+    if root_job.status_reason:
+        print(root_job.status_reason, file=sys.stderr)
+    if root_job.stderr:
+        print(root_job.stderr[-4000:], file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -237,7 +237,12 @@ def proc_usage(pids: list[int]) -> Dict[str, Any]:
                 cpu_pct = float(out.strip() or 0.0)
             except Exception:
                 cpu_pct = 0.0
-        gpu_pct = gpu_util_percent()
+        gpu_pct = None
+        if os.environ.get("HKM_ENABLE_GPU_SAMPLER") == "1":
+            try:
+                gpu_pct = gpu_util_percent()
+            except Exception:
+                gpu_pct = None
         if rss > best["rss"]:
             best["rss"] = rss
         if cpu_pct > best["cpu_percent"]:

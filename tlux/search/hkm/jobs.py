@@ -26,6 +26,7 @@ import signal
 import socket
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
@@ -509,38 +510,33 @@ def reap_running_jobs(fs: FileSystem) -> None:
             job = Job(fs=fs, path=fs.join("ids", job_id))
         except Exception:
             continue
-        pid = getattr(job, "monitor_pid", None)
-        if pid is None:
-            if (
-                getattr(job, "executor_pid", None) is None
-                and (
-                    ((job.start_ts is not None) and (time.time() - float(job.start_ts) >= ORPHAN_GRACE_SECONDS))
-                    or ((job.start_ts is None) and (job.submit_ts is not None) and (time.time() - float(job.submit_ts) >= ORPHAN_GRACE_SECONDS))
-                )
+        monitor_pid = getattr(job, "monitor_pid", None)
+        executor_pid = getattr(job, "executor_pid", None)
+        if monitor_pid is not None:
+            try:
+                os.kill(int(monitor_pid), 0)
+                continue
+            except OSError:
+                pass
+        if executor_pid is not None:
+            try:
+                os.kill(int(executor_pid), 0)
+                continue
+            except OSError:
+                pass
+        if executor_pid is None:
+            if not (
+                ((job.start_ts is not None) and (time.time() - float(job.start_ts) >= ORPHAN_GRACE_SECONDS))
+                or ((job.start_ts is None) and (job.submit_ts is not None) and (time.time() - float(job.submit_ts) >= ORPHAN_GRACE_SECONDS))
             ):
-                if not fs.rename(fs.join("running", job_id), fs.join("failed", job_id)):
-                    continue
-                job.status = "FAILED"
-                job.status_reason = "Watcher claimed the job but disappeared before launching it."
-                job.exit_code = -9 if job.exit_code is None else job.exit_code
-                job.end_ts = time.time()
-                job._save()
-            continue
-        try:
-            os.kill(int(pid), 0)
-            continue
-        except OSError:
-            pass
-        for target_pid in (getattr(job, "executor_pid", None),):
-            if target_pid:
-                try:
-                    os.kill(int(target_pid), signal.SIGKILL)
-                except Exception:
-                    pass
+                continue
+            reason = "Watcher claimed the job but disappeared before launching it."
+        else:
+            reason = "Watcher disappeared while the job was RUNNING."
         if not fs.rename(fs.join("running", job_id), fs.join("failed", job_id)):
             continue
         job.status = "FAILED"
-        job.status_reason = "Watcher disappeared while the job was RUNNING."
+        job.status_reason = reason
         job.exit_code = -9 if job.exit_code is None else job.exit_code
         job.end_ts = time.time()
         job._save()
@@ -793,8 +789,14 @@ def watcher(fs: Optional[FileSystem] = None, max_workers: int = 1, launch: bool=
                 continue
             wait_for_path(fs.join("running", next_jid))
             worker(fs=fs, job=job)
-        except: # Exception as e:
-            # print(f"[jobs.WATCHER] Exception claiming job {next_jid} encountered {e}", file=sys.stderr, flush=True)
+        except Exception:
+            message = f"[jobs.WATCHER] Exception running job {next_jid}\n{traceback.format_exc()}"
+            print(message, file=sys.stderr, flush=True)
+            try:
+                with open(fs.join("ids", next_jid, "stderr"), "ab") as err_file:
+                    err_file.write(message.encode("utf-8", errors="ignore"))
+            except Exception:
+                pass
             continue
     # All jobs completed, moving on to cleanup, indicate by saying this watcher is no longer active.
     fs.remove(wdir)
@@ -838,38 +840,45 @@ def worker(fs: FileSystem, job: Job) -> Job:
     # --- monitoring loop ---
     res_file = Path(fs.join(job.path, "resources"))
     res_file.touch(exist_ok=True)
-    while True:
-        if os.getppid() == 1:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            exit_code = -9
-            break
-        # Wait for exit of the process.
-        try:
-            exit_code = proc.wait(timeout=5)
-            break
-        except:
-            pass
-        # If the process hasn't exited, do a resource utilization check as a heartbeat.
-        pid_list = [proc.pid]
-        try:
-            out = subprocess.check_output(["ps", "-o", "pid=", "-p", str(proc.pid)], text=True)
-            for line in out.strip().splitlines():
+    if os.environ.get("HKM_ENABLE_RESOURCE_SAMPLER") != "1":
+        with res_file.open("a", encoding="utf-8") as rf:
+            rf.write(json.dumps({"ts": time.time(), "rss": 0, "cpu_percent": 0.0, "gpu_percent": None}) + "\n")
+        exit_code = proc.wait()
+        with res_file.open("a", encoding="utf-8") as rf:
+            rf.write(json.dumps({"ts": time.time(), "rss": 0, "cpu_percent": 0.0, "gpu_percent": None}) + "\n")
+    else:
+        while True:
+            if os.getppid() == 1:
                 try:
-                    pid_list.append(int(line.strip()))
+                    proc.kill()
                 except Exception:
                     pass
-        except Exception:
-            pass
-        try:
-            # Also write a lightweight heartbeat to stdout for UIs.
-            snap = proc_usage(pid_list)
-            with res_file.open("a", encoding="utf-8") as rf:
-                rf.write(json.dumps({"ts": time.time(), **snap}) + "\n")
-        except Exception:
-            pass
+                exit_code = -9
+                break
+            # Wait for exit of the process.
+            try:
+                exit_code = proc.wait(timeout=5)
+                break
+            except:
+                pass
+            # If the process hasn't exited, do a resource utilization check as a heartbeat.
+            pid_list = [proc.pid]
+            try:
+                out = subprocess.check_output(["ps", "-o", "pid=", "-p", str(proc.pid)], text=True)
+                for line in out.strip().splitlines():
+                    try:
+                        pid_list.append(int(line.strip()))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                # Also write a lightweight heartbeat to stdout for UIs.
+                snap = proc_usage(pid_list)
+                with res_file.open("a", encoding="utf-8") as rf:
+                    rf.write(json.dumps({"ts": time.time(), **snap}) + "\n")
+            except Exception:
+                pass
     # --- finalize job ---
     job.exit_code = exit_code
     job.end_ts = time.time()

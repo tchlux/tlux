@@ -1210,7 +1210,13 @@ class HkmTuiApp:
         self._write_line(5, "Results:")
         max_rows = max(3, height - 8)
         for i, hit in enumerate(self.search_results[:max_rows]):
-            line = f"{hit.source_path or '<unknown>'} [{hit.score:.3f}] {hit.preview_text}"
+            section = f" #{hit.document.section_path}" if hit.document.section_path else ""
+            reasons = ",".join(hit.match_reasons[:3])
+            line = (
+                f"{hit.source_path or '<unknown>'}{section} "
+                f"[{hit.score:.3f} s={hit.semantic_score:.3f} t={hit.token_score:.3f} {reasons}] "
+                f"{hit.preview_text}"
+            )
             if i == self.search_cursor:
                 self.stdscr.attron(curses.A_REVERSE)
             self.stdscr.addstr(6 + i, 2, line[: list_width - 2].ljust(list_width - 2))
