@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tlux.search.hkm import Searcher, build_search_index, drain_jobs, open_index
+from tlux.search.hkm import Searcher, build_search_index, drain_jobs, open_index, resolve_index_root
 from tlux.search.hkm.fs import FileSystem
 
 
@@ -341,6 +341,24 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
 def test_open_index_reports_missing_manifest(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="Missing canonical index manifest"):
         open_index(str(tmp_path))
+
+
+def test_resolve_index_root_accepts_parent_or_hkm_dir(tmp_path: Path) -> None:
+    index_root = tmp_path / "idx"
+    (index_root / "hkm").mkdir(parents=True)
+    (index_root / "index.json").write_text(json.dumps({
+        "source_root": str(tmp_path),
+        "metadata_schema": [],
+        "hkm_path": "hkm",
+        "docs_path": "docs",
+    }), encoding="utf-8")
+    (index_root / "hkm" / "node.json").write_text(json.dumps({
+        "is_leaf": True,
+        "children": [],
+    }), encoding="utf-8")
+
+    assert resolve_index_root(str(tmp_path)) == index_root.resolve()
+    assert open_index(str(index_root / "hkm")).index_root == str(index_root.resolve())
 
 
 def test_open_index_reports_missing_child_node(tmp_path: Path) -> None:

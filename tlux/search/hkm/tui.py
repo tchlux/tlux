@@ -992,10 +992,23 @@ class HkmTuiApp:
     #   Open the index root currently in the form without building.
     # 
     def _open_existing_index(self) -> None:
-        try:
-            self._open_browser(Path(self._field_value("index")), "Opened index. Arrows navigate, / search.")
-        except Exception as exc:
-            self.message = f"Open failed: {exc}"
+        candidates: List[str] = []
+        field = self.fields[self.active_field]
+        if field.kind == "path":
+            if field.suggestions and field.suggestion_idx < len(field.suggestions):
+                candidates.append(field.suggestions[field.suggestion_idx])
+            candidates.append(field.value)
+        candidates.append(self._field_value("index"))
+        errors: List[str] = []
+        for candidate in dict.fromkeys(value for value in candidates if value):
+            try:
+                self._open_browser(Path(candidate), "Opened index.")
+                if self.searcher:
+                    self.message = f"Opened index: {self.searcher.index_root}"
+                return
+            except Exception as exc:
+                errors.append(f"{candidate}: {exc}")
+        self.message = f"Open failed: {errors[0] if errors else 'no index path'}"
 
     # Description:
     #   Switch into the browser view once build completes.

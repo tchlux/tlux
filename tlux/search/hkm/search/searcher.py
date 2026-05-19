@@ -34,6 +34,29 @@ VALID_MODES = {"hybrid", "token", "semantic"}
 VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
 
 
+# Resolve an index root from an exact path or an unambiguous containing path.
+#
+# Arguments:
+#   index_root (str): Index root, hkm directory, or parent containing one index.
+#
+# Returns:
+#   (Path): Resolved directory containing index.json.
+#
+def resolve_index_root(index_root: str) -> Path:
+    root = Path(index_root).expanduser().resolve()
+    if (root / "index.json").exists():
+        return root
+    if root.name == "hkm" and (root.parent / "index.json").exists():
+        return root.parent
+    if root.is_dir():
+        candidates = sorted(path.parent for path in root.glob("*/index.json"))
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(f"Multiple indexes under {root}; choose one explicitly.")
+    return root
+
+
 # Audit a built HKM index for the minimal files needed by query traversal.
 #
 # Arguments:
@@ -47,7 +70,7 @@ VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
 #   ValueError: If a node manifest cannot be decoded.
 #
 def audit_index(index_root: str) -> Path:
-    root = Path(index_root).resolve()
+    root = resolve_index_root(index_root)
     manifest = root / "index.json"
     if not manifest.exists():
         raise FileNotFoundError(f"Missing canonical index manifest: {manifest}")
