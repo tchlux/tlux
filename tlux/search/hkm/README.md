@@ -161,6 +161,42 @@ Search results currently return:
 - `document` with stable source path, type, title, byte/token spans, content
   hash, build timestamps, optional source URL metadata, and stored preview text
 
+## Retrieval guidance
+
+A local book-sized source file was used as a passage-retrieval quality probe.
+The built index contained 395 indexed document chunks and 19,771 embedding
+windows: 15,342 at 32 tokens, 3,691 at 128 tokens, 734 at 512 tokens, and 4 at
+1024 tokens.
+
+For ten random source excerpts, short generalized semantic queries were written
+without relying on specific names or source phrasing. The expected target was
+the best matching embedding window from the source chunk containing the sampled
+excerpt. Ranked within each window size:
+
+- 32-token windows: median target rank 22, worst rank 111 of 15,342, hit@50 8/10.
+- 128-token windows: median target rank 29, worst rank 226 of 3,691, hit@50 7/10.
+- 512-token windows: median target rank 15, worst rank 107 of 734, hit@50 7/9.
+
+Keep all embedding window sizes. Smaller windows are the best primary recall
+layer for short semantic queries because they match query granularity and are
+cheap to pass to a language model. Larger windows still matter because broad
+scene-level matches can rank very high, but they should usually be a secondary
+recall channel rather than the main prompt payload.
+
+A practical result-surfacing path is:
+
+1. Retrieve the top 200 32-token windows as primary anchors.
+2. Add a smaller set of 128-token and 512-token hits as secondary anchors.
+3. Normalize ranks per window size before merging candidates.
+4. Deduplicate or merge overlapping windows by document id and token span.
+5. Expand surviving anchors to enough surrounding context for display or LM
+   reranking.
+
+Do not treat the current document-level collapse as the only retrieval
+abstraction for UI quality. Window-level hits with `window_size`, `doc_id`,
+`token_start`, `token_end`, and score are the better substrate for reranking and
+for deciding how much context to surface.
+
 ## Manual TUI validation
 
 Use the repository itself as a corpus:
