@@ -79,8 +79,10 @@ class QuerySpec:
     mode: str = "hybrid"
     embeddings: List = field(default_factory=list)
     token_sequence: List[int] = field(default_factory=list)
+    text_ast: Dict[str, Any] = field(default_factory=dict)
     label_include: Dict[str, List[str]] = field(default_factory=dict)
     numeric_range: Dict[str, Tuple] = field(default_factory=dict)
+    where: Dict[str, Any] = field(default_factory=dict)
     top_k: int = 10
     offset: int = 0
     filters: Dict[str, List[str]] = field(default_factory=dict)

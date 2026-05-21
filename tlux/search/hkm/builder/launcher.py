@@ -11,12 +11,13 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 from ..embedder import get_backend
 from ..fs import FileSystem
 from ..schema import DEFAULT_METADATA_SCHEMA
-from .tokenize_and_embed import split_text_passages
+from .consolidate import consolidate
+from .tokenize_and_embed import DocumentValue, process_documents, split_text_passages
 
 try:
     from ..jobs import Job, drain_jobs, run_job, set_jobs_root
@@ -80,6 +81,100 @@ DEFAULT_SKIP_SUFFIXES = {
     ".gguf",
 }
 DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
+
+
+# Parse a serialized or Python metadata schema into JSON and runtime forms.
+#
+# Arguments:
+#   metadata_schema (str | list): Schema as JSON text or Python list.
+#
+# Returns:
+#   (tuple[list, list[tuple[str, type]]]): JSON-safe schema and parsed schema.
+#
+def _parse_metadata_schema_value(metadata_schema: str | List[List[str]] | List[Tuple[str, type]]) -> tuple[list, list[tuple[str, type]]]:
+    if isinstance(metadata_schema, str):
+        try:
+            schema_value = json.loads(metadata_schema)
+        except Exception:
+            import ast
+            schema_value = ast.literal_eval(metadata_schema)
+    else:
+        schema_value = [
+            [name, typ if isinstance(typ, str) else typ.__name__]
+            for name, typ in metadata_schema
+        ]
+    type_map = {"str": str, "float": float, "int": int, "json": dict, "bytes": bytes, "list": list, "dict": dict}
+    return schema_value, [(name, type_map.get(kind, str)) for name, kind in schema_value]
+
+
+# Coerce user metadata into the storage type declared by the schema.
+#
+# Arguments:
+#   field_type (type): Runtime metadata field type.
+#   value (object): User metadata value.
+#
+# Returns:
+#   (DocumentValue): Value accepted by process_documents().
+#
+def _coerce_document_metadata(field_type: type, value: object) -> DocumentValue:
+    if value is None:
+        return None
+    if field_type is bytes:
+        return value if isinstance(value, bytes) else str(value).encode("utf-8")
+    if field_type is int:
+        return int(value)
+    if field_type is float:
+        return float(value)
+    return value
+
+
+# Convert user document dictionaries into process_documents batches.
+#
+# Arguments:
+#   documents (Iterable[dict]): Records with text and optional metadata.
+#   metadata_schema (list[tuple[str, type]]): Parsed metadata schema.
+#   build_id (str): Current build identifier.
+#
+# Returns:
+#   (Iterable[tuple[list[str], list[list[DocumentValue]]]]): Single-document batches.
+#
+def _document_batches(
+    documents: Iterable[Dict[str, Any]],
+    metadata_schema: List[Tuple[str, type]],
+    build_id: str,
+) -> Iterable[Tuple[List[str], List[List[DocumentValue]]]]:
+    for idx, record in enumerate(documents):
+        if not isinstance(record, dict) or "text" not in record:
+            raise ValueError("documents must yield dictionaries with a text field")
+        text = str(record["text"])
+        metadata = dict(record.get("metadata", {}) or {})
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        source_path = str(metadata.get("source_path", f"document_{idx:08d}"))
+        defaults = {
+            "source_path": source_path,
+            "source_type": "iterator",
+            "file_kind": str(metadata.get("file_kind", "none")),
+            "title": str(metadata.get("title", source_path)),
+            "section_path": str(metadata.get("section_path", "")),
+            "byte_start": int(metadata.get("byte_start", 0) or 0),
+            "byte_end": int(metadata.get("byte_end", len(text.encode("utf-8"))) or 0),
+            "token_start": int(metadata.get("token_start", 0) or 0),
+            "token_end": int(metadata.get("token_end", 0) or 0),
+            "content_hash": content_hash,
+            "build_id": build_id,
+            "ingested_at": build_id,
+            "source_id": str(metadata.get("source_id", "")),
+            "source_url": str(metadata.get("source_url", "")),
+            "source_date": str(metadata.get("source_date", "")),
+            "source_token_count": int(metadata.get("source_token_count", 0) or 0),
+            "num_bytes": len(text.encode("utf-8")),
+            "document_preview": text[:512],
+        }
+        row = [
+            _coerce_document_metadata(field_type, metadata.get(field_name, defaults.get(field_name)))
+            for field_name, field_type in metadata_schema
+        ]
+        yield [text], [row]
 
 
 # Return the current UTC timestamp as a compact ISO string.
@@ -595,6 +690,130 @@ def build_search_index(
         index_root,
         dependencies=[build_job],
     )
+
+
+# Build a queryable HKM index from Python document dictionaries.
+#
+# Arguments:
+#   index_root (str): Root directory where the HKM index will be created.
+#   documents (Iterable[dict]): Records with text and optional metadata.
+#   metadata_schema (str | list): Metadata schema for stored fields.
+#   num_workers (int): Local workers used for HKM tree jobs.
+#
+# Returns:
+#   (Job): Final HKM tree build job, already drained to completion.
+#
+def build_search_index_from_documents(
+    index_root: str,
+    documents: Iterable[Dict[str, Any]],
+    metadata_schema: str | List[List[str]] | List[Tuple[str, type]] = DEFAULT_METADATA_SCHEMA_TEXT,
+    num_workers: int = 1,
+    max_k: int = 8,
+    leaf_embedding_limit: int = 1024,
+    leaf_doc_limit: int = 1024,
+    max_n_gram: int = 3,
+    n_gram_fp_rate: float = 0.01,
+    seed: int = 42,
+    fs_root: str | None = None,
+    jobs_root: str | None = None,
+    chunk_size_limit: int = 8 * 2**20,
+    max_tokens: int | None = 200_000,
+) -> Job:
+    index_root_path = Path(index_root).resolve()
+    index_root = str(index_root_path)
+    fs_root = str(Path(fs_root).resolve()) if fs_root is not None else index_root
+    jobs_root = str(Path(jobs_root).resolve()) if jobs_root is not None else str(index_root_path / ".hkm_jobs")
+    if not isinstance(num_workers, int) or num_workers <= 0:
+        raise ValueError("num_workers must be a positive integer")
+    schema_value, parsed_schema = _parse_metadata_schema_value(metadata_schema)
+    build_id = _utc_now()
+    backend_name = get_backend().name
+
+    for name in ("docs", "hkm", "manifests"):
+        path = index_root_path / name
+        if path.exists():
+            shutil.rmtree(path)
+    (index_root_path / "docs" / "worker_0000").mkdir(parents=True, exist_ok=True)
+    (index_root_path / "hkm").mkdir(parents=True, exist_ok=True)
+    (index_root_path / "manifests").mkdir(parents=True, exist_ok=True)
+    set_jobs_root(jobs_root)
+
+    Path(index_root, "index.json").write_text(json.dumps({
+        "version": 1,
+        "source_root": index_root,
+        "jobs_root": jobs_root,
+        "embedder_backend": backend_name,
+        "metadata_schema": schema_value,
+        "source_manifest": None,
+        "build_config": {
+            "num_workers": num_workers,
+            "max_cluster_count": max_k,
+            "leaf_embedding_limit": leaf_embedding_limit,
+            "leaf_doc_limit": leaf_doc_limit,
+            "max_n_gram": max_n_gram,
+            "n_gram_fp_rate": n_gram_fp_rate,
+            "seed": seed,
+            "build_id": build_id,
+        },
+        "max_n_gram": max_n_gram,
+        "n_gram_fp_rate": n_gram_fp_rate,
+        "docs_path": "docs",
+        "hkm_path": "hkm",
+        "append_only": False,
+    }, indent=2), encoding="utf-8")
+
+    summary_path = index_root_path / "manifests" / "ingest_summary.json"
+    summary_path.write_text(json.dumps({
+        "scanned": 0,
+        "planned": 0,
+        "indexed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "reused": 0,
+        "new": 0,
+        "changed": 0,
+        "deleted": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "skip_reasons": {},
+        "skipped_files": [],
+        "failed_files": [],
+    }, indent=2), encoding="utf-8")
+    worker_dir = index_root_path / "docs" / "worker_0000"
+    process_documents(
+        str(worker_dir),
+        str(worker_dir),
+        _document_batches(documents, parsed_schema, build_id),
+        parsed_schema,
+        chunk_size_limit=chunk_size_limit,
+        n_gram=max_n_gram,
+        fs_root=fs_root,
+        max_tokens=max_tokens,
+        ingest_report_path=str(worker_dir / "ingest_report.json"),
+        embedding_cache_dir=None,
+    )
+    report = json.loads((worker_dir / "ingest_report.json").read_text(encoding="utf-8"))
+    if int(report.get("indexed", 0)) <= 0:
+        raise ValueError("No documents found to index.")
+    consolidate(FileSystem(root=fs_root), index_root)
+    root_job = run_job(
+        "tlux.search.hkm.builder.recursive_index_builder.build_cluster_index",
+        index_root,
+        max_cluster_count=max_k,
+        leaf_embedding_limit=leaf_embedding_limit,
+        leaf_doc_limit=leaf_doc_limit,
+        max_n_gram=max_n_gram,
+        n_gram_fp_rate=n_gram_fp_rate,
+        seed=seed,
+        fs_root=fs_root,
+        max_depth=3,
+        depth=0,
+    )
+    drain_jobs(FileSystem(root=jobs_root), max_workers=num_workers)
+    root_job.reload()
+    if root_job.status != "SUCCEEDED":
+        raise RuntimeError(root_job.status_reason or root_job.stderr or "HKM build failed")
+    return root_job
 
 
 # Entry point for the HKM driver

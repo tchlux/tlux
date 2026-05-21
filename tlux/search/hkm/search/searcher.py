@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
+import itertools
 import json
 import os
 import re
@@ -11,7 +13,7 @@ import struct
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -26,8 +28,10 @@ VALID_QUERY_KEYS = {
     "mode",
     "embeddings",
     "token_sequence",
+    "text_ast",
     "label_include",
     "numeric_range",
+    "where",
     "top_k",
     "offset",
     "filters",
@@ -181,6 +185,10 @@ def _decode_int(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _hash_category(value: object) -> int:
+    return int.from_bytes(hashlib.sha256(str(value).encode("utf-8")).digest()[:8], "little")
 
 
 # Normalize a file-kind value for exact metadata filtering.
@@ -556,8 +564,10 @@ class Searcher:
                 mode=str(query.get("mode", "hybrid")),
                 embeddings=query.get("embeddings", []),
                 token_sequence=query.get("token_sequence", []),
+                text_ast=query.get("text_ast", {}),
                 label_include=query.get("label_include", {}),
                 numeric_range=query.get("numeric_range", {}),
+                where=query.get("where", {}),
                 top_k=query.get("top_k", 10),
                 offset=query.get("offset", 0),
                 filters=query.get("filters", {}),
@@ -577,6 +587,8 @@ class Searcher:
             raise ValueError("offset must be non-negative")
         if not isinstance(spec.filters, dict):
             raise ValueError("filters must be an object")
+        if not isinstance(spec.where, dict):
+            raise ValueError("where must be an object")
         unknown_filters = set(spec.filters) - VALID_FILTERS
         if unknown_filters:
             raise ValueError(f"unknown filters: {sorted(unknown_filters)}")
@@ -588,8 +600,11 @@ class Searcher:
             "path_exclude": list(spec.filters.get("path_exclude", [])),
             "file_kind": [_normalize_file_kind(value) for value in spec.filters.get("file_kind", [])],
         }
-        if not (spec.text.strip() or spec.token_sequence or spec.embeddings):
-            raise ValueError("query requires text, token_sequence, or embeddings")
+        spec.where = self._normalize_where(spec.where, spec.filters)
+        if spec.text_ast:
+            self._validate_text_ast(spec.text_ast)
+        if not (spec.text.strip() or spec.text_ast or spec.token_sequence or spec.embeddings):
+            raise ValueError("query requires text, text_ast, token_sequence, or embeddings")
         return spec
 
     # Convert a normalized query to a stable JSON-compatible record.
@@ -605,32 +620,175 @@ class Searcher:
             "text": spec.text,
             "mode": spec.mode,
             "token_sequence": list(spec.token_sequence),
+            "text_ast": spec.text_ast,
             "embeddings": spec.embeddings,
             "top_k": spec.top_k,
             "offset": spec.offset,
+            "where": spec.where,
             "filters": spec.filters,
         }
+
+    # Normalize structured metadata filters and legacy filter aliases.
+    #
+    # Arguments:
+    #   where (dict): User-provided metadata filter object.
+    #   filters (dict): Legacy path/file-kind filters.
+    #
+    # Returns:
+    #   (dict): Normalized metadata filter object.
+    #
+    def _normalize_where(self, where: Dict[str, object], filters: Dict[str, List[str]]) -> Dict[str, object]:
+        out = dict(where)
+        if filters.get("path_include") or filters.get("path_exclude"):
+            path_filter = dict(out.get("source_path", {})) if isinstance(out.get("source_path"), dict) else {}
+            if filters.get("path_include"):
+                path_filter["include"] = list(filters["path_include"])
+            if filters.get("path_exclude"):
+                path_filter["exclude"] = list(filters["path_exclude"])
+            out["source_path"] = path_filter
+        if filters.get("file_kind"):
+            out["file_kind"] = {"in": list(filters["file_kind"])}
+        valid_ops = {"eq", "in", "gt", "gte", "lt", "lte", "min", "max", "include", "exclude"}
+        for field, rule in out.items():
+            if not isinstance(field, str) or not field:
+                raise ValueError("where field names must be non-empty strings")
+            if isinstance(rule, dict):
+                unknown = set(rule) - valid_ops
+                if unknown:
+                    raise ValueError(f"unknown where.{field} operators: {sorted(unknown)}")
+                for key in ("in", "include", "exclude"):
+                    if key in rule and not isinstance(rule[key], list):
+                        raise ValueError(f"where.{field}.{key} must be a list")
+        return out
+
+    # Validate the exact lexical query AST.
+    #
+    # Arguments:
+    #   ast (object): User-provided query AST.
+    #
+    # Returns:
+    #   (None): Raises when invalid.
+    #
+    def _validate_text_ast(self, ast: object) -> None:
+        if not isinstance(ast, dict) or len(ast) != 1:
+            raise ValueError("text_ast nodes must be single-key objects")
+        key, value = next(iter(ast.items()))
+        if key == "phrase":
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("text_ast.phrase must be a non-empty string")
+            return
+        if key not in {"and", "or"}:
+            raise ValueError("text_ast supports only phrase, and, and or")
+        if not isinstance(value, list) or not value:
+            raise ValueError(f"text_ast.{key} must be a non-empty list")
+        for child in value:
+            self._validate_text_ast(child)
+
+    # Return phrase text from a validated AST for previews.
+    #
+    # Arguments:
+    #   ast (dict): Validated text AST.
+    #
+    # Returns:
+    #   (list[str]): Phrase leaves in traversal order.
+    #
+    def _ast_phrases(self, ast: Dict[str, object]) -> List[str]:
+        if "phrase" in ast:
+            return [str(ast["phrase"])]
+        key = "and" if "and" in ast else "or"
+        phrases: List[str] = []
+        for child in ast[key]:
+            phrases.extend(self._ast_phrases(child))
+        return phrases
+
+    # Return a decoded metadata value for filtering.
+    #
+    # Arguments:
+    #   hit (Hit): Candidate hit.
+    #   field (str): Metadata field name.
+    #
+    # Returns:
+    #   (object): Decoded metadata value, or None.
+    #
+    def _metadata_value(self, hit: Hit, field: str) -> object:
+        if hasattr(hit.document, field):
+            return getattr(hit.document, field)
+        _tokens, meta = self._doc_context(hit.doc_id)
+        schema = dict(self.metadata_schema)
+        value = meta.get(field)
+        if schema.get(field) is bytes:
+            return _decode_text(value)
+        return value
+
+    # Check a scalar metadata value against an equality or range rule.
+    #
+    # Arguments:
+    #   value (object): Candidate metadata value.
+    #   field (str): Metadata field name.
+    #   field_type (type | None): Metadata schema type.
+    #   rule (object): Normalized where rule.
+    #
+    # Returns:
+    #   (bool): True when the value satisfies the rule.
+    #
+    def _match_metadata_rule(self, value: object, field: str, field_type: type | None, rule: object) -> bool:
+        if field_type is str and not isinstance(value, str):
+            value = int(value) if value is not None else None
+
+            def prepare(item: object) -> object:
+                return _hash_category(item)
+        else:
+            def prepare(item: object) -> object:
+                return _normalize_file_kind(str(item)) if field == "file_kind" else item
+        if not isinstance(rule, dict):
+            return prepare(rule) == value
+        if "eq" in rule and prepare(rule["eq"]) != value:
+            return False
+        if "in" in rule and value not in {prepare(item) for item in rule["in"]}:
+            return False
+        numeric_ops = ("gt", "gte", "lt", "lte", "min", "max")
+        if any(op in rule for op in numeric_ops):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return False
+            if "gt" in rule and not number > float(rule["gt"]):
+                return False
+            if "gte" in rule and not number >= float(rule["gte"]):
+                return False
+            if "min" in rule and not number >= float(rule["min"]):
+                return False
+            if "lt" in rule and not number < float(rule["lt"]):
+                return False
+            if "lte" in rule and not number <= float(rule["lte"]):
+                return False
+            if "max" in rule and not number <= float(rule["max"]):
+                return False
+        text = str(value or "")
+        if "include" in rule and not any(fnmatch.fnmatch(text, pattern) for pattern in rule["include"]):
+            return False
+        if "exclude" in rule and any(fnmatch.fnmatch(text, pattern) for pattern in rule["exclude"]):
+            return False
+        return True
 
     # Check whether a hit satisfies normalized metadata filters.
     #
     # Arguments:
     #   hit (Hit): Candidate hit.
-    #   filters (Dict[str, List[str]]): Normalized filters.
+    #   where (Dict[str, object]): Normalized metadata filters.
     #
     # Returns:
     #   (bool): True when the hit should remain in the result set.
     #
-    def _filter_hit(self, hit: Hit, filters: Dict[str, List[str]]) -> bool:
-        source_path = hit.source_path or ""
-        includes = filters.get("path_include", [])
-        excludes = filters.get("path_exclude", [])
-        if includes and not any(fnmatch.fnmatch(source_path, pattern) for pattern in includes):
-            return False
-        if excludes and any(fnmatch.fnmatch(source_path, pattern) for pattern in excludes):
-            return False
-        kinds = filters.get("file_kind", [])
-        if kinds and _normalize_file_kind(hit.document.file_kind) not in kinds:
-            return False
+    def _filter_hit(self, hit: Hit, where: Dict[str, object]) -> bool:
+        schema = dict(self.metadata_schema)
+        for field, rule in where.items():
+            value = self._metadata_value(hit, field)
+            field_type = schema.get(field)
+            if field == "file_kind":
+                value = _normalize_file_kind(str(value or ""))
+            if not self._match_metadata_rule(value, field, field_type, rule):
+                return False
         return True
 
     # Apply filters and offset pagination to ranked hits.
@@ -643,7 +801,7 @@ class Searcher:
     #   (SearchResult): Stable paginated result.
     #
     def _page(self, hits: List[Hit], spec: QuerySpec) -> SearchResult:
-        filtered = [hit for hit in hits if self._filter_hit(hit, spec.filters)]
+        filtered = [hit for hit in hits if self._filter_hit(hit, spec.where)]
         end = spec.offset + spec.top_k
         return SearchResult(
             docs=filtered[spec.offset:end],
@@ -657,6 +815,8 @@ class Searcher:
     def search(self, query_dict) -> SearchResult:
         spec = self._query_spec(query_dict)
         candidate_count = max(self._doc_count(), spec.offset + spec.top_k)
+        if spec.text_ast:
+            return self._page(self._search_text_ast(spec.text_ast), spec)
         if spec.token_sequence:
             return self._page(self._search_tokens(spec.token_sequence, candidate_count, spec.text), spec)
         if spec.embeddings:
@@ -672,7 +832,7 @@ class Searcher:
             return self._page(self._search_hybrid(spec.text, candidate_count), spec)
         return self._page([], spec)
 
-    def _search_tokens(self, token_sequence: List[int], top_k: int, query_text: str) -> List[Hit]:
+    def _search_tokens(self, token_sequence: List[int], top_k: int | None, query_text: str) -> List[Hit]:
         if not token_sequence:
             return []
         target = _seq_to_bytes(token_sequence)
@@ -686,7 +846,95 @@ class Searcher:
                     hits.append(hit)
                     seen.add(key)
         hits.sort(key=lambda hit: (hit.doc_id, hit.span))
-        return hits[:top_k]
+        return hits if top_k is None else hits[:top_k]
+
+    # Search one exact phrase through token n-gram pruning and leaf verification.
+    #
+    # Arguments:
+    #   phrase (str): Exact phrase text.
+    #
+    # Returns:
+    #   (list[Hit]): Exact phrase hits.
+    #
+    def _search_phrase_ast(self, phrase: str) -> List[Hit]:
+        tokens = self._backend().tokenize([phrase])[0]
+        hits = self._search_tokens(tokens, None, phrase)
+        for hit in hits:
+            hit.match_reasons = ["token", "phrase", "text_ast"]
+            hit.token_score = 1.0
+        return hits
+
+    # Union text-AST hits, removing duplicate document spans.
+    #
+    # Arguments:
+    #   groups (list[list[Hit]]): Child hit groups.
+    #
+    # Returns:
+    #   (list[Hit]): Unioned hits.
+    #
+    def _or_text_hits(self, groups: List[List[Hit]]) -> List[Hit]:
+        merged: Dict[Tuple[int, Tuple[int, int]], Hit] = {}
+        for hits in groups:
+            for hit in hits:
+                merged.setdefault((hit.doc_id, hit.span), hit)
+        return sorted(merged.values(), key=lambda hit: (hit.doc_id, hit.span))
+
+    # Intersect text-AST hits by document id and keep the tightest combined span.
+    #
+    # Arguments:
+    #   groups (list[list[Hit]]): Child hit groups.
+    #   query_text (str): Preview query text.
+    #
+    # Returns:
+    #   (list[Hit]): Hits from documents matching every child.
+    #
+    def _and_text_hits(self, groups: List[List[Hit]], query_text: str) -> List[Hit]:
+        if not groups:
+            return []
+        by_doc = []
+        for hits in groups:
+            doc_hits: Dict[int, List[Hit]] = {}
+            for hit in hits:
+                doc_hits.setdefault(hit.doc_id, []).append(hit)
+            by_doc.append(doc_hits)
+        doc_ids = set(by_doc[0])
+        for doc_hits in by_doc[1:]:
+            doc_ids &= set(doc_hits)
+        out = []
+        for doc_id in sorted(doc_ids):
+            choices = [doc_hits[doc_id] for doc_hits in by_doc]
+            best_span = None
+            for combo in itertools.product(*choices):
+                start = min(hit.span[0] for hit in combo)
+                end = max(hit.span[1] for hit in combo)
+                span = (start, end)
+                if best_span is None or (span[1] - span[0], span) < (best_span[1] - best_span[0], best_span):
+                    best_span = span
+            if best_span is None:
+                continue
+            hit = self._hit(doc_id, 1.0, best_span, "token", query_text)
+            hit.match_reasons = ["token", "phrase", "text_ast", "and"]
+            hit.token_score = 1.0
+            out.append(hit)
+        return out
+
+    # Execute a validated exact lexical query AST.
+    #
+    # Arguments:
+    #   ast (dict): Validated text AST.
+    #
+    # Returns:
+    #   (list[Hit]): Token hits matching the AST.
+    #
+    def _search_text_ast(self, ast: Dict[str, object]) -> List[Hit]:
+        query_text = " ".join(self._ast_phrases(ast))
+        if "phrase" in ast:
+            return self._search_phrase_ast(str(ast["phrase"]))
+        if "or" in ast:
+            groups = [self._search_text_ast(child) for child in ast["or"]]
+            return self._or_text_hits(groups)
+        groups = [self._search_text_ast(child) for child in ast["and"]]
+        return self._and_text_hits(groups, query_text)
 
     # Find the best token window covering query terms in one passage.
     #

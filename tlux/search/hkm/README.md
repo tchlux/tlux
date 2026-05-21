@@ -8,8 +8,7 @@ HKM is a Python library for building and searching a hierarchical chunk index ov
 - Local-machine usage is the default: enqueue jobs and let local workers execute them.
 - Distributed usage uses the same job directory on a shared filesystem and workers started on every participating host.
 - The current index format is the directory-based `.hkmchunk` layout written by [`builder/chunk_io.py`](builder/chunk_io.py).
-- The current query surface supports hybrid text search, hierarchical token pruning, and semantic text queries, with exact token verification at leaves.
-- Metadata filters, preview streaming, and richer retrieval planning are not current supported features even if older prototype code mentioned them.
+- The current query surface supports hybrid text search, hierarchical token pruning, semantic text queries, exact boolean text ASTs, and metadata filters with exact token verification at leaves.
 
 ## Installation
 
@@ -36,7 +35,7 @@ The TUI:
 ## Library usage
 
 ```python
-from tlux.search.hkm import Searcher, build_search_index, drain_jobs
+from tlux.search.hkm import Searcher, build_search_index, build_search_index_from_documents, drain_jobs
 from tlux.search.hkm.fs import FileSystem
 
 root_job = build_search_index(
@@ -51,6 +50,38 @@ root_job.reload()
 searcher = Searcher.from_index_root("idx")
 hits = searcher.search({"mode": "semantic", "text": "job scheduler", "top_k": 5})
 ```
+
+Directory builds are convenient for file corpora. Library users with document
+iterators and metadata should build directly from records:
+
+```python
+schema = [
+    ["source_path", "bytes"],
+    ["document_preview", "bytes"],
+    ["category", "bytes"],
+    ["year", "int"],
+]
+
+build_search_index_from_documents(
+    "idx",
+    [
+        {"text": "hello world", "metadata": {"source_path": "a.txt", "category": "demo", "year": 2024}},
+        {"text": "HELLO WORLD", "metadata": {"source_path": "b.txt", "category": "demo", "year": 2025}},
+    ],
+    metadata_schema=schema,
+)
+
+searcher = Searcher.from_index_root("idx")
+hits = searcher.search({
+    "text_ast": {"or": [{"phrase": "hello world"}, {"phrase": "HELLO WORLD"}]},
+    "where": {"category": "demo", "year": {"gte": 2024}},
+    "top_k": 10,
+})
+```
+
+Metadata filters narrow candidates but do not affect ranking. Custom metadata
+fields must be listed in `metadata_schema`; store filterable text metadata as
+`bytes` when users need plain equality checks.
 
 ## CLI usage
 
@@ -70,21 +101,30 @@ tlux/search/hkm/bin/hkm-search idx query.json
 
 ```json
 {
-  "text": "job scheduler",
-  "mode": "hybrid",
   "top_k": 10,
   "offset": 0,
-  "filters": {
-    "path_include": ["*.py"],
-    "path_exclude": ["tests/*"],
-    "file_kind": [".py"]
+  "text_ast": {
+    "and": [
+      {"or": [{"phrase": "hello"}, {"phrase": "Hello"}, {"phrase": "HELLO"}]},
+      {"or": [{"phrase": "world"}, {"phrase": "World"}, {"phrase": "WORLD"}]}
+    ]
+  },
+  "where": {
+    "source_path": {"include": ["*.py"], "exclude": ["tests/*"]},
+    "file_kind": {"in": [".py"]},
+    "year": {"gte": 2024}
   }
 }
 ```
 
 `mode` defaults to `hybrid` and may be `token`, `semantic`, or `hybrid`.
-`top_k` is the page size, `offset` is zero-based pagination, and filters are
-optional metadata filters over source path globs and file kind suffixes.
+`text_ast` runs exact tokenizer-based phrase search with `and` and `or`.
+`top_k` is the page size, `offset` is zero-based pagination, and `where` holds
+optional metadata filters. `where.FIELD` may be a scalar exact match, an
+`{"in": [...]}` list, a numeric range using `gt`, `gte`, `lt`, `lte`, `min`, or
+`max`, or source-path glob rules with `include` and `exclude`. The older
+`filters` object for `path_include`, `path_exclude`, and `file_kind` is still
+accepted and normalized into `where`.
 The CLI prints one JSON object with `docs`, `offset`, `limit`, `count`,
 `next_offset`, and the normalized `query`.
 

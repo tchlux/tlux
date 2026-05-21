@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tlux.search.hkm import Searcher, build_search_index, drain_jobs, open_index, resolve_index_root
+from tlux.search.hkm import Searcher, build_search_index, build_search_index_from_documents, drain_jobs, open_index, resolve_index_root
 from tlux.search.hkm.fs import FileSystem
 
 
@@ -558,6 +558,76 @@ def test_token_search_uses_hierarchical_filters(tmp_path: Path, monkeypatch) -> 
     hits = searcher.search({"token_sequence": [1, 2], "top_k": 10})
     assert sorted(hit.source_path for hit in hits.docs) == ["doc0.txt", "doc1.txt"]
     assert not searcher.search({"token_sequence": [99, 100], "top_k": 10}).docs
+
+
+def test_iterator_build_supports_text_ast_and_where_filters(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    index_root = tmp_path / "idx"
+    schema = [
+        ["source_path", "bytes"],
+        ["file_kind", "bytes"],
+        ["title", "bytes"],
+        ["document_preview", "bytes"],
+        ["category", "bytes"],
+        ["year", "int"],
+        ["rank", "float"],
+        ["kind", "str"],
+    ]
+    documents = [
+        {"text": "1 2 3 4", "metadata": {"source_path": "a.txt", "category": "alpha", "year": 2024, "rank": 1.5, "kind": "case"}},
+        {"text": "10 20 3 4", "metadata": {"source_path": "b.txt", "category": "beta", "year": 2023, "rank": 2.0, "kind": "other"}},
+        {"text": "1 2 30 40", "metadata": {"source_path": "c.txt", "category": "alpha", "year": 2020, "rank": 3.0, "kind": "case"}},
+    ]
+
+    job = build_search_index_from_documents(
+        str(index_root),
+        documents,
+        metadata_schema=schema,
+        num_workers=1,
+        max_k=2,
+        leaf_embedding_limit=100,
+        leaf_doc_limit=100,
+        seed=0,
+    )
+    assert job.status == "SUCCEEDED", job.stderr
+
+    searcher = Searcher.from_index_root(str(index_root))
+    text_ast = {
+        "and": [
+            {"or": [{"phrase": "1 2"}, {"phrase": "10 20"}]},
+            {"phrase": "3 4"},
+        ]
+    }
+    hits = searcher.search({"text_ast": text_ast, "top_k": 10}).docs
+    assert [hit.source_path for hit in hits] == ["a.txt", "b.txt"]
+    assert all("text_ast" in hit.match_reasons for hit in hits)
+
+    filtered = searcher.search({
+        "text_ast": text_ast,
+        "where": {
+            "category": {"eq": "alpha"},
+            "year": {"gte": 2024},
+            "rank": {"lte": 2.0},
+            "kind": {"eq": "case"},
+        },
+        "top_k": 10,
+    })
+    assert [hit.source_path for hit in filtered.docs] == ["a.txt"]
+    assert filtered.query["where"]["category"] == {"eq": "alpha"}
+
+    legacy = searcher.search({"text_ast": {"phrase": "1 2"}, "filters": {"path_include": ["c.*"]}, "top_k": 10})
+    assert [hit.source_path for hit in legacy.docs] == ["c.txt"]
+
+    query_path = tmp_path / "query_ast.json"
+    query_path.write_text(json.dumps({
+        "text_ast": text_ast,
+        "where": {"category": "alpha"},
+        "top_k": 10,
+    }), encoding="utf-8")
+    command = [str(Path(__file__).resolve().parents[1] / "bin" / "hkm-search"), str(index_root), str(query_path)]
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    assert [hit["source_path"] for hit in payload["docs"]] == ["a.txt"]
 
 
 def test_leaf_split_uses_embedding_count_not_doc_count(tmp_path: Path, monkeypatch) -> None:
