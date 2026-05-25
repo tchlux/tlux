@@ -343,6 +343,135 @@ def fetch_data(config, agg_iterators_in, ax_in, ax, axi_in, axi, sizes_in, sizes
 
 
 
+# Embed integer inputs into model input coordinates.
+#
+# Arguments:
+#   numeric (ndarray): numeric inputs in column-vector layout.
+#   int_inputs (ndarray): integer categorical inputs in column-vector layout.
+#   embeddings (ndarray): embedding vectors by integer category.
+#   numeric_dim (int): number of numeric coordinates to preserve.
+#   embedding_dim (int): number of embedding coordinates to populate.
+#   num_embeddings (int): number of direct embeddings available.
+#   total_dim (int): total output input dimension.
+#   dtype (type | str): output numeric type.
+#
+# Returns:
+#   (ndarray): embedded input matrix in column-vector layout.
+#
+def _embed_inputs(numeric, int_inputs, embeddings, numeric_dim, embedding_dim, num_embeddings, total_dim, dtype):
+    n = numeric.shape[1]
+    embedded = cast(np.zeros((total_dim, n)), dtype)
+    embedded[:numeric_dim,:] = numeric[:numeric_dim,:]
+    if (embedding_dim <= 0):
+        return embedded
+    for j in range(n):
+        for d in range(int_inputs.shape[0]):
+            e = int(int_inputs[d,j])
+            if ((e > 0) and (e <= num_embeddings)):
+                embedded[numeric_dim:numeric_dim+embedding_dim,j] += embeddings[:,e-1]
+            elif (e > num_embeddings):
+                e1, e2 = index_to_pair(num_embeddings+1, e-num_embeddings)
+                if (e1 > 1):
+                    embedded[numeric_dim:numeric_dim+embedding_dim,j] += embeddings[:,e1-2]
+                if (e2 > 1):
+                    embedded[numeric_dim:numeric_dim+embedding_dim,j] -= embeddings[:,e2-2]
+        if (int_inputs.shape[0] > 1):
+            embedded[numeric_dim:numeric_dim+embedding_dim,j] /= int_inputs.shape[0]
+    return embedded
+
+
+# Evaluate one linear or layered AXY submodel.
+#
+# Arguments:
+#   config (object): model configuration with activation settings.
+#   x (ndarray): input values in column-vector layout.
+#   input_vecs (ndarray): input-layer vectors.
+#   input_shift (ndarray): input-layer shifts.
+#   state_vecs (ndarray): hidden-state vectors.
+#   state_shift (ndarray): hidden-state shifts.
+#   output_vecs (ndarray): output vectors.
+#   state_dim (int): hidden state dimension.
+#   num_states (int): number of hidden states.
+#   num_chords (int): number of additive chords.
+#   output_dim (int): output dimension.
+#   ytrans (bool): true when output should be row-vector layout.
+#   dtype (type | str): output numeric type.
+#
+# Returns:
+#   (tuple): output values and stored states.
+#
+def _evaluate_submodel(config, x, input_vecs, input_shift, state_vecs, state_shift,
+                       output_vecs, state_dim, num_states, num_chords,
+                       output_dim, ytrans, dtype):
+    n = x.shape[1]
+    states = cast(np.zeros((n, state_dim, num_states, num_chords)), dtype)
+    y_shape = ((n, output_dim) if ytrans else (output_dim, n))
+    y = cast(np.zeros(y_shape), dtype)
+    if (num_states > 0):
+        for c in range(num_chords):
+            values = np.maximum(x.T @ input_vecs[:,:,c] + input_shift[:,c], config.discontinuity)
+            states[:,:,0,c] = values
+            for l in range(num_states-1):
+                values = np.maximum(values @ state_vecs[:,:,l,c] + state_shift[:,l,c], config.discontinuity)
+                states[:,:,l+1,c] = values
+            if ytrans:
+                y += values @ output_vecs[:,:,c]
+            else:
+                y += (values @ output_vecs[:,:,c]).T
+    elif (output_dim > 0):
+        if ytrans:
+            y = x.T @ output_vecs[:,:,0]
+        else:
+            y = output_vecs[:,:,0].T @ x
+    return y, states
+
+
+# Aggregate AX outputs into either fixed-model inputs or final outputs.
+#
+# Arguments:
+#   config (object): model configuration with aggregation flags.
+#   ay (ndarray): aggregator outputs in row-vector layout.
+#   sizes (ndarray): number of aggregate inputs per fixed input.
+#   out (ndarray): destination in column-vector layout.
+#   ay_shift (ndarray): aggregator output shift.
+#   ay_scale (ndarray): aggregator output multiplier.
+#
+# Returns:
+#   (ndarray): updated destination array.
+#
+def _aggregate_outputs(config, ay, sizes, out, ay_shift, ay_scale):
+    a_start = 0
+    f_start = 0
+    for i, size in enumerate(sizes):
+        size = int(size)
+        a_end = a_start + size
+        f_end = f_start + max(0, size-1)
+        if (size > 0):
+            if config.partial_aggregation:
+                cw = max(config.min_agg_weight, ay[a_end-1,config.ado])
+                out[:,f_end] = ay[a_end-1,:config.ado] * cw
+                for j in range(1, size):
+                    w = max(config.min_agg_weight, ay[a_end-1-j,config.ado])
+                    out[:,f_end] += ay[a_end-1-j,:config.ado] * w
+                    cw += w
+                    out[:,f_end-j] = out[:,f_end] / cw
+                out[:,f_end] = ay[a_end-1,:config.ado]
+                if (config.mdo > 0):
+                    out[:,f_start:f_end+1] = ((out[:,f_start:f_end+1].T - ay_shift) * ay_scale).T
+            else:
+                weights = np.maximum(config.min_agg_weight, ay[a_start:a_end,config.ado])
+                out[:,i] = weights @ ay[a_start:a_end,:config.ado] / weights.sum()
+                if (config.mdo > 0):
+                    out[:,i] = (out[:,i] - ay_shift) * ay_scale
+        elif config.partial_aggregation:
+            out[:,f_start] = 0.0
+        else:
+            out[:,i] = 0.0
+        a_start = a_end
+        f_start = f_end + 1
+    return out
+
+
 # Define the full EVALUATE function in python (reimplementation).
 def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwargs):
     # Get some constants.
@@ -350,176 +479,46 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
     na = ax.shape[1]
     m = AxyModel(config, cast(model, dtype))
     state_values = {}
-    # Embed the AXI values.
-    ax_embedded = cast(np.zeros((config.adi, na)), dtype)
-    for n in range(axi.shape[1]):
-        ax_embedded[:config.adn,n] = ax[:config.adn,n]
-        for d in range(axi.shape[0]):
-            e = axi[d,n]
-            if (e > 0) and (e <= config.ane):
-                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e-1]
-            elif (e > config.ane):
-                e1, e2 = index_to_pair(num_elements=config.ane+1, i=e-config.ane)
-                ax_embedded[-config.ade:,n] += m.a_embeddings[:,e1-1-1] - m.a_embeddings[:,e2-1-1]
-        if (axi.shape[0] > 1):
-            ax_embedded[-config.ade:,n] /= axi.shape[0]
-    ax = ax_embedded
+    # Embed integer inputs in the same layout used by the Fortran EMBED routine.
+    ax = _embed_inputs(ax, axi, m.a_embeddings, config.adn, config.ade, config.ane, config.adi, dtype)
+    x = _embed_inputs(x, xi, m.m_embeddings, config.mdn, config.mde, config.mne, config.mdi, dtype)
     state_values["ax"] = ax
-    # Embed the XI values.
-    x_embedded = cast(np.zeros((config.mdi, nm)), dtype)
-    for n in range(xi.shape[1]):
-        x_embedded[:config.mdn,n] = x[:config.mdn,n]
-        for d in range(xi.shape[0]):
-            e = xi[d,n]
-            if (e > 0) and (e <= config.mne):
-                x_embedded[config.mdn:config.mdn+config.mde:,n] += m.m_embeddings[:,e-1]
-            elif (e > config.mne):
-                e1, e2 = index_to_pair(num_elements=config.mne, i=e)
-                x_embedded[config.mdn:config.mdn+config.mde,n] += m.m_embeddings[:,e1-1] - m.m_embeddings[:,e2-1]
-        if (xi.shape[0] > 1):
-            x_embedded[-config.mde:,n] /= xi.shape[0]
-    x = x_embedded
     state_values["x"] = x
     # Initialize a holder for the output.
     y = cast(np.zeros((config.do, nm)), dtype)
-    # Evaluate the aggregator.
+    ay = cast(np.zeros((na, config.ado+1)), dtype)
+    state_values["a_states"] = cast(np.zeros((na, config.ads, config.ans, config.anc)), dtype)
+    state_values["m_states"] = cast(np.zeros((nm, config.mds, config.mns, config.mnc)), dtype)
+    # Evaluate the aggregator and aggregate its outputs.
     if (config.ado > 0):
-        if (config.normalize and (config.adn > 0)):
-            # Add the shift term (across all point column vectors).
-            ax[:config.adn,:] = (ax[:config.adn,:].T + m.ax_shift).T
-            # Replace all NaN or Inf values
-            ax[:config.adn,:] = np.where(
-                np.logical_or(
-                    np.isnan(ax[:config.adn,:].astype("float32")),
-                    np.isinf(ax[:config.adn,:].astype("float32")),
-                ),
-                0.0,
-                ax[:config.adn,:]
-            )
-            # Apply the input multiplier.
-            if (config.needs_scaling):
-                ax[:config.adn,:] = m.ax_rescale.T @ ax[:config.adn,:]
-        # Evaluate the MLP.
-        values = ax
-        state_values["a_states"] = []
-        if (config.ans > 0):
-            # Apply input transformation.
-            values = np.clip(
-                ((values.T @ m.a_input_vecs) + m.a_input_shift).T,
-                config.discontinuity, float('inf')
-            )
-            state_values["a_states"].append(values)
-            # Apply internal transformations.
-            for i in range(config.ans-1):
-                values = np.clip(
-                    ((values.T @ m.a_state_vecs[:,:,i]) + m.a_state_shift[:,i]).T,
-                    config.discontinuity, float('inf')
-                )
-                state_values["a_states"].append(values)
-        state_values["a_states"] = np.asarray(state_values["a_states"]).T
-        # Apply output transformation.
-        ay = (values.T @ m.a_output_vecs[:,:])
+        ay, state_values["a_states"] = _evaluate_submodel(
+            config, ax, m.a_input_vecs, m.a_input_shift, m.a_state_vecs,
+            m.a_state_shift, m.a_output_vecs, config.ads, config.ans,
+            config.anc, config.ado+1, True, dtype
+        )
         state_values["ay"] = ay.copy()
-        ay_error = ay[:,config.ado:config.ado+1]  # extract +1 for error prediction
-        # Ensure the AY weights are valid (always positive).
-        ay[:,-1] = np.maximum(config.min_agg_weight, ay[:,-1])
-        # If there is a following model..
         if (config.mdo > 0):
-            # Compute the first aggregator output embedding position.
-            e = config.mdn + config.mde
-            # Set the aggregator output to be a slice of X.
-            agg_out = x[e:,:]
+            agg_out = x[config.mdn+config.mde:config.mdn+config.mde+config.ado,:]
         else:
-            # Set the aggregator output to be Y.
-            agg_out = y[:,:]
-        # Aggregate the batches with partial aggregation
-        if (config.partial_aggregation):
-            f_start = 0
-            a_start = 0
-            for i, s in enumerate(sizes):
-                a_end = a_start + s
-                f_end = f_start + max(0, s - 1)
-                if s > 0:
-                    # Initialize the convex weight
-                    cw = max(config.min_agg_weight, ay[a_end - 1, config.ado])
-                    agg_out[:, f_end] = ay[a_end - 1, :config.ado] * cw
-                    # Accumulate the running sum in the last position, updating the divisor.
-                    for j in range(1, s):
-                        agg_out[:, f_end] += ay[a_end - 1 - j, :config.ado] * max(config.min_agg_weight, ay[a_end - 1 - j, config.ado])
-                        # Accumulate the running sum of weights (to be made convex).
-                        cw += max(config.min_agg_weight, ay[a_end - 1 - j, config.ado])
-                        # Compute this output.
-                        agg_out[:, f_end - j] = agg_out[:, f_end] / cw
-                    # Revert the running sum in the last position to just the value (weight = 1).
-                    agg_out[:, f_end] = ay[a_end - 1, :config.ado]
-                    # Normalize the output.
-                    if config.mdo > 0:
-                        # Apply output shift and scale
-                        agg_out[:, f_start:f_end + 1] = ((agg_out[:, f_start:f_end + 1].T - m.ay_shift) * m.ay_scale).T
-                else:
-                    # When there is no size, a zero value is assigned
-                    agg_out[:, f_end] = 0.0
-                # Transition the start for the next element.
-                a_start = a_end
-                f_start = f_end + 1
-        # Without partial aggregation, compute the mean of all outputs in each group
-        else:
-            a = 0
-            for i,s in enumerate(sizes):
-                if (s > 0):
-                    cw = ay[a:a+s,config.ado].sum()
-                    agg_out[:,i] = (ay[a:a+s,config.ado][:,np.newaxis] * ay[a:a+s,:config.ado]).sum(axis=0) / cw
-                    if config.mdo > 0:
-                        # Apply output shift and scale
-                        agg_out[:,i] = (agg_out[:,i] - m.ay_shift) * m.ay_scale
-                # When there is no size, a zero value is assigned
-                else:
-                    agg_out[:,i] = 0
-                a += s
+            agg_out = y[:config.ado,:]
+        _aggregate_outputs(config, ay, sizes, agg_out, m.ay_shift, m.ay_scale)
+    else:
+        state_values["ay"] = ay
     # Evaluate the fixed model.
     if (config.mdo > 0):
-        if (config.normalize and (config.mdn > 0)):
-            # Add the shift term (across all point column vectors).
-            x[:config.mdn,:] = (x[:config.mdn,:].T + m.x_shift).T
-            # Replace all NaN or Inf values
-            x[:config.mdn,:] = np.where(
-                np.logical_or(
-                    np.isnan(x[:config.mdn,:].astype("float32")),
-                    np.isinf(x[:config.mdn,:].astype("float32")),
-                ),
-                0.0,
-                x[:config.mdn,:]
-            )
-            # Apply the input multiplier.
-            if (config.needs_scaling):
-                x[:config.mdn,:] = m.x_rescale.T @ x[:config.mdn,:]
-        # Evaluate the MLP.
-        values = x
-        state_values["m_states"] = []
-        if (config.mns > 0):
-            # Apply input transformation.
-            values = np.clip(
-                ((values.T @ m.m_input_vecs) + m.m_input_shift).T,
-                config.discontinuity, float('inf')
-            )
-            state_values["m_states"].append(values)
-            # Apply internal transformations.
-            for i in range(config.mns-1):
-                values = np.clip(
-                    ((values.T @ m.m_state_vecs[:,:,i]) + m.m_state_shift[:,i]).T,
-                    config.discontinuity, float('inf')
-                )
-                state_values["m_states"].append(values)
-        state_values["m_states"] = np.asarray(state_values["m_states"]).T
-        # Apply output transformation.
-        y = (values.T @ m.m_output_vecs[:,:]).T
-    # Apply final normalization.
-    if (config.normalize):
-        if (config.needs_scaling):
-            y[:config.do-config.doe,:] = m.y_rescale.T @ y[:config.do-config.doe,:]
-        y[:config.do-config.doe,:] = (y[:config.do-config.doe,:].T + m.y_shift).T
+        y, state_values["m_states"] = _evaluate_submodel(
+            config, x, m.m_input_vecs, m.m_input_shift, m.m_state_vecs,
+            m.m_state_shift, m.m_output_vecs, config.mds, config.mns,
+            config.mnc, config.mdo, False, dtype
+        )
+    # Apply final output normalization, matching Fortran EVALUATE.
+    if (config.normalize and (config.don > 0)):
+        if config.needs_scaling:
+            y[:config.don,:] = m.y_rescale.T @ y[:config.don,:]
+        if config.needs_shifting:
+            y[:config.don,:] = (y[:config.don,:].T - m.y_shift).T
     state_values["y"] = y
-    # Return the final values.
+    # Return all forward-pass values used by gradient checks.
     return state_values
 
 

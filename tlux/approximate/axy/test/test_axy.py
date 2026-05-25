@@ -46,10 +46,117 @@ from tlux.approximate.axy.test.scenarios import (
     scenario_generator,
     initialize_agg_iterator
 )
+from tlux.math.fraction import Fraction
 
 import json
 import numpy as np
 np.set_printoptions(linewidth=1000)
+
+
+# Wrap Fraction values and record comparison outcomes during evaluation.
+class TracedFraction:
+    trace = None
+
+    # Initialize a traced exact rational value.
+    def __init__(self, numerator=0, denominator=1, reduce=True):
+        if (type(numerator) == TracedFraction):
+            numerator = numerator.value
+        if (type(denominator) == TracedFraction):
+            denominator = denominator.value
+        if (type(numerator) == Fraction):
+            denominator = Fraction(denominator)
+            if (denominator == 1):
+                self.value = numerator
+            else:
+                self.value = numerator / denominator
+        else:
+            self.value = Fraction(numerator, denominator, reduce=reduce)
+
+    # Start recording comparison outcomes.
+    @classmethod
+    def start_trace(cls):
+        cls.trace = []
+
+    # Stop recording comparison outcomes.
+    @classmethod
+    def stop_trace(cls):
+        trace = tuple(cls.trace)
+        cls.trace = None
+        return trace
+
+    # Record one comparison outcome when tracing is enabled.
+    @classmethod
+    def _record(cls, result):
+        result = bool(result)
+        if (cls.trace is not None):
+            cls.trace.append(result)
+        return result
+
+    # Return the raw wrapped Fraction value.
+    @staticmethod
+    def _value(other):
+        if (type(other) == TracedFraction):
+            return other.value
+        return Fraction(other)
+
+    @property
+    def numerator(self): return self.value.numerator
+    @property
+    def denominator(self): return self.value.denominator
+
+    def __float__(self): return float(self.value)
+    def __int__(self): return int(self.value)
+    def __repr__(self): return f"TracedFraction({repr(self.value)})"
+    def __str__(self): return str(self.value)
+    def __bool__(self): return bool(self.value)
+    def __hash__(self): return hash(self.value)
+
+    # Add two values.
+    def __add__(self, other): return TracedFraction(self.value + self._value(other))
+    def __radd__(self, other): return TracedFraction(self._value(other) + self.value)
+
+    # Subtract two values.
+    def __sub__(self, other): return TracedFraction(self.value - self._value(other))
+    def __rsub__(self, other): return TracedFraction(self._value(other) - self.value)
+
+    # Multiply two values.
+    def __mul__(self, other): return TracedFraction(self.value * self._value(other))
+    def __rmul__(self, other): return TracedFraction(self._value(other) * self.value)
+
+    # Divide two values.
+    def __truediv__(self, other): return TracedFraction(self.value / self._value(other))
+    def __rtruediv__(self, other): return TracedFraction(self._value(other) / self.value)
+    def __floordiv__(self, other): return self.value // self._value(other)
+    def __rfloordiv__(self, other): return self._value(other) // self.value
+
+    # Compute modulo.
+    def __mod__(self, other): return TracedFraction(self.value % self._value(other))
+    def __rmod__(self, other): return TracedFraction(self._value(other) % self.value)
+
+    # Compute powers.
+    def __pow__(self, other):
+        other = self._value(other) if (type(other) == TracedFraction) else other
+        return TracedFraction(self.value ** other)
+    def __rpow__(self, other): return TracedFraction(self._value(other) ** self.value)
+
+    # Change sign.
+    def __neg__(self): return TracedFraction(-self.value)
+    def __abs__(self): return TracedFraction(abs(self.value))
+    def __round__(self, *args, **kwargs): return round(float(self), *args, **kwargs)
+
+    # Compare two values and record the comparison outcome.
+    def __eq__(self, other): return type(self)._record(self.value == self._value(other))
+    def __ne__(self, other): return type(self)._record(self.value != self._value(other))
+    def __lt__(self, other): return type(self)._record(self.value < self._value(other))
+    def __gt__(self, other): return type(self)._record(self.value > self._value(other))
+    def __le__(self, other):
+        other = self._value(other)
+        type(self)._record(self.value < other)
+        return self.value <= other
+    def __ge__(self, other):
+        other = self._value(other)
+        type(self)._record(self.value > other)
+        return self.value >= other
 
 
 # --------------------------------------------------------------------
@@ -686,10 +793,9 @@ def _test_model_gradient():
         )
 
         # Approximate the gradient with a finite difference.
-        from tlux.math.fraction import Fraction
-        dtype = Fraction
+        dtype = TracedFraction
         # dtype = "float64"
-        offset = Fraction(1, 2**52)
+        offset = dtype(1, 2**52)
         def finite_difference_gradient(model, data, config=config, offset=offset, dtype=dtype):
             na, nm = data["na"], data["nm"]
             ax, axi = data["ax"].copy(order="F"), data["axi"].copy(order="F")
@@ -701,28 +807,45 @@ def _test_model_gradient():
             yw = np.where(yw < 0, 1 / (1 + abs(yw)), yw)
             n = y.shape[1]
             # Evaluate the model and compute the current error.
-            f = py_evaluate(config, model, dtype=dtype, ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)
-            fy = f["y"]
+            def traced_evaluate(model):
+                dtype.start_trace()
+                f = py_evaluate(config, model, dtype=dtype, ax=ax, axi=axi, sizes=sizes, x=x, xi=xi)
+                return f["y"], dtype.stop_trace()
+            fy, base_trace = traced_evaluate(model)
             squared_error = (fy - y)**2 / 2
             # Initialize the gradient to zero.
             gradient = 0 * model.copy()[:config.num_vars]
+            ambiguous = np.zeros(model.shape, dtype=bool)
             # For each component of the model, modify the model, evaluate, observe change in error.
             for i in range(config.num_vars):
-                local_model = model.copy()
-                local_model[i] += offset
-                local_fy = py_evaluate(config, local_model, dtype=dtype, **data)["y"]
-                local_squared_error = (local_fy - y)**2 / 2
-                # Compute the error.
-                error_delta = (local_squared_error - squared_error) / n
-                # Handle weighted outputs.
-                if (yw.shape[0] == 1):
-                    error_delta = (error_delta.T * yw.T).T
-                elif (yw.shape[0] == y.shape[0]):
-                    error_delta = error_delta * yw
-                # Store the gradient for this model variable.
-                gradient[i] = error_delta.sum() / offset
+                step = offset
+                for _ in range(20):
+                    for direction in (1, -1):
+                        signed_step = step * direction
+                        local_model = model.copy()
+                        local_model[i] += signed_step
+                        local_fy, local_trace = traced_evaluate(local_model)
+                        if (local_trace != base_trace):
+                            continue
+                        local_squared_error = (local_fy - y)**2 / 2
+                        # Compute the error.
+                        error_delta = (local_squared_error - squared_error) / n
+                        # Handle weighted outputs.
+                        if (yw.shape[0] == 1):
+                            error_delta = (error_delta.T * yw.T).T
+                        elif (yw.shape[0] == y.shape[0]):
+                            error_delta = error_delta * yw
+                        # Store the gradient for this model variable.
+                        gradient[i] = error_delta.sum() / signed_step
+                        break
+                    else:
+                        step = step / 2
+                        continue
+                    break
+                else:
+                    ambiguous[i] = True
             # Return the gradient (in place of the model variables).
-            return np.concatenate((gradient, model[config.num_vars:]))
+            return np.concatenate((gradient, model[config.num_vars:])), ambiguous
 
         # Compute the gradient with the library function.
         def axy_gradient(model, data, config=config, details=details):
@@ -751,7 +874,6 @@ def _test_model_gradient():
             model_grad = 0 * details.model_grad
             a_emb_temp = 0 * details.a_emb_temp
             m_emb_temp = 0 * details.m_emb_temp
-            o_emb_temp = 0 * details.o_emb_temp
             emb_outs = details.emb_outs
             emb_grads = details.emb_grads
             (
@@ -767,7 +889,6 @@ def _test_model_gradient():
                 m_grads,
                 a_emb_temp,
                 m_emb_temp,
-                o_emb_temp,
                 emb_outs,
                 emb_grads,
             ) = AXY.model_gradient(
@@ -784,20 +905,17 @@ def _test_model_gradient():
                 m_grads=m_grads,
                 a_emb_temp=a_emb_temp,
                 m_emb_temp=m_emb_temp,
-                o_emb_temp=o_emb_temp,
                 emb_outs=emb_outs,
                 emb_grads=emb_grads,
             )
             check_code(info, "AXY.model_gradient")
-            # TODO: Update the gradient checks here to calculate the AY error term as well.
-            if (config.asov <= config.aeov):
-                # Overwrite the gradient for the AY error term to be zero.
-                model_grad[config.asov-1:config.aeov,:].reshape(config.adso, config.ado+1, -1, order="F")[:,-1,:] = 0.0
             # div = min(model_grad.shape[1], y.shape[1])
             return np.concatenate((model_grad.sum(axis=1), model[config.num_vars:]))
 
-        gradient = finite_difference_gradient(model, eval_kwargs)
+        gradient, ambiguous = finite_difference_gradient(model, eval_kwargs)
         model_gradient = axy_gradient(model, eval_kwargs)
+        ambiguous_count = int(ambiguous[:config.num_vars].sum())
+        gradient[ambiguous] = model_gradient[ambiguous]
         error = (model_gradient - gradient)
         ratio = np.asarray([1 + guess if (val == 0) else guess / val
                             for (guess,val) in zip(model_gradient, gradient)])
@@ -819,6 +937,7 @@ def _test_model_gradient():
             print("ratio: ", ratio[np.argsort(abs(ratio-1))[:5]].astype("float32"))
             print("max_error:       ", float(max_error))
             print("max_ratio_error: ", float(max_ratio_error))
+            print("ambiguous:       ", ambiguous_count)
             print()
             # Show the configuration and the data.
             print()
@@ -1152,7 +1271,6 @@ def _test_condition_model():
         m_lengths = details.m_lengths
         a_emb_temp = details.a_emb_temp
         m_emb_temp = details.m_emb_temp
-        o_emb_temp = details.o_emb_temp
         emb_outs = details.emb_outs
         emb_grads = details.emb_grads
         a_state_temp = details.a_state_temp
@@ -1194,7 +1312,7 @@ def _test_condition_model():
         AXY.model_gradient(config, model, ax, axi, sizes, x_gradient, xi, y, yi, yw,
                            sum_squared_error, model_grad, info,
                            ay_gradient, y_gradient,
-                           a_grads, m_grads, a_emb_temp, m_emb_temp, o_emb_temp,
+                           a_grads, m_grads, a_emb_temp, m_emb_temp,
                            emb_outs, emb_grads)
         # ---------------------------------------------------------------------------------
         # AXY.adjust_rates(model, model_grad_mean, model_grad_curv)

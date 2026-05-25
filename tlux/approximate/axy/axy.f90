@@ -2046,8 +2046,8 @@ CONTAINS
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS
     INTEGER(KIND=INT64), INTENT(IN) :: NT
     ! Set the dimension of the X gradient that should be calculated.
-    REAL(KIND=RT) :: YSUM, CW, CWS
-    INTEGER(KIND=INT64) :: I, J, FS, GS, GE, XDG, BATCH, TN
+    REAL(KIND=RT) :: CW, CWS, AW, FW, Z, GD
+    INTEGER(KIND=INT64) :: I, J, K, D, P, FS, GS, GE, XDG, BATCH, TN
     IF (.FALSE.) THEN
        I = NT
     END IF
@@ -2113,6 +2113,7 @@ CONTAINS
     ! Compute the gradient from the output through the aggregation operation.
     SUBROUTINE COMPUTE_AGGREGATION_GRADIENT(OUT)
       REAL(KIND=RT), INTENT(IN), DIMENSION(:,:) :: OUT
+      REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: WG ! LOCAL ALLOCATION
 
       ! TODO: Figure out how to modify the gradients so that AY_SCALE and AY_SHIFT go to 1 and 0.
       ! 
@@ -2125,26 +2126,44 @@ CONTAINS
       !    OUT(:,I) = (OUT(:,I) - AY_SHIFT(:)) / AY_SCALE(:)
       ! END DO
 
-      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, CW, CWS, YSUM) IF(NT > 1)
+      ALLOCATE(WG(SIZE(AY,1,KIND=INT64)))
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, K, D, P, CW, CWS, AW, FW, Z, GD) IF(NT > 1)
       DO I = ONE, SIZE(SIZES, KIND=INT64)
          GS = AGG_STARTS(I)
          GE = GS + SIZES(I) - ONE
          IF (CONFIG%PARTIAL_AGGREGATION) THEN
             IF (SIZES(I) .GT. ZERO) THEN
                FS = FIX_STARTS(I)
+               WG(GS:GE) = 0.0_RT
+               ! Compute the exact gradient for the convex weight outputs.
+               DO P = GS, GE - ONE
+                  CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(P:GE,CONFIG%ADO+1)))
+                  DO D = ONE, CONFIG%ADO
+                     Z = 0.0_RT
+                     DO K = P, GE
+                        Z = Z + MAX(CONFIG%MIN_AGG_WEIGHT, AY(K,CONFIG%ADO+1)) * AY(K,D)
+                     END DO
+                     Z = Z / CW
+                     GD = OUT(D,FS+P-GS)
+                     IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                     DO J = P, GE
+                        IF (AY(J,CONFIG%ADO+1) .GT. CONFIG%MIN_AGG_WEIGHT) THEN
+                           WG(J) = WG(J) + GD * (AY(J,D) - Z) / CW
+                        END IF
+                     END DO
+                  END DO
+               END DO
                ! Compute the sum of all weights applied to this group.
                CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
                CWS = CW
+               FW = MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS,CONFIG%ADO+1))
                ! Compute the initial gradient for the element that occurs only once,
                !  the first position which is added to all other elements.
-               AY(GS,:CONFIG%ADO) = OUT(:,FS) / CW
-               ! Error term (2-norm output error over elements of this size or smaller).
-               YSUM = SQRT(SUM(Y(:,FS)**2))
-               IF (AY(GS, CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
-                  AY(GS,CONFIG%ADO+1) = AY(GS,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-               ELSE
-                  AY(GS,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - AY(GS,CONFIG%ADO+1)
-               END IF
+               DO D = ONE, CONFIG%ADO
+                  GD = OUT(D,FS)
+                  IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                  AY(GS,D) = GD / CW
+               END DO
                ! 
                ! Compute the gradient for each aggregate element, which is now
                !  the sum of the gradients from the X.
@@ -2153,42 +2172,56 @@ CONTAINS
                   !  Avoiding subtracting from existing CW for numerical stability.
                   CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS+J:GE,CONFIG%ADO+1)))
                   ! Add to the running total gradient.
-                  AY(GS,:CONFIG%ADO) = AY(GS,:CONFIG%ADO) + OUT(:,FS+J) / CW
+                  DO D = ONE, CONFIG%ADO
+                     GD = OUT(D,FS+J)
+                     IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                     AY(GS,D) = AY(GS,D) + GD / CW
+                  END DO
                   ! Store this aggregate value's gradient term.
-                  AY(GS+J,:CONFIG%ADO) = AY(GS,:CONFIG%ADO)
-                  ! Error term (sum 2-norm errors here, average is computed in division).
-                  YSUM = YSUM + SQRT(SUM(Y(:,FS+J)**2))
-                  ! Divide by the number of elements to get average 2-norm error
-                  !  of all predictions that utilize tihs specific input.
-                  IF (AY(GS+J,CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
-                     AY(GS+J,CONFIG%ADO+1) = AY(GS+J,CONFIG%ADO+1) - &
-                          (1.0_RT / (1.0_RT + YSUM / REAL(J+1, KIND=RT)))
-                  ELSE
-                     AY(GS+J,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - &
-                          AY(GS+J,CONFIG%ADO+1)
-                  END IF
+                  AW = MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS+J,CONFIG%ADO+1))
+                  AY(GS+J,:CONFIG%ADO) = AW * AY(GS,:CONFIG%ADO)
                END DO
                ! Reset the computation of the first AY that was used to aggregate.
-               AY(GS,:CONFIG%ADO) = OUT(:,FS) / CWS
+               DO D = ONE, CONFIG%ADO
+                  GD = OUT(D,FS)
+                  IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                  AY(GS,D) = FW * GD / CWS
+               END DO
+               AY(GS:GE,CONFIG%ADO+1) = WG(GS:GE)
             END IF
          ELSE
-            ! Without partial aggregation, all AY receive equal weight.
+            ! Without partial aggregation, all AY receive weighted output gradients.
             CW = SUM(MAX(CONFIG%MIN_AGG_WEIGHT, AY(GS:GE,CONFIG%ADO+1)))
-            YSUM = SQRT(SUM(Y(:,I)**2))
-            DO J = GS, GE
-               AY(J,:CONFIG%ADO) = OUT(:,I)
-               ! Compute the target value for the last column of AY to be sum
-               !  of componentwise squared errors values for all outputs.
-               IF (AY(J,CONFIG%ADO+1) .GE. CONFIG%MIN_AGG_WEIGHT) THEN
-                  AY(J,CONFIG%ADO+1) = AY(J,CONFIG%ADO+1) - (1.0_RT / (1.0_RT + YSUM))
-               ELSE
-                  AY(J,CONFIG%ADO+1) = CONFIG%MIN_AGG_WEIGHT - AY(J,CONFIG%ADO+1)
-               END IF
+            WG(GS:GE) = 0.0_RT
+            ! Compute the exact gradient for the convex weight outputs.
+            DO D = ONE, CONFIG%ADO
+               Z = 0.0_RT
+               DO J = GS, GE
+                  Z = Z + MAX(CONFIG%MIN_AGG_WEIGHT, AY(J,CONFIG%ADO+1)) * AY(J,D)
+               END DO
+               Z = Z / CW
+               GD = OUT(D,I)
+               IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+               DO J = GS, GE
+                  IF (AY(J,CONFIG%ADO+1) .GT. CONFIG%MIN_AGG_WEIGHT) THEN
+                     WG(J) = WG(J) + GD * (AY(J,D) - Z) / CW
+                  END IF
+               END DO
+            END DO
+            DO D = ONE, CONFIG%ADO
+               GD = OUT(D,I)
+               IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+               DO J = GS, GE
+                  AW = MAX(CONFIG%MIN_AGG_WEIGHT, AY(J,CONFIG%ADO+1))
+                  AY(J,D) = AW * GD
+               END DO
             END DO
             ! Apply the same divisor that was applied in evaluation to all points.
             AY(GS:GE,:CONFIG%ADO) = AY(GS:GE,:CONFIG%ADO) / CW
+            AY(GS:GE,CONFIG%ADO+1) = WG(GS:GE)
          END IF
       END DO
+      DEALLOCATE(WG)
     END SUBROUTINE COMPUTE_AGGREGATION_GRADIENT
 
     ! Compute the model gradient.
@@ -2232,24 +2265,10 @@ CONTAINS
                  Y(:,:), SIZE(Y,1), &
                  1.0_RT, OUTPUT_VECS_GRADIENT(:,:,C), SIZE(OUTPUT_VECS_GRADIENT,1))
             ! Propogate the gradient back to the last internal vector space.
-            IF (EXTRA .EQ. 0) THEN
-               CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
-                    Y(:,:), SIZE(Y,1), &
-                    OUTPUT_VECS(:,:,C), SIZE(OUTPUT_VECS,1), &
-                    0.0_RT, STATES(:,:,MNS+1,C), SIZE(STATES,1))
-               ! Handle (EXTRA>0) and Y is row vectors.
-            ELSE IF (YTRANS) THEN
-               CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
-                    Y(:,:MDO), SIZE(Y,1), &
-                    OUTPUT_VECS(:,:,C), SIZE(OUTPUT_VECS,1), &
-                    0.0_RT, STATES(:,:,MNS+1,C), SIZE(STATES,1))
-               ! Handle (EXTRA>0) and Y is column vectors.
-            ELSE
-               CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO, 1.0_RT, &
-                    Y(:MDO,:), SIZE(Y,1), &
-                    OUTPUT_VECS(:,:,C), SIZE(OUTPUT_VECS,1), &
-                    0.0_RT, STATES(:,:,MNS+1,C), SIZE(STATES,1))
-            END IF
+            CALL GEMM(YT, 'T', SIZE(X,2), MDS, MDO+EXTRA, 1.0_RT, &
+                 Y(:,:), SIZE(Y,1), &
+                 OUTPUT_VECS(:,:,C), SIZE(OUTPUT_VECS,1), &
+                 0.0_RT, STATES(:,:,MNS+1,C), SIZE(STATES,1))
             ! Cycle over all internal layers.
             STATE_REPRESENTATIONS : DO L = MNS-1, 1, -1
                LP1 = L+1
@@ -2301,7 +2320,7 @@ CONTAINS
       ! Handle the purely linear case (no internal states).
       ELSE
          ! Compute the gradient of variables with respect to the "output gradient"
-         CALL GEMM('N', YT, MDI, MDO, SIZE(X,2), 1.0_RT, &
+         CALL GEMM('N', YT, MDI, MDO+EXTRA, SIZE(X,2), 1.0_RT, &
               X(:,:), SIZE(X,1), &
               Y(:,:), SIZE(Y,1), &
               1.0_RT, OUTPUT_VECS_GRADIENT(:,:,1), SIZE(OUTPUT_VECS_GRADIENT,1))
@@ -2311,7 +2330,7 @@ CONTAINS
             IF (YTRANS) THEN ; YT = 'T'
             ELSE             ; YT = 'N'
             END IF
-            CALL GEMM('N', YT, MDE, SIZE(X,2), MDO, 1.0_RT, &
+            CALL GEMM('N', YT, MDE, SIZE(X,2), MDO+EXTRA, 1.0_RT, &
                  OUTPUT_VECS(LP1:,:,1), MDE, &
                  Y(:,:), SIZE(Y,1), &
                  0.0_RT, X(LP1:,:), MDE)
