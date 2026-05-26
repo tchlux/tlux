@@ -987,6 +987,119 @@ def _test_model_gradient():
     print(" passed")
 
 
+# --------------------------------------------------------------------
+#                     CATEGORICAL_OUTPUT_GRADIENT
+def _test_categorical_output_gradient():
+    print("CATEGORICAL_OUTPUT_GRADIENT")
+    seed = 0
+    config = AXY.new_model_config(
+        adn=1, ade=2, ane=4, ads=2, ans=1, anc=2, ado=2,
+        mdn=1, mde=0, mne=0, mds=3, mns=1, mnc=2, mdo=0,
+        doe=3, noe=4, num_threads=1,
+    )
+    config = AXY.new_fit_config(nm=3, na=6, nmt=3, nat=6, adi=1, mdi=0, odi=1, seed=seed, config=config)
+    config.normalize = False
+    details = Details(config, steps=0)
+    model = details.model
+    AXY.init_model(config, model, seed=seed)
+
+    ax = np.zeros((config.adi, 6), dtype="float32", order="F")
+    ax[0,:] = np.asarray([0.25, -0.5, 0.75, -0.25, 0.5, -0.75], dtype="float32")
+    axi = np.asarray([[1, 2, 3, 4, 1, 2]], dtype="int64", order="F")
+    sizes = np.asarray([2, 1, 3], dtype="int64", order="F")
+    x = np.zeros((config.mdi, 3), dtype="float32", order="F")
+    x[0,:] = np.asarray([-0.4, 0.2, 0.6], dtype="float32")
+    xi = np.zeros((0, 3), dtype="int64", order="F")
+    y = np.zeros((0, 3), dtype="float32", order="F")
+    yi = np.asarray([[1, 3, 4]], dtype="int64", order="F")
+    yw = np.zeros((0, 3), dtype="float32", order="F")
+
+    # Compute the categorical squared-hinge objective used by OUTPUT_GRADIENT.
+    def categorical_objective(local_model, dtype=TracedFraction, trace=False):
+        if trace:
+            dtype.start_trace()
+        state = py_evaluate(
+            config, cast(local_model, dtype),
+            ax=ax.copy(order="F"), axi=axi.copy(order="F"),
+            sizes=sizes.copy(order="F"), x=x.copy(order="F"), xi=xi.copy(order="F"),
+            dtype=dtype,
+        )
+        features = state["y"][config.don:config.don+config.doe,:]
+        embeddings = cast(local_model, dtype)[config.osev-1:config.oeev].reshape(config.doe, config.noe, order="F")
+        scores = embeddings.T @ features
+        low = dtype(1.0 - config.category_gap)
+        high = dtype(1.0 + config.category_gap)
+        loss = dtype(0)
+        for i in range(yi.shape[1]):
+            truth = int(yi[0,i]) - 1
+            for c in range(config.noe):
+                score = scores[c,i]
+                if (c == truth):
+                    if (score < high):
+                        diff = score - high
+                        loss = loss + diff * diff / 2
+                elif (score > low):
+                    diff = score - low
+                    loss = loss + diff * diff / 2
+        loss = loss * dtype(float(np.sqrt(config.doe))) / yi.shape[1]
+        return loss, (dtype.stop_trace() if trace else None)
+
+    # Compute MODEL_GRADIENT from the same forward-pass values.
+    def axy_gradient():
+        info = 0
+        local_ax = ax.copy(order="F")
+        local_x = x.copy(order="F")
+        local_y = np.zeros((config.do, yi.shape[1]), dtype="float32", order="F")
+        ay = details.ay[:sizes.sum(),:].copy(order="F")
+        a_states = details.a_states[:sizes.sum(),:,:,:].copy(order="F")
+        m_states = details.m_states[:yi.shape[1],:,:,:].copy(order="F")
+        AXY.embed(config, model, axi=axi, xi=xi, ax=local_ax, x=local_x)
+        *_, info = AXY.evaluate(config, model, local_ax, ay, sizes, local_x, local_y, a_states, m_states, info)
+        check_code(info, "AXY.evaluate")
+        model_grad = np.zeros((config.num_vars, config.num_threads), dtype="float32", order="F")
+        a_emb_temp = np.zeros((config.ade, config.ane, config.num_threads), dtype="float32", order="F")
+        m_emb_temp = np.zeros((config.mde, config.mne, config.num_threads), dtype="float32", order="F")
+        emb_outs = np.zeros((config.noe, yi.shape[1]), dtype="float32", order="F")
+        emb_grads = np.zeros((config.noe, yi.shape[1]), dtype="float32", order="F")
+        result = AXY.model_gradient(
+            config, model, local_ax, axi, sizes, local_x, xi, y, yi, yw,
+            0.0, model_grad, info, ay, local_y, a_states, m_states,
+            a_emb_temp, m_emb_temp, emb_outs, emb_grads,
+        )
+        check_code(result[5], "AXY.model_gradient")
+        return model_grad[:,0].copy()
+
+    gradient = axy_gradient()
+    base_loss, base_trace = categorical_objective(cast(model, TracedFraction), trace=True)
+    checked = 0
+    max_error = 0.0
+    worst = None
+    for coord in range(config.num_vars):
+        step = TracedFraction(1, 2**32)
+        finite_diff = None
+        for _ in range(20):
+            for sign in (1, -1):
+                local_model = cast(model, TracedFraction)
+                local_model[coord] = local_model[coord] + step * sign
+                local_loss, local_trace = categorical_objective(local_model, trace=True)
+                if (local_trace == base_trace):
+                    finite_diff = float((local_loss - base_loss) / (step * sign))
+                    break
+            if (finite_diff is not None):
+                break
+            step = step / 2
+        if (finite_diff is None):
+            continue
+        error = abs(float(gradient[coord]) - finite_diff)
+        checked += 1
+        if (error > max_error):
+            max_error = error
+            worst = (coord, float(gradient[coord]), finite_diff)
+    assert (checked > 0), "No stable categorical finite-difference coordinates were found."
+    assert (max_error < 2**-11), f"Categorical output gradient mismatch at {worst}: {max_error}"
+    print(" passed")
+
+
 
 # --------------------------------------------------------------------
 #                              AXI
@@ -1470,6 +1583,7 @@ if __name__ == "__main__":
     _test_init_model()
     _test_fetch_data()
     _test_evaluate()
+    _test_categorical_output_gradient()
 
     # The following two require an update to 'axy_py' to work correctly.
     # _test_model_gradient()

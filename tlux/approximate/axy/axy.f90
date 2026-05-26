@@ -2242,15 +2242,17 @@ CONTAINS
                  X(:,:), SIZE(X,1), &
                  STATES(:,:,1,C), SIZE(STATES,1), &
                  1.0_RT, INPUT_VECS_GRADIENT(:,:,C), SIZE(INPUT_VECS_GRADIENT,1))
-            ! Compute the gradient at the input if there are embeddings.
-            IF (MDE .GT. 0) THEN
-               LP1 = SIZE(X,1)-MDE+1
+         END DO
+         IF (MDE .GT. 0) THEN
+            LP1 = SIZE(X,1)-MDE+1
+            X(LP1:,:) = 0.0_RT
+            DO C = 1, MNC
                CALL GEMM('N', 'T', MDE, SIZE(X,2), MDS, 1.0_RT, &
                     INPUT_VECS(LP1:,:,C), MDE, &
                     STATES(:,:,1,C), SIZE(STATES,1), &
-                    0.0_RT, X(LP1:,:), MDE)
-            END IF
-         END DO
+                    1.0_RT, X(LP1:,:), MDE)
+            END DO
+         END IF
       ! Handle the purely linear case (no internal states).
       ELSE
          ! Compute the gradient of variables with respect to the "output gradient"
@@ -2443,6 +2445,8 @@ CONTAINS
             EMB_OUTS(:,MS:ME), EMB_GRADS(:,MS:ME), SSG, CONFIG%DON)
     END DO error_gradient
     SUM_SQUARED_GRADIENT = SUM_SQUARED_GRADIENT + SSG
+    ! Make output embedding gradients match the mean objective used below.
+    MODEL_GRAD(CONFIG%OSEV:CONFIG%OEEV,:) = MODEL_GRAD(CONFIG%OSEV:CONFIG%OEEV,:) / REAL(SIZE(Y,2),KIND=RT)
     ! Adjust the batches to be defined based on inputs (aggregate sets kept together).
     CALL COMPUTE_BATCHES(CONFIG, SIZE(AX,2,KIND=INT64), SIZE(X,2,KIND=INT64), SIZES, &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS, &
@@ -4270,7 +4274,9 @@ CONTAINS
               INT(CONFIG%UPDATE_RATIO_STEP * REAL(CONFIG%NUM_VARS,RT))
          ! TODO: Should the mean and curvature adjustment rates be updated too?
       ! If the MSE has gotten too large, then do a reset of the model fit process from the previous best.
-      ELSE IF (CONFIG%FIT_MSE .GT. CONFIG%MSE_UPPER_LIMIT) THEN
+      ELSE IF (CONFIG%KEEP_BEST .AND. &
+           (CONFIG%FIT_MSE .GT. CONFIG%MSE_UPPER_LIMIT) .AND. &
+           (CONFIG%FIT_BEST_MSE .LT. HUGE(CONFIG%FIT_BEST_MSE))) THEN
          CONFIG%STEP_FACTOR = CONFIG%MIN_STEP_FACTOR
          CONFIG%NUM_TO_UPDATE = CONFIG%NUM_VARS
          MODEL(:) = BEST_MODEL(:)
