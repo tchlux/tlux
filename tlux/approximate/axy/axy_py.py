@@ -448,19 +448,15 @@ def _aggregate_outputs(config, ay, sizes, out, ay_shift, ay_scale):
         f_end = f_start + max(0, size-1)
         if (size > 0):
             if config.partial_aggregation:
-                cw = max(config.min_agg_weight, ay[a_end-1,config.ado])
-                out[:,f_end] = ay[a_end-1,:config.ado] * cw
+                out[:,f_end] = ay[a_end-1,:config.ado]
                 for j in range(1, size):
-                    w = max(config.min_agg_weight, ay[a_end-1-j,config.ado])
-                    out[:,f_end] += ay[a_end-1-j,:config.ado] * w
-                    cw += w
-                    out[:,f_end-j] = out[:,f_end] / cw
+                    out[:,f_end] += ay[a_end-1-j,:config.ado]
+                    out[:,f_end-j] = out[:,f_end] / (j+1)
                 out[:,f_end] = ay[a_end-1,:config.ado]
                 if (config.mdo > 0):
                     out[:,f_start:f_end+1] = ((out[:,f_start:f_end+1].T - ay_shift) * ay_scale).T
             else:
-                weights = np.maximum(config.min_agg_weight, ay[a_start:a_end,config.ado])
-                out[:,i] = weights @ ay[a_start:a_end,:config.ado] / weights.sum()
+                out[:,i] = ay[a_start:a_end,:config.ado].mean(axis=0)
                 if (config.mdo > 0):
                     out[:,i] = (out[:,i] - ay_shift) * ay_scale
         elif config.partial_aggregation:
@@ -486,7 +482,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
     state_values["x"] = x
     # Initialize a holder for the output.
     y = cast(np.zeros((config.do, nm)), dtype)
-    ay = cast(np.zeros((na, config.ado+1)), dtype)
+    ay = cast(np.zeros((na, config.ado)), dtype)
     state_values["a_states"] = cast(np.zeros((na, config.ads, config.ans, config.anc)), dtype)
     state_values["m_states"] = cast(np.zeros((nm, config.mds, config.mns, config.mnc)), dtype)
     # Evaluate the aggregator and aggregate its outputs.
@@ -494,7 +490,7 @@ def evaluate(config, model, ax, axi, sizes, x, xi, dtype="float32", **unused_kwa
         ay, state_values["a_states"] = _evaluate_submodel(
             config, ax, m.a_input_vecs, m.a_input_shift, m.a_state_vecs,
             m.a_state_shift, m.a_output_vecs, config.ads, config.ans,
-            config.anc, config.ado+1, True, dtype
+            config.anc, config.ado, True, dtype
         )
         state_values["ay"] = ay.copy()
         if (config.mdo > 0):

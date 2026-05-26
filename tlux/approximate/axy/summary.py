@@ -17,7 +17,7 @@ class AxyModel:
         self.a_input_shift = self.model[self.config.asis-1:self.config.aeis].reshape(self.config.ads, self.config.anc, order="F")
         self.a_state_vecs  = self.model[self.config.assv-1:self.config.aesv].reshape(self.config.ads, self.config.ads, max(0,self.config.ans-1), self.config.anc, order="F")
         self.a_state_shift = self.model[self.config.asss-1:self.config.aess].reshape(self.config.ads, max(0,self.config.ans-1), self.config.anc, order="F")
-        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, self.config.anc, order="F")
+        self.a_output_vecs = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, self.config.anc, order="F")
         self.ay_shift      = self.model[self.config.aoss-1:self.config.aose].reshape(self.config.ado, order="F")
         self.ay_scale      = self.model[self.config.aoms-1:self.config.aome].reshape(self.config.ado, order="F")
         self.x_shift       = self.model[self.config.miss-1:self.config.mise].reshape(self.config.mdn, order="F")
@@ -191,7 +191,7 @@ class Details(dict):
             a_input_shift = model[config.asis-1:config.aeis].reshape(config.ads, config.anc, order="F"),
             a_state_vecs  = model[config.assv-1:config.aesv].reshape(config.ads, config.ads, max(0,config.ans-1), config.anc, order="F"),
             a_state_shift = model[config.asss-1:config.aess].reshape(config.ads, max(0,config.ans-1), config.anc, order="F"),
-            a_output_vecs = model[config.asov-1:config.aeov].reshape(config.adso, config.ado+1, config.anc, order="F"),
+            a_output_vecs = model[config.asov-1:config.aeov].reshape(config.adso, config.ado, config.anc, order="F"),
             m_embeddings  = model[config.msev-1:config.meev].reshape(config.mde, config.mne, order="F"),
             m_input_vecs  = model[config.msiv-1:config.meiv].reshape(config.mdi, config.mds, config.mnc, order="F"),
             m_input_shift = model[config.msis-1:config.meis].reshape(config.mds, config.mnc, order="F"),
@@ -217,8 +217,8 @@ class Details(dict):
             a_emb_temp = rwork[config.saet-1:config.eaet].reshape(config.ade, config.ane, config.num_threads, order="F"),
             a_states = rwork[config.saxs-1:config.eaxs].reshape(config.na, config.ads, config.ans+1, config.anc, order="F"),
             a_grads = rwork[config.saxg-1:config.eaxg].reshape(config.na, config.ads, config.ans+1, config.anc, order="F"),
-            ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado+1, order="F"),
-            ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado+1, order="F"),
+            ay = rwork[config.say-1:config.eay].reshape(config.na, config.ado, order="F"),
+            ay_gradient = rwork[config.sayg-1:config.eayg].reshape(config.na, config.ado, order="F"),
             x = rwork[config.smxb-1:config.emxb].reshape(config.mdi, config.nms, order="F"),
             x_gradient = rwork[config.sxg-1:config.exg].reshape(config.mdi, config.nms, order="F"),
             m_emb_temp = rwork[config.smet-1:config.emet].reshape(config.mde, config.mne, config.num_threads, order="F"),
