@@ -2513,8 +2513,8 @@ CONTAINS
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: Y
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: YW
 
-    ! TODO: Make normalized step work only when it is supposed to.
-    RETURN
+    IF ((CONFIG%DATA_CONDITION_FREQUENCY .LE. 0) .OR. &
+         (MOD(CONFIG%STEPS_TAKEN, CONFIG%DATA_CONDITION_FREQUENCY) .NE. 0)) RETURN
     CALL NORMALIZE_STEP_UNPACKED( CONFIG, AX, X, Y, YW, &
          MODEL(CONFIG%AISS:CONFIG%AISE), & ! AX_SHIFT(ADN)
          MODEL(CONFIG%AIMS:CONFIG%AIME), & ! AX_RESCALE(ADN,ADN)
@@ -2620,16 +2620,16 @@ CONTAINS
          END DO
          !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
          DO D = 1, SIZE(AX,2,INT64)
-            AX(:,D) = MATMUL(AX(:,D), AX_RESCALE(:,:))
+            AX(:CONFIG%ADN,D) = MATMUL(AX(:CONFIG%ADN,D), AX_RESCALE(:,:))
          END DO
          ! Set all invalid values to zeros.
-         WHERE (IS_NAN(AX(:,:)) .OR. (.NOT. IS_FINITE(AX(:,:))))
-            AX(:,:) = 0.0_RT
+         WHERE (IS_NAN(AX(:CONFIG%ADN,:)) .OR. (.NOT. IS_FINITE(AX(:CONFIG%ADN,:))))
+            AX(:CONFIG%ADN,:) = 0.0_RT
          END WHERE
       ELSE IF (CONFIG%ADN .GT. 0) THEN
          ! Set all invalid values to zeros.
-         WHERE (IS_NAN(AX(:,:)) .OR. (.NOT. IS_FINITE(AX(:,:))))
-            AX(:,:) = 0.0_RT
+         WHERE (IS_NAN(AX(:CONFIG%ADN,:)) .OR. (.NOT. IS_FINITE(AX(:CONFIG%ADN,:))))
+            AX(:CONFIG%ADN,:) = 0.0_RT
          END WHERE
       END IF
       ! AXI
@@ -2666,19 +2666,19 @@ CONTAINS
          END DO
          !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
          DO D = 1, SIZE(X,2,INT64)
-            X(:,D) = MATMUL(X(:,D), X_RESCALE(:,:))
+            X(:CONFIG%MDN,D) = MATMUL(X(:CONFIG%MDN,D), X_RESCALE(:,:))
          END DO
          ! Set all invalid values to zeros.
-         WHERE (IS_NAN(X(:,:)) .OR. (.NOT. IS_FINITE(X(:,:))))
-            X(:,:) = 0.0_RT
+         WHERE (IS_NAN(X(:CONFIG%MDN,:)) .OR. (.NOT. IS_FINITE(X(:CONFIG%MDN,:))))
+            X(:CONFIG%MDN,:) = 0.0_RT
          END WHERE
       ELSE IF (CONFIG%MDN .GT. 0) THEN
          X_SHIFT(:) = 0.0_RT
          X_RESCALE(:,:) = 0.0_RT
          FORALL (D=1:CONFIG%MDN) X_RESCALE(D,D) = 1.0_RT
          ! Set all invalid values to zeros.
-         WHERE (IS_NAN(X(:,:)) .OR. (.NOT. IS_FINITE(X(:,:))))
-            X(:,:) = 0.0_RT
+         WHERE (IS_NAN(X(:CONFIG%MDN,:)) .OR. (.NOT. IS_FINITE(X(:CONFIG%MDN,:))))
+            X(:CONFIG%MDN,:) = 0.0_RT
          END WHERE
       END IF
       ! XI
@@ -2721,19 +2721,19 @@ CONTAINS
             END DO
             !$OMP PARALLEL DO NUM_THREADS(CONFIG%NUM_THREADS)
             DO D = 1, SIZE(Y,2,INT64)
-               Y(:,D) = MATMUL(Y(:,D), Y_SCALE(:,:))
+               Y(:CONFIG%DON,D) = MATMUL(Y(:CONFIG%DON,D), Y_SCALE(:,:))
             END DO
             ! Set all invalid values to zeros.
-            WHERE (IS_NAN(Y(:,:)) .OR. (.NOT. IS_FINITE(Y(:,:))))
-               Y(:,:) = 0.0_RT
+            WHERE (IS_NAN(Y(:CONFIG%DON,:)) .OR. (.NOT. IS_FINITE(Y(:CONFIG%DON,:))))
+               Y(:CONFIG%DON,:) = 0.0_RT
             END WHERE
          ELSE
             Y_SHIFT(:) = 0.0_RT
             Y_RESCALE(:,:) = 0.0_RT
             FORALL (D=1:SIZE(Y,1)) Y_RESCALE(D,D) = 1.0_RT
             ! Set all invalid values to zeros.
-            WHERE (IS_NAN(Y(:,:)) .OR. (.NOT. IS_FINITE(Y(:,:))))
-               Y(:,:) = 0.0_RT
+            WHERE (IS_NAN(Y(:CONFIG%DON,:)) .OR. (.NOT. IS_FINITE(Y(:CONFIG%DON,:))))
+               Y(:CONFIG%DON,:) = 0.0_RT
             END WHERE
          END IF
       END IF

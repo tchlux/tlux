@@ -1494,6 +1494,26 @@ def _test_condition_model():
 # --------------------------------------------------------------------
 #                           FIT_MODEL
 
+def _test_fit_data_conditioning_aggregate_categorical():
+    print("FIT_DATA_CONDITIONING_AGGREGATE_CATEGORICAL")
+    from tlux.approximate.axy import AXY as AXYModel
+    rng = np.random.default_rng(0)
+    sizes = np.asarray([2, 3, 1, 2], dtype="int64")
+    ax = rng.normal(size=(int(sizes.sum()), 1)).astype("float32")
+    axi = np.asarray([["a"], ["b"], ["c"], ["a"], ["b"], ["c"], ["a"], ["b"]], dtype=object)
+    y = rng.normal(size=(len(sizes), 1)).astype("float32")
+    model = AXYModel(
+        ade=3, ane=4, ads=4, ans=1, anc=1,
+        mds=4, mns=1, mnc=1,
+        steps=2, nm=len(sizes), seed=0, num_threads=1,
+        data_condition_frequency=1, model_condition_frequency=0,
+        ax_normalized=False, axi_normalized=False,
+        early_stop=False, interrupt_delay_sec=100,
+    )
+    model.fit(ax=ax, axi=axi, sizes=sizes, y=y, callback=None)
+    assert (model.config.steps_taken == 2)
+    print(" passed")
+
 
 def _test_large_data_fit():
     print("FIT_MODEL")
