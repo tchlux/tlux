@@ -268,7 +268,7 @@ class AXY:
         if (self.config.mdo > 0):
             last_weights = self.model[self.config.msov-1:self.config.meov].reshape(self.config.mdso, self.config.mdo, self.config.mnc, order="F")
         else:
-            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado, self.config.anc, order="F")
+            last_weights = self.model[self.config.asov-1:self.config.aeov].reshape(self.config.adso, self.config.ado+1, self.config.anc, order="F")[:,:-1,:]
         self.embedding_transform = np.linalg.norm(last_weights, axis=1)
         # Normalize the embedding transformation to be unit norm.
         transform_norm = np.linalg.norm(self.embedding_transform)
@@ -400,7 +400,7 @@ class AXY:
             del ax_in, axi_in, sizes_in, x_in, xi_in, y_in, yi_in, yw_in, agg_iterators, name, value, temp_confg
             ax = ax[:,:na].T
             axi = axi[:,:na].T
-            ay = np.zeros((na, config.ado), dtype="float32", order="F")
+            ay = np.zeros((na, config.ado+1), dtype="float32", order="F")
             x = x[:,:nm].T
             xi = xi[:,:nm].T
         else:
@@ -413,7 +413,7 @@ class AXY:
                 _ax = np.zeros((na, self.config.adi), dtype="float32", order="C")
                 _ax[:,:self.config.adn] = ax
                 ax = _ax
-            ay = np.zeros((na, self.config.ado), dtype="float32", order="F")
+            ay = np.zeros((na, self.config.ado+1), dtype="float32", order="F")
             if (self.config.mdo > 0) and ((self.config.mde > 0) or (self.config.ado > 0)):
                 _x = np.zeros((nmt, self.config.mdi), dtype="float32", order="C")
                 _x[:,:self.config.mdn] = x

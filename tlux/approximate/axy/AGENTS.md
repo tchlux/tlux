@@ -39,8 +39,8 @@ its Python harness on small problems whose behavior can be observed exactly.
   can feed the fixed model or produce final outputs directly.
 - Aggregate data is grouped by `sizes`. Aggregate starts and fixed starts are
   derived by `COMPUTE_BATCHES` in Fortran.
-- The aggregate model outputs `ADO` columns. These are aggregate values that are
-  averaged across each aggregate group.
+- The aggregate model outputs `ADO` value columns plus one gate column. Aggregate
+  values are multiplied by `1 / (1 + ABS(gate))` before group averaging.
 - `PAIRWISE_AGGREGATION` expands aggregate inputs into pair comparisons.
 - `PARTIAL_AGGREGATION` emits suffix/running aggregate outputs into the fixed
   model instead of one output per aggregate group.
@@ -53,13 +53,12 @@ its Python harness on small problems whose behavior can be observed exactly.
   The core backward path is `BASIS_GRADIENT`, with aggregation handled by
   `COMPUTE_AGGREGATION_GRADIENT` and basis backprop by
   `UNPACKED_BASIS_GRADIENT`.
-- For non-partial aggregation, every aggregate row in a group receives the same
-  output gradient divided by the group size.
-- For partial aggregation, each aggregate row contributes to all suffix averages
-  that include it. The direct final partial output is the raw final aggregate
-  value.
-- Aggregate backprop calls `UNPACKED_BASIS_GRADIENT` with `EXTRA=0`; there is no
-  extra aggregate weight column.
+- For non-partial aggregation, every aggregate row receives the output gradient
+  divided by group size and multiplied by its gate.
+- For partial aggregation, each aggregate row contributes its gated value to all
+  suffix averages that include it.
+- Aggregate backprop calls `UNPACKED_BASIS_GRADIENT` with `EXTRA=1` for the gate
+  column.
 
 ## Gradient Oracle
 

@@ -230,14 +230,14 @@ MODULE AXY
      INTEGER(KIND=INT64) :: SMGC, EMGC ! MODEL_GRAD_CURV(NUM_VARS)
      INTEGER(KIND=INT64) :: SBM, EBM ! BEST_MODEL(NUM_VARS)
      INTEGER(KIND=INT64) :: SAXB, EAXB ! AX(ADI,NA)
-     INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO)
+     INTEGER(KIND=INT64) :: SAY, EAY ! AY(NA,ADO+1)
      INTEGER(KIND=INT64) :: SMXB, EMXB ! X(MDI,NMS)
      INTEGER(KIND=INT64) :: SMYB, EMYB ! Y(DON,NMS)
      INTEGER(KIND=INT64) :: SAG, EAG ! AX_GRADIENT(ADI,NA)
      INTEGER(KIND=INT64) :: SAET, EAET ! A_EMB_TEMP(ADE,ANE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SAXS, EAXS ! A_STATES(NA,ADS,ANS+1,ANC)
      INTEGER(KIND=INT64) :: SAXG, EAXG ! A_GRADS(NA,ADS,ANS+1,ANC)
-     INTEGER(KIND=INT64) :: SAYG, EAYG ! AY_GRADIENT(NA,ADO)
+     INTEGER(KIND=INT64) :: SAYG, EAYG ! AY_GRADIENT(NA,ADO+1)
      INTEGER(KIND=INT64) :: SXG, EXG ! X_GRADIENT(MDI,NMS)
      INTEGER(KIND=INT64) :: SMET, EMET ! M_EMB_TEMP(MDE,MNE,NUM_THREADS)
      INTEGER(KIND=INT64) :: SMXS, EMXS ! M_STATES(NMS,MDS,MNS+1,MNC)
@@ -513,9 +513,9 @@ CONTAINS
      CONFIG%ASSS = ONE + CONFIG%TOTAL_SIZE
      CONFIG%AESS = CONFIG%ASSS-ONE +  CONFIG%ADS * MAX(ZERO,CONFIG%ANS-ONE) * CONFIG%ANC
      CONFIG%TOTAL_SIZE = CONFIG%AESS
-     !   aggregator output vecs [ADSO by ADO by ANC]
+     !   aggregator output vecs [ADSO by ADO+1 by ANC]
      CONFIG%ASOV = ONE + CONFIG%TOTAL_SIZE
-     CONFIG%AEOV = CONFIG%ASOV-ONE +  CONFIG%ADSO * CONFIG%ADO * CONFIG%ANC
+     CONFIG%AEOV = CONFIG%ASOV-ONE +  CONFIG%ADSO * (CONFIG%ADO+1) * CONFIG%ANC
      CONFIG%TOTAL_SIZE = CONFIG%AEOV
      ! ---------------------------------------------------------------
      !   model embedding vecs [MDE by MNE]
@@ -724,11 +724,11 @@ CONTAINS
     CONFIG%RWORK_SIZE = CONFIG%EAXG
     ! AY
     CONFIG%SAY = ONE + CONFIG%RWORK_SIZE
-    CONFIG%EAY = CONFIG%SAY-ONE + CONFIG%NA * CONFIG%ADO
+    CONFIG%EAY = CONFIG%SAY-ONE + CONFIG%NA * (CONFIG%ADO+1)
     CONFIG%RWORK_SIZE = CONFIG%EAY
     ! AY gradient
     CONFIG%SAYG = ONE + CONFIG%RWORK_SIZE
-    CONFIG%EAYG = CONFIG%SAYG-ONE + CONFIG%NA * CONFIG%ADO
+    CONFIG%EAYG = CONFIG%SAYG-ONE + CONFIG%NA * (CONFIG%ADO+1)
     CONFIG%RWORK_SIZE = CONFIG%EAYG
     ! X
     CONFIG%SMXB = ONE + CONFIG%RWORK_SIZE
@@ -858,7 +858,7 @@ CONTAINS
     REAL(KIND=RT) :: SHIFT_RANGE, OUTPUT_SCALE
     ! Local iterator.
     REAL :: CPU_TIME_START, CPU_TIME_END
-    INTEGER(KIND=INT64) :: WALL_TIME_START, WALL_TIME_END
+    INTEGER(KIND=INT64) :: C, GATE_END, GATE_START, WALL_TIME_START, WALL_TIME_END
     CALL SYSTEM_CLOCK(WALL_TIME_START, CLOCK_RATE, CLOCK_MAX)
     CALL CPU_TIME(CPU_TIME_START)
     ! Set optional arguments (if provided, else set default values).
@@ -890,12 +890,18 @@ CONTAINS
     ! Initialize the aggregator model.
     CALL INIT_SUBMODEL(&
          CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, &
-         CONFIG%ADSO, CONFIG%ADO, &
+         CONFIG%ADSO, CONFIG%ADO+1, &
          MODEL(CONFIG%ASIV:CONFIG%AEIV), &
          MODEL(CONFIG%ASIS:CONFIG%AEIS), &
          MODEL(CONFIG%ASSV:CONFIG%AESV), &
          MODEL(CONFIG%ASSS:CONFIG%AESS), &
          MODEL(CONFIG%ASOV:CONFIG%AEOV))
+    ! Start aggregate gates as a no-op, preserving plain mean aggregation.
+    DO C = ZERO, CONFIG%ANC-ONE
+       GATE_START = CONFIG%ASOV + CONFIG%ADSO * CONFIG%ADO + CONFIG%ADSO * (CONFIG%ADO+1) * C
+       GATE_END = GATE_START + CONFIG%ADSO - ONE
+       MODEL(GATE_START:GATE_END) = 0.0_RT
+    END DO
     !   Set up the output scaling for the fixed model (won't matter if it doesn't exist).
     IF (PRESENT(INITIAL_OUTPUT_SCALE)) THEN
        OUTPUT_SCALE = INITIAL_OUTPUT_SCALE
@@ -1718,7 +1724,7 @@ CONTAINS
     INTEGER(KIND=INT64) :: I, BATCH, BS, BE, BT, NT, E
     REAL(KIND=RT), POINTER, DIMENSION(:) :: AY_SHIFT, AY_SCALE, Y_SHIFT
     REAL(KIND=RT), POINTER, DIMENSION(:,:) :: Y_RESCALE
-    REAL(KIND=RT) :: CW
+    REAL(KIND=RT) :: GATE, SUM_GATE
     ! LOCAL ALLOCATION
     INTEGER(KIND=INT64), DIMENSION(:), ALLOCATABLE :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS
@@ -1750,14 +1756,14 @@ CONTAINS
           IF (BT .LE. 0) CYCLE aggregator_evaluation
           ! Evaluate the aggregator model.
           CALL UNPACKED_EVALUATE(INT(BT), &
-               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO, &
+               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO+1, &
                MODEL(CONFIG%ASIV:CONFIG%AEIV), &
                MODEL(CONFIG%ASIS:CONFIG%AEIS), &
                MODEL(CONFIG%ASSV:CONFIG%AESV), &
                MODEL(CONFIG%ASSS:CONFIG%AESS), &
                MODEL(CONFIG%ASOV:CONFIG%AEOV), &
                AX(:,BS:BE), AY(BS:BE,:), A_STATES(BS:BE,:,:,:), YTRANS=.TRUE._C_BOOL)
-          ! AY now stores only aggregate values; grouping is handled in aggregation.
+          ! AY stores aggregate values plus one raw gate column.
        END DO aggregator_evaluation
        ! 
        ! Aggregate the output of the set model.
@@ -1838,24 +1844,28 @@ CONTAINS
     SUBROUTINE COMPUTE_SET_AGGREGATION(Y)
       REAL(KIND=RT), INTENT(OUT), DIMENSION(:,:) :: Y
       INTEGER(KIND=INT64) :: I, J, GS, GE, FE
-      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE) IF(NT > 1)
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(I, J, GS, GE, FE, GATE, SUM_GATE) IF(NT > 1)
       set_aggregation_to_y : DO I = ONE, SIZE(SIZES,KIND=INT64)
          IF (SIZES(I) .GT. 0) THEN
-            ! Take the mean of all outputs from the aggregator model.
+            ! Take the gated mean of all outputs from the aggregator model.
             GS = AGG_STARTS(I)
             GE = AGG_STARTS(I) + SIZES(I) - ONE
             FE = FIX_STARTS(I) + MAX(ZERO, SIZES(I) - ONE)
             IF (CONFIG%PARTIAL_AGGREGATION) THEN
                ! Assume that the fixed data has the same alignment as the aggregate data.
-               Y(:,FE) = AY(GE,:CONFIG%ADO)
-               ! Accumulate running suffix sums and store their means.
+               GATE = 1.0_RT + AY(GE,CONFIG%ADO+1) / (1.0_RT + ABS(AY(GE,CONFIG%ADO+1)))
+               SUM_GATE = GATE
+               Y(:,FE) = AY(GE,:CONFIG%ADO) * GATE
+               ! Accumulate running gated suffix sums and store their means.
                DO J = ONE, SIZES(I)-ONE
                   ! Add the next previous aggregate value into the suffix sum.
-                  Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO)
+                  GATE = 1.0_RT + AY(GE-J,CONFIG%ADO+1) / (1.0_RT + ABS(AY(GE-J,CONFIG%ADO+1)))
+                  SUM_GATE = SUM_GATE + GATE
+                  Y(:,FE) = Y(:,FE) + AY(GE-J,:CONFIG%ADO) * GATE
                   ! Compute this output as the suffix mean.
-                  Y(:,FE-J) = Y(:,FE) / REAL(J+ONE, RT)
+                  Y(:,FE-J) = Y(:,FE) / SUM_GATE
                END DO
-               ! Revert the last position to just the final aggregate value.
+               ! Revert the last position to the one-row convex weighted output.
                Y(:,FE) = AY(GE,:CONFIG%ADO)
                ! Incorporate AY output normalization.
                IF (CONFIG%MDO .GT. 0) THEN
@@ -1864,8 +1874,15 @@ CONTAINS
                   END DO
                END IF
             ELSE
-               ! Otherwise, without partial aggregation, put the aggregate mean into X.
-               Y(:,I) = SUM(AY(GS:GE,:CONFIG%ADO), 1) / REAL(SIZES(I), RT)
+               ! Otherwise, without partial aggregation, put the gated aggregate mean into X.
+               Y(:,I) = 0.0_RT
+               SUM_GATE = 0.0_RT
+               DO J = GS, GE
+                  GATE = 1.0_RT + AY(J,CONFIG%ADO+1) / (1.0_RT + ABS(AY(J,CONFIG%ADO+1)))
+                  SUM_GATE = SUM_GATE + GATE
+                  Y(:,I) = Y(:,I) + AY(J,:CONFIG%ADO) * GATE
+               END DO
+               Y(:,I) = Y(:,I) / SUM_GATE
                ! Incorporate AY output normalization.
                IF (CONFIG%MDO .GT. 0) THEN
                   Y(:,I) = (Y(:,I) - AY_SHIFT(:)) * AY_SCALE(:)
@@ -2035,14 +2052,17 @@ CONTAINS
     INTEGER(KIND=INT64), INTENT(IN), DIMENSION(:) :: SIZES
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:,:) :: M_STATES ! SIZE(X, 2), MDS, MNS+1, MNC
     REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:,:,:) :: A_STATES ! SIZE(AX,2), ADS, ANS+1, ANC
-    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY ! SIZE(AX,2), ADO
+    REAL(KIND=RT), INTENT(INOUT), DIMENSION(:,:) :: AY ! SIZE(AX,2), ADO+1
     REAL(KIND=RT), INTENT(OUT),  DIMENSION(:,:) :: GRAD ! SIZE(MODEL), NUM_THREADS
     INTEGER(KIND=INT64), DIMENSION(:), INTENT(IN) :: &
          BATCHA_STARTS, BATCHA_ENDS, AGG_STARTS, FIX_STARTS, BATCHM_STARTS, BATCHM_ENDS
     INTEGER(KIND=INT64), INTENT(IN) :: NT
     ! Set the dimension of the X gradient that should be calculated.
-    REAL(KIND=RT) :: GD
-    INTEGER(KIND=INT64) :: I, J, D, P, FS, GS, GE, XDG, BATCH, TN
+    REAL(KIND=RT) :: GD, GATE, DGATE, GATE_GRAD, RAW_GATE, SUM_GATE
+    REAL(KIND=RT), DIMENSION(CONFIG%ADO) :: MEAN
+    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:,:) :: VALUE_GRAD
+    REAL(KIND=RT), ALLOCATABLE, DIMENSION(:) :: GATE_GRADS
+    INTEGER(KIND=INT64) :: I, J, D, P, K, S, FS, GS, GE, XDG, BATCH, TN
     IF (.FALSE.) THEN
        I = NT
     END IF
@@ -2090,7 +2110,7 @@ CONTAINS
           TN = OMP_GET_THREAD_NUM() + ONE
           ! Do the backward gradient calculation assuming "AY" contains output gradient.
           CALL UNPACKED_BASIS_GRADIENT( CONFIG, AY(GS:GE,:), A_STATES(GS:GE,:,:,:), AX(:,GS:GE), &
-               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO, CONFIG%ADE, 0, &
+               CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO, CONFIG%ADE, 1, &
                MODEL(CONFIG%ASIV:CONFIG%AEIV), &
                MODEL(CONFIG%ASSV:CONFIG%AESV), &
                MODEL(CONFIG%ASOV:CONFIG%AEOV), &
@@ -2120,7 +2140,7 @@ CONTAINS
       !    OUT(:,I) = (OUT(:,I) - AY_SHIFT(:)) / AY_SCALE(:)
       ! END DO
 
-      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, D, P, GD) IF(NT > 1)
+      !$OMP PARALLEL DO NUM_THREADS(NT) PRIVATE(FS, GS, GE, I, J, D, P, K, S, GD, GATE, DGATE, GATE_GRAD, RAW_GATE, SUM_GATE, MEAN, VALUE_GRAD, GATE_GRADS) IF(NT > 1)
       DO I = ONE, SIZE(SIZES, KIND=INT64)
          GS = AGG_STARTS(I)
          GE = GS + SIZES(I) - ONE
@@ -2128,31 +2148,63 @@ CONTAINS
          IF (SIZES(I) .LE. ZERO) CYCLE
          IF (CONFIG%PARTIAL_AGGREGATION) THEN
             FS = FIX_STARTS(I)
-            ! Reuse AY as the aggregate output gradient buffer.
-            AY(GS:GE,:CONFIG%ADO) = 0.0_RT
-            ! Each suffix mean contributes equally to all points in that suffix.
+            S = GE - GS + ONE
+            ALLOCATE(VALUE_GRAD(S,CONFIG%ADO), GATE_GRADS(S))
+            VALUE_GRAD(:,:) = 0.0_RT
+            GATE_GRADS(:) = 0.0_RT
             DO P = GS, GE
-               DO D = ONE, CONFIG%ADO
-                  GD = OUT(D,FS+P-GS) / REAL(GE-P+ONE, RT)
-                  ! Include the same AY output normalization used in evaluation.
-                  IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
-                  ! Add this suffix mean gradient to every member of the suffix.
-                  DO J = P, GE
-                     AY(J,D) = AY(J,D) + GD
+               SUM_GATE = 0.0_RT
+               MEAN(:) = 0.0_RT
+               DO K = P, GE
+                  RAW_GATE = AY(K,CONFIG%ADO+1)
+                  GATE = 1.0_RT + RAW_GATE / (1.0_RT + ABS(RAW_GATE))
+                  SUM_GATE = SUM_GATE + GATE
+                  MEAN(:) = MEAN(:) + AY(K,:CONFIG%ADO) * GATE
+               END DO
+               MEAN(:) = MEAN(:) / SUM_GATE
+               DO J = P, GE
+                  RAW_GATE = AY(J,CONFIG%ADO+1)
+                  GATE = 1.0_RT + RAW_GATE / (1.0_RT + ABS(RAW_GATE))
+                  DGATE = 1.0_RT / (1.0_RT + ABS(RAW_GATE))**2
+                  DO D = ONE, CONFIG%ADO
+                     GD = OUT(D,FS+P-GS)
+                     ! Include the same AY output normalization used in evaluation.
+                     IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                     VALUE_GRAD(J-GS+ONE,D) = VALUE_GRAD(J-GS+ONE,D) + GD * GATE / SUM_GATE
+                     GATE_GRADS(J-GS+ONE) = GATE_GRADS(J-GS+ONE) + &
+                          GD * (AY(J,D) - MEAN(D)) * DGATE / SUM_GATE
                   END DO
                END DO
             END DO
+            DO J = GS, GE
+               AY(J,:CONFIG%ADO) = VALUE_GRAD(J-GS+ONE,:)
+               AY(J,CONFIG%ADO+1) = GATE_GRADS(J-GS+ONE)
+            END DO
+            DEALLOCATE(VALUE_GRAD, GATE_GRADS)
          ELSE
-            ! Without partial aggregation, all AY receive equal output gradients.
-            DO D = ONE, CONFIG%ADO
-               GD = OUT(D,I)
-               ! Include the same AY output normalization used in evaluation.
-               IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
-               ! Apply the same divisor that was applied in evaluation to all points.
-               GD = GD / REAL(SIZES(I), RT)
-               DO J = GS, GE
-                  AY(J,D) = GD
+            ! Without partial aggregation, all AY receive convex weighted mean gradients.
+            SUM_GATE = 0.0_RT
+            MEAN(:) = 0.0_RT
+            DO J = GS, GE
+               RAW_GATE = AY(J,CONFIG%ADO+1)
+               GATE = 1.0_RT + RAW_GATE / (1.0_RT + ABS(RAW_GATE))
+               SUM_GATE = SUM_GATE + GATE
+               MEAN(:) = MEAN(:) + AY(J,:CONFIG%ADO) * GATE
+            END DO
+            MEAN(:) = MEAN(:) / SUM_GATE
+            DO J = GS, GE
+               RAW_GATE = AY(J,CONFIG%ADO+1)
+               GATE = 1.0_RT + RAW_GATE / (1.0_RT + ABS(RAW_GATE))
+               DGATE = 1.0_RT / (1.0_RT + ABS(RAW_GATE))**2
+               GATE_GRAD = 0.0_RT
+               DO D = ONE, CONFIG%ADO
+                  GD = OUT(D,I)
+                  ! Include the same AY output normalization used in evaluation.
+                  IF (CONFIG%MDO .GT. 0) GD = GD * MODEL(CONFIG%AOMS+D-ONE)
+                  GATE_GRAD = GATE_GRAD + GD * (AY(J,D) - MEAN(D)) * DGATE / SUM_GATE
+                  AY(J,D) = GD * GATE / SUM_GATE
                END DO
+               AY(J,CONFIG%ADO+1) = GATE_GRAD
             END DO
          END IF
       END DO
@@ -3172,7 +3224,7 @@ CONTAINS
        TOTAL_GRAD_RANK = 0
        ! Update for the aggregator model.
        CALL CHECK_MODEL_RANK( &
-            CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO, INT(NUM_THREADS), &
+            CONFIG%ADI, CONFIG%ADS, CONFIG%ANS, CONFIG%ANC, CONFIG%ADSO, CONFIG%ADO+1, INT(NUM_THREADS), &
             AX(:,:), AY_GRADIENT(:,:), &
             MODEL(CONFIG%ASIV:CONFIG%AEIV), & ! A input vecs
             MODEL(CONFIG%ASIS:CONFIG%AEIS), & ! A input shift
@@ -3790,8 +3842,8 @@ CONTAINS
          RWORK(CONFIG%SMXG : CONFIG%EMXG), & ! M_GRADS(NMS,MDS,MNS+1)
          RWORK(CONFIG%SMXS : CONFIG%EMXS), & ! M_STATES(NMS,MDS,MNS+1)
          RWORK(CONFIG%SXG : CONFIG%EXG), & ! X_GRADIENT(MDI,NMS)
-         RWORK(CONFIG%SAYG : CONFIG%EAYG), & ! AY_GRADIENT(NA,ADO)
-         RWORK(CONFIG%SAY : CONFIG%EAY), & ! AY(NA,ADO)
+         RWORK(CONFIG%SAYG : CONFIG%EAYG), & ! AY_GRADIENT(NA,ADO+1)
+         RWORK(CONFIG%SAY : CONFIG%EAY), & ! AY(NA,ADO+1)
          RWORK(CONFIG%SAXG : CONFIG%EAXG), & ! A_GRADS(NA,ADS,ANS+1)
          RWORK(CONFIG%SAXS : CONFIG%EAXS), & ! A_STATES(NA,ADS,ANS+1)
          RWORK(CONFIG%SAG : CONFIG%EAG), & ! AX_GRADIENT(ADI,NA)
@@ -3857,7 +3909,7 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%DO, CONFIG%NMS) :: Y
       INTEGER(KIND=INT64), DIMENSION(SIZE(YI_IN,1), CONFIG%NMS) :: YI
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%ADS, CONFIG%ANC) :: A_IN_VECS
-      REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO, CONFIG%ANC) :: A_OUT_VECS
+      REAL(KIND=RT), DIMENSION(CONFIG%ADSO, CONFIG%ADO+1, CONFIG%ANC) :: A_OUT_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%MDS, CONFIG%MNC) :: M_IN_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%MDSO, CONFIG%MDO, CONFIG%MNC) :: M_OUT_VECS
       REAL(KIND=RT), DIMENSION(CONFIG%ADE, CONFIG%ANE) :: A_EMB_VECS
@@ -3869,7 +3921,7 @@ CONTAINS
       REAL(KIND=RT), DIMENSION(CONFIG%DO, CONFIG%NMS) :: Y_GRADIENT
       REAL(KIND=RT), DIMENSION(CONFIG%NMS, CONFIG%MDS, CONFIG%MNS+1, CONFIG%MNC) :: M_GRADS, M_STATES
       REAL(KIND=RT), DIMENSION(CONFIG%MDI, CONFIG%NMS) :: X_GRADIENT
-      REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADO) :: AY_GRADIENT, AY
+      REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADO+1) :: AY_GRADIENT, AY
       REAL(KIND=RT), DIMENSION(CONFIG%NA, CONFIG%ADS, CONFIG%ANS+1, CONFIG%ANC) :: A_GRADS, A_STATES
       REAL(KIND=RT), DIMENSION(CONFIG%ADI, CONFIG%NA) :: AX_GRADIENT
       REAL(KIND=RT), DIMENSION(CONFIG%ADN) :: AX_SHIFT
@@ -4229,7 +4281,7 @@ CONTAINS
                END DO
             ELSE
                DO C = 1, CONFIG%ANC
-                  A_OUT_VECS(:,:,C) = MATMUL(A_OUT_VECS(:,:,C), Y_RESCALE(:,:))
+                  A_OUT_VECS(:,:CONFIG%ADO,C) = MATMUL(A_OUT_VECS(:,:CONFIG%ADO,C), Y_RESCALE(:,:))
                END DO
             END IF
             Y_RESCALE(:,:) = 0.0_RT

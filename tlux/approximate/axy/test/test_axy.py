@@ -1268,11 +1268,11 @@ def _test_normalize_data(dimension=64, show=False):
         a_emb_vecs = model[config.asev-1:config.aeev].reshape((config.ane, config.ade)).T
         m_emb_vecs = model[config.msev-1:config.meev].reshape((config.mne, config.mde)).T
         o_emb_vecs = model[config.osev-1:config.oeev].reshape((config.doe, config.doe)).T
-        a_out_vecs = model[config.asov-1:config.aeov].reshape((config.ado, config.adso)).T
+        a_out_vecs = model[config.asov-1:config.aeov].reshape((config.ado+1, config.adso)).T
         agg_iterators = np.zeros((6,config.nmt), dtype="int64", order="F")
         initialize_agg_iterator(config, agg_iterators, sizes_in)
         a_states = np.zeros((config.na, config.ads, config.ans+1), dtype="float32", order="F")
-        ay = np.zeros((config.na, config.ado), dtype="float32", order="F")
+        ay = np.zeros((config.na, config.ado+1), dtype="float32", order="F")
         info = 0
         # Call the routine.
         config.rescale_y = True
