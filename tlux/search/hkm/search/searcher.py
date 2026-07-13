@@ -623,9 +623,10 @@ class Searcher:
         n = min(len(token_sequence), self.max_n_gram)
         return [_seq_to_bytes(token_sequence[i : i + n]) for i in range(len(token_sequence) - n + 1)]
 
-    def _scan_leaf_tokens(self, node_dir: str | Path, target: bytes, token_sequence: List[int], query_text: str) -> List[Hit]:
+    def _scan_node_tokens(self, node_dir: str | Path, target: bytes, token_sequence: List[int], query_text: str) -> List[Hit]:
         hits = []
-        path, node = self._leaf_manifest(node_dir)
+        path = Path(node_dir)
+        node = self._node_manifest(path)
         active = self._active_doc_ids()
         for chunk_root in node.get("chunk_roots", []):
             for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
@@ -653,15 +654,16 @@ class Searcher:
     # Collect active document ids containing one exact token sequence.
     #
     # Arguments:
-    #   node_dir (str | Path): Leaf or subtree to scan.
+    #   node_dir (str | Path): Node or subtree to scan.
     #   target (bytes): Packed token sequence.
     #   token_sequence (list[int]): Query token ids.
     #
     # Returns:
     #   (set[int]): Candidate document ids.
     #
-    def _scan_leaf_token_ids(self, node_dir: str | Path, target: bytes, token_sequence: List[int]) -> set[int]:
-        path, node = self._leaf_manifest(node_dir)
+    def _scan_node_token_ids(self, node_dir: str | Path, target: bytes, token_sequence: List[int]) -> set[int]:
+        path = Path(node_dir)
+        node = self._node_manifest(path)
         active = self._active_doc_ids()
         ids: set[int] = set()
         for chunk_root in node.get("chunk_roots", []):
@@ -683,8 +685,9 @@ class Searcher:
 
     def _search_token_node(self, node_dir: Path, target: bytes, token_sequence: List[int], query_text: str, hits: List[Hit]) -> None:
         node = self._node_manifest(node_dir)
+        if node.get("chunk_roots"):
+            hits.extend(self._scan_node_tokens(node_dir, target, token_sequence, query_text))
         if node.get("is_leaf", False):
-            hits.extend(self._scan_leaf_tokens(node_dir, target, token_sequence, query_text))
             return
         grams = self._query_ngrams(token_sequence)
         for child in node.get("children", []):
@@ -713,8 +716,9 @@ class Searcher:
         ids: set[int],
     ) -> None:
         node = self._node_manifest(node_dir)
+        if node.get("chunk_roots"):
+            ids.update(self._scan_node_token_ids(node_dir, target, token_sequence))
         if node.get("is_leaf", False):
-            ids.update(self._scan_leaf_token_ids(node_dir, target, token_sequence))
             return
         grams = self._query_ngrams(token_sequence)
         for child in node.get("children", []):
@@ -1299,20 +1303,19 @@ class Searcher:
         probe_count: int = 0,
     ) -> None:
         node = json.loads((node_dir / "node.json").read_text(encoding="utf-8"))
-        if node.get("is_leaf", False):
-            active = self._active_doc_ids()
-            for chunk_root in node.get("chunk_roots", []):
-                for chunk_path in sorted((node_dir / chunk_root).rglob("*.hkmchunk")):
-                    reader = self._chunk_reader(str(chunk_path), [])
-                    if reader.embeddings.size == 0:
-                        continue
-                    dists = np.linalg.norm(reader.embeddings - query_emb[None, :], axis=1)
-                    for dist, meta in zip(dists, reader.embed_index):
-                        doc_id = int(meta["document_id"])
-                        if doc_id not in active:
-                            continue
+        active = self._active_doc_ids()
+        for chunk_root in node.get("chunk_roots", []):
+            for chunk_path in sorted((node_dir / chunk_root).rglob("*.hkmchunk")):
+                reader = self._chunk_reader(str(chunk_path), [])
+                if reader.embeddings.size == 0:
+                    continue
+                dists = np.linalg.norm(reader.embeddings - query_emb[None, :], axis=1)
+                for dist, meta in zip(dists, reader.embed_index):
+                    doc_id = int(meta["document_id"])
+                    if doc_id in active:
                         span = (int(meta["token_start"]), int(meta["token_end"]))
                         ranked.append((float(dist), doc_id, span, int(meta["window_size"])))
+        if node.get("is_leaf", False):
             return
         centroids = np.load(node_dir / "centroids.npy")
         dists = np.linalg.norm(centroids - query_emb[None, :], axis=1)

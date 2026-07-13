@@ -180,8 +180,21 @@ def sample_passages(searcher: Searcher, count: int, seed: int, max_tokens: int =
     if not doc_ids:
         raise ValueError("index contains no active documents")
     rng = random.Random(seed)
-    selected = rng.sample(doc_ids, min(count, len(doc_ids)))
     backend = searcher._backend()
+    eligible = []
+    for doc_id in doc_ids:
+        tokens, metadata = searcher._doc_context(doc_id)
+        if tokens.size == 0:
+            continue
+        document = searcher._document_record(doc_id, metadata, tokens)
+        source_file = Path(searcher.source_root) / document.source_path
+        if source_file.exists():
+            raw = source_file.read_bytes()
+            raw = raw[document.byte_start:document.byte_end or len(raw)]
+            if not raw.decode("utf-8", errors="ignore").strip():
+                continue
+        eligible.append(doc_id)
+    selected = rng.sample(eligible, min(count, len(eligible)))
     samples = []
     for sample_id, doc_id in enumerate(selected):
         tokens, metadata = searcher._doc_context(doc_id)
@@ -351,6 +364,18 @@ def _metrics(rows: Iterable[Dict[str, Any]], key: str = "final_rank") -> Dict[st
     }
 
 
+# Summarize per-sample elapsed times without hiding slow tail requests.
+def _timing_metrics(rows: Iterable[Dict[str, Any]], key: str) -> Dict[str, float]:
+    values = sorted(float(row[key]) for row in rows)
+    if not values:
+        return {"median_ms": 0.0, "p95_ms": 0.0, "mean_ms": 0.0}
+    return {
+        "median_ms": statistics.median(values),
+        "p95_ms": values[int(0.95 * (len(values) - 1))],
+        "mean_ms": sum(values) / len(values),
+    }
+
+
 # Evaluate model queries, evidence fallback, and probe budgets.
 def evaluate_agent(
     index_root: str,
@@ -360,6 +385,7 @@ def evaluate_agent(
     top_k: int = 10,
     max_tokens: int = 48,
     probe_counts: List[int] | None = None,
+    deterministic_first: bool = False,
 ) -> Dict[str, Any]:
     if top_k < 1:
         raise ValueError("top_k must be positive")
@@ -374,17 +400,39 @@ def evaluate_agent(
     planner_errors = []
     for sample in sampled:
         planner_started = time.perf_counter()
-        try:
-            query = generator.generate(sample.excerpt)
-        except Exception as exc:
-            planner_errors.append({"sample_id": sample.sample_id, "error": str(exc)})
-            query = _keyword_query(sample.excerpt)
+        planner_calls = 0
+        planner_source = "deterministic" if deterministic_first else generator.name
+        query = _keyword_query(sample.excerpt) if deterministic_first else ""
+        if not query:
+            planner_source = generator.name
+        if not deterministic_first or not query:
+            planner_calls = 1
+            try:
+                query = generator.generate(sample.excerpt)
+            except Exception as exc:
+                planner_errors.append({"sample_id": sample.sample_id, "error": str(exc)})
+                query = _keyword_query(sample.excerpt)
+                planner_source = "deterministic_fallback"
         planner_ms = (time.perf_counter() - planner_started) * 1000.0
         first, first_ms = _search(searcher, query, top_k, 0)
         first_rank = _target_rank(first, sample.doc_id)
         fallback_query = ""
         fallback_ms = 0.0
         first_relevant_rank = _evidence_rank(first, sample.excerpt, searcher, source_cache)
+        if deterministic_first and first_relevant_rank != 1:
+            planner_started = time.perf_counter()
+            planner_calls = 1
+            planner_source = generator.name
+            try:
+                query = generator.generate(sample.excerpt)
+            except Exception as exc:
+                planner_errors.append({"sample_id": sample.sample_id, "error": str(exc)})
+                query = _keyword_query(sample.excerpt)
+                planner_source = "deterministic_fallback"
+            planner_ms += (time.perf_counter() - planner_started) * 1000.0
+            model_result, model_ms = _search(searcher, query, top_k, 0)
+            first = _merge_results([first, model_result], top_k, sample.excerpt)
+            first_ms += model_ms
         final = first if first_relevant_rank == 1 else _rerank_with_evidence(
             first, sample.excerpt, searcher, source_cache
         )
@@ -413,6 +461,8 @@ def evaluate_agent(
             "source_path": sample.source_path,
             "excerpt": sample.excerpt,
             "query": query,
+            "planner_source": planner_source,
+            "planner_calls": planner_calls,
             "first_rank": first_rank,
             "final_rank": final_rank,
             "first_relevant_rank": first_relevant_rank,
@@ -450,6 +500,13 @@ def evaluate_agent(
         "first_pass_relevance": _metrics(rows, "first_relevant_rank"),
         "final_relevance": _metrics(rows, "final_relevant_rank"),
         "fallback_rate": sum(bool(row["fallback_query"]) for row in rows) / len(rows) if rows else 0.0,
+        "planner_call_rate": sum(row["planner_calls"] for row in rows) / len(rows) if rows else 0.0,
+        "deterministic_first": deterministic_first,
+        "latency_ms": {
+            "planner": _timing_metrics(rows, "planner_ms"),
+            "first_search": _timing_metrics(rows, "first_search_ms"),
+            "fallback_search": _timing_metrics(rows, "fallback_search_ms"),
+        },
         "probe_curve": curve,
         "rows": rows,
     }
@@ -461,17 +518,21 @@ def render_report(report: Dict[str, Any]) -> str:
     final = report["final"]
     first_relevance = report["first_pass_relevance"]
     final_relevance = report["final_relevance"]
+    first_label = "Initial-pass" if report["deterministic_first"] else "Model first-pass"
+    latency = report["latency_ms"]
     lines = [
         "# HKM Agent Search Benchmark",
         "",
         f"- Generator: `{report['generator']}`",
         f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k: {report['samples']} / {report['seed']} / {report['top_k']}",
-        f"- Model first-pass target-doc recall@k: `{first['recall_at_k']:.3f}`; precision@1: `{first['precision_at_1']:.3f}`; MRR: `{first['mrr']:.3f}`",
-        f"- Model first-pass evidence relevance@k: `{first_relevance['recall_at_k']:.3f}`; precision@1: `{first_relevance['precision_at_1']:.3f}`; MRR: `{first_relevance['mrr']:.3f}`",
+        f"- Planner mode: `{'deterministic-first' if report['deterministic_first'] else report['generator']}`; model calls/sample: `{report['planner_call_rate']:.3f}`",
+        f"- {first_label} target-doc recall@k: `{first['recall_at_k']:.3f}`; precision@1: `{first['precision_at_1']:.3f}`; MRR: `{first['mrr']:.3f}`",
+        f"- {first_label} evidence relevance@k: `{first_relevance['recall_at_k']:.3f}`; precision@1: `{first_relevance['precision_at_1']:.3f}`; MRR: `{first_relevance['mrr']:.3f}`",
         f"- Final target-doc recall@k: `{final['recall_at_k']:.3f}`; precision@1: `{final['precision_at_1']:.3f}`; MRR: `{final['mrr']:.3f}`",
         f"- Final evidence relevance@k: `{final_relevance['recall_at_k']:.3f}`; precision@1: `{final_relevance['precision_at_1']:.3f}`; MRR: `{final_relevance['mrr']:.3f}`",
         f"- Fallback rate: `{report['fallback_rate']:.3f}`",
+        f"- Latency ms (median/p95): planner `{latency['planner']['median_ms']:.2f}/{latency['planner']['p95_ms']:.2f}`; search `{latency['first_search']['median_ms']:.2f}/{latency['first_search']['p95_ms']:.2f}`; fallback `{latency['fallback_search']['median_ms']:.2f}/{latency['fallback_search']['p95_ms']:.2f}`",
         "",
         "## Probe curve (model query only)",
         "",
@@ -506,6 +567,7 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
+    parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--report-output", default=None)
     args = parser.parse_args()
@@ -524,6 +586,7 @@ def main() -> None:
         args.top_k,
         args.max_tokens,
         [int(value) for value in args.probes.split(",") if value.strip()],
+        args.deterministic_first,
     )
     markdown = render_report(report)
     if args.json_output:

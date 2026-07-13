@@ -298,6 +298,9 @@ a real-model run proves a lower-work setting preserves recall. For example:
 
     bin/hkm-agent-benchmark data/fourth_wing_hkm_index --samples 50 --stub
 
+Add `--deterministic-first` to search with cheap lexical evidence before calling
+the model; the model is used only when that first result is not evidence-relevant.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:
