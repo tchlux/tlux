@@ -57,6 +57,29 @@ def _merge_counters(paths: List[Path]) -> UniqueCounter:
     return merged or UniqueCounter()
 
 
+# Derive enough tree levels to keep leaves near the configured size.
+#
+# Arguments:
+#   embedding_count (int): Embeddings below the current node.
+#   leaf_embedding_limit (int): Target maximum embeddings per leaf.
+#   max_cluster_count (int): Branching factor.
+#   depth (int): Current tree depth.
+#
+# Returns:
+#   (int): Exclusive maximum depth for this subtree.
+#
+def _resolve_max_depth(
+    embedding_count: int,
+    leaf_embedding_limit: int,
+    max_cluster_count: int,
+    depth: int,
+) -> int:
+    limit = max(1, int(leaf_embedding_limit))
+    ratio = max(1.0, embedding_count / float(limit))
+    levels = int(math.ceil(math.log(ratio, max(2, int(max_cluster_count)))))
+    return depth + max(1, levels + 1)
+
+
 def _ensure_node_counter(docs_dir: str, hkm_dir: str) -> Path:
     path = Path(hkm_dir) / "n_gram_counter.bytes"
     if not path.exists():
@@ -96,7 +119,7 @@ def build_cluster_index(
     n_gram_fp_rate: float = 0.01,
     seed: int = RANDOM_SEED,
     fs_root: Optional[str] = None,
-    max_depth: int = 3,
+    max_depth: int = 0,
     depth: int = 0,
 ) -> None:
     if not isinstance(index_root_directory, str):
@@ -121,6 +144,8 @@ def build_cluster_index(
         np.save(os.path.join(hkm_dir, "preview_diverse.npy"), preview_div)
 
     cluster_limit = min(int(sample.shape[0]) if sample.ndim else 0, max_cluster_count)
+    if max_depth <= 0:
+        max_depth = _resolve_max_depth(embedding_count, leaf_embedding_limit, max_cluster_count, depth)
     is_leaf = (
         sample.size == 0
         or cluster_limit <= 1

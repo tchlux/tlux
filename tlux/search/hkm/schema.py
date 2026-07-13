@@ -85,6 +85,7 @@ class QuerySpec:
     where: Dict[str, Any] = field(default_factory=dict)
     top_k: int = 10
     offset: int = 0
+    probe_count: int = 0
     filters: Dict[str, List[str]] = field(default_factory=dict)
 
 
@@ -128,6 +129,7 @@ class Hit:
     match_reasons: List[str] = field(default_factory=list)
     semantic_score: float = 0.0
     token_score: float = 0.0
+    window_size: int = 0
 
 
 @dataclass

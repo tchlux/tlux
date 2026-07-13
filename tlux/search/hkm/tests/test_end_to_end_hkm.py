@@ -80,11 +80,13 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     hits2 = searcher.search({"mode": "token", "text": "99", "top_k": 5})
     assert hits2.docs, "shared token query should return hits"
     assert all(hit.source_path.endswith(".txt") and not hit.source_path.startswith("/") for hit in hits2.docs)
+    assert {hit.source_path for hit in hits2.docs} == {"doc1.txt", "doc2.txt", "doc5.txt"}
 
     hits_emb = searcher.search({"mode": "semantic", "text": "40 41 42 43 44 45 99 777", "top_k": 3})
     assert hits_emb.docs, "embedding search should return hits"
     assert hits_emb.docs[0].source_path == "doc5.txt"
     assert hits_emb.docs[0].preview_text
+    assert hits_emb.docs[0].window_size > 0
 
     root_centroids = Path(hkm_root) / "centroids.npy"
     assert root_centroids.exists(), "root centroids should be saved"
@@ -280,9 +282,11 @@ def test_hybrid_search_ranks_metadata_and_explains_matches(tmp_path: Path, monke
     assert default_hits[0].semantic_score > 0.0
 
     token_hits = searcher.search({"mode": "token", "text": "90 91", "top_k": 2}).docs
+    phrase_hits = searcher.search({"text_ast": {"phrase": "90 91"}, "top_k": 3}).docs
     semantic_hits = searcher.search({"mode": "semantic", "text": "0 1 2 3", "top_k": 2}).docs
     hybrid_token_hits = searcher.search({"text": "90 91", "top_k": 2}).docs
     assert token_hits[0].query_mode == "token"
+    assert phrase_hits and phrase_hits[0].source_path == "alpha_report.txt"
     assert semantic_hits[0].query_mode == "semantic"
     assert hybrid_token_hits[0].token_score > 0.0
     assert "token" in hybrid_token_hits[0].match_reasons
@@ -440,6 +444,10 @@ def test_drama_backend_is_local_only() -> None:
 def test_resolve_index_root_accepts_parent_or_hkm_dir(tmp_path: Path) -> None:
     index_root = tmp_path / "idx"
     (index_root / "hkm").mkdir(parents=True)
+    (index_root / "docs").mkdir()
+    np.save(index_root / "docs" / "doc_index.npy", np.empty(0, dtype=[
+        ("doc_id", "u8"), ("worker", "u4"), ("shard", "u4"), ("idx", "u4"),
+    ]))
     (index_root / "index.json").write_text(json.dumps({
         "source_root": str(tmp_path),
         "metadata_schema": [],
@@ -601,6 +609,7 @@ def test_iterator_build_supports_text_ast_and_where_filters(tmp_path: Path, monk
     hits = searcher.search({"text_ast": text_ast, "top_k": 10}).docs
     assert [hit.source_path for hit in hits] == ["a.txt", "b.txt"]
     assert all("text_ast" in hit.match_reasons for hit in hits)
+    assert not searcher.search({"text_ast": {"phrase": "1 3"}, "top_k": 10}).docs
 
     filtered = searcher.search({
         "text_ast": text_ast,
@@ -614,6 +623,19 @@ def test_iterator_build_supports_text_ast_and_where_filters(tmp_path: Path, monk
     })
     assert [hit.source_path for hit in filtered.docs] == ["a.txt"]
     assert filtered.query["where"]["category"] == {"eq": "alpha"}
+    assert len(filtered.docs) == filtered.count
+    page = searcher.search({
+        "text_ast": text_ast,
+        "where": {"category": {"eq": "alpha"}},
+        "top_k": 1,
+        "offset": 1,
+    })
+    assert page.count == 1
+    assert page.docs == []
+    assert page.next_offset is None
+    assert len(page.query["query_id"]) == 16
+    assert page.query["index_build_id"]
+    assert page.query["query_id"] != filtered.query["query_id"]
 
     legacy = searcher.search({"text_ast": {"phrase": "1 2"}, "filters": {"path_include": ["c.*"]}, "top_k": 10})
     assert [hit.source_path for hit in legacy.docs] == ["c.txt"]

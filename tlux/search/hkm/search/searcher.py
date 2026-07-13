@@ -34,10 +34,30 @@ VALID_QUERY_KEYS = {
     "where",
     "top_k",
     "offset",
+    "probe_count",
     "filters",
 }
 VALID_MODES = {"hybrid", "token", "semantic"}
 VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
+
+
+# Resolve the canonical generation selected by a public root manifest.
+#
+# Arguments:
+#   root (Path): Public index root.
+#   data (dict): Decoded index manifest.
+#
+# Returns:
+#   (Path): Generation directory containing docs and hkm artifacts.
+#
+def _generation_root(root: Path, data: Dict[str, object]) -> Path:
+    relative = str(data.get("generation_path", "") or "")
+    if not relative:
+        return root
+    generation = (root / relative).resolve()
+    if not generation.is_relative_to(root.resolve()):
+        raise ValueError(f"generation_path escapes index root: {relative}")
+    return generation
 
 
 # Resolve an index root from an exact path or an unambiguous containing path.
@@ -49,7 +69,7 @@ VALID_FILTERS = {"path_include", "path_exclude", "file_kind"}
 #   (Path): Resolved directory containing index.json.
 #
 def resolve_index_root(index_root: str) -> Path:
-    root = Path(index_root).expanduser().resolve()
+    root = Path(index_root).expanduser().absolute()
     if (root / "index.json").exists():
         return root
     if root.name == "hkm" and (root.parent / "index.json").exists():
@@ -63,7 +83,7 @@ def resolve_index_root(index_root: str) -> Path:
     return root
 
 
-# Audit a built HKM index for the minimal files needed by query traversal.
+# Audit a built HKM index for manifests, arrays, chunks, and active row invariants.
 #
 # Arguments:
 #   index_root (str): Root directory containing index.json.
@@ -81,7 +101,9 @@ def audit_index(index_root: str) -> Path:
     if not manifest.exists():
         raise FileNotFoundError(f"Missing canonical index manifest: {manifest}")
     data = json.loads(manifest.read_text(encoding="utf-8"))
-    hkm_root = root / data.get("hkm_path", "hkm")
+    generation = _generation_root(root, data)
+    docs_root = generation / data.get("docs_path", "docs")
+    hkm_root = generation / data.get("hkm_path", "hkm")
     root_node = hkm_root / "node.json"
     if not root_node.exists():
         raise FileNotFoundError(f"Missing root HKM node manifest: {root_node}")
@@ -91,12 +113,65 @@ def audit_index(index_root: str) -> Path:
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid node manifest: {node_path}: {exc}") from exc
         node_dir = node_path.parent
+        if int(node.get("doc_count", 0)) < 0 or int(node.get("embedding_count", 0)) < 0:
+            raise ValueError(f"Negative node counts: {node_path}")
+        for artifact in node.get("preview_files", []):
+            artifact_path = node_dir / str(artifact)
+            if not artifact_path.exists():
+                raise FileNotFoundError(f"Missing preview artifact: {artifact_path}")
+        for name in ("n_gram_counter_path", "n_gram_exists_path"):
+            relative = str(node.get(name, "") or "")
+            if relative and not (node_dir / relative).exists():
+                raise FileNotFoundError(f"Missing node artifact: {node_dir / relative}")
         for child in node.get("children", []):
             child_node = node_dir / str(child) / "node.json"
             if not child_node.exists():
                 raise FileNotFoundError(f"Missing child node manifest: {child_node}")
-        if not node.get("is_leaf", False) and not (node_dir / "centroids.npy").exists():
-            raise FileNotFoundError(f"Missing non-leaf centroids: {node_dir / 'centroids.npy'}")
+        if not node.get("is_leaf", False):
+            centroid_path = node_dir / "centroids.npy"
+            if not centroid_path.exists():
+                raise FileNotFoundError(f"Missing non-leaf centroids: {centroid_path}")
+            centroids = np.load(centroid_path, mmap_mode="r")
+            if centroids.ndim != 2 or centroids.shape[0] != len(node.get("children", [])):
+                raise ValueError(f"Centroid/child mismatch: {centroid_path}")
+            if not np.isfinite(centroids).all():
+                raise ValueError(f"Non-finite centroids: {centroid_path}")
+        else:
+            chunk_roots = node.get("chunk_roots", [])
+            if int(node.get("doc_count", 0)) and not chunk_roots:
+                raise FileNotFoundError(f"Leaf has documents but no chunk roots: {node_path}")
+            for chunk_root in chunk_roots:
+                chunk_dir = node_dir / str(chunk_root)
+                if not chunk_dir.is_dir():
+                    raise FileNotFoundError(f"Missing leaf chunk root: {chunk_dir}")
+                chunk_paths = sorted(chunk_dir.rglob("*.hkmchunk"))
+                if int(node.get("doc_count", 0)) and not chunk_paths:
+                    raise FileNotFoundError(f"Leaf has no readable chunks: {chunk_dir}")
+                for chunk_path in chunk_paths:
+                    try:
+                        reader = ChunkReader(str(chunk_path), metadata_schema=[])
+                        if reader.embeddings.ndim != 2 or reader.embed_index.shape[0] != reader.embeddings.shape[0]:
+                            raise ValueError(f"Embedding/index shape mismatch: {chunk_path}")
+                        if reader.embed_index.size and not np.isfinite(reader.embeddings).all():
+                            raise ValueError(f"Non-finite embeddings: {chunk_path}")
+                    except (OSError, ValueError, KeyError) as exc:
+                        raise ValueError(f"Unreadable leaf chunk: {chunk_path}: {exc}") from exc
+    if not docs_root.is_dir():
+        raise FileNotFoundError(f"Missing canonical docs directory: {docs_root}")
+    doc_index_path = docs_root / "doc_index.npy"
+    if not doc_index_path.exists():
+        raise FileNotFoundError(f"Missing active document index: {doc_index_path}")
+    doc_index = np.load(doc_index_path, mmap_mode="r")
+    required_fields = {"doc_id", "worker", "shard", "idx"}
+    if not doc_index.dtype.names or not required_fields.issubset(doc_index.dtype.names):
+        raise ValueError(f"Invalid active document index dtype: {doc_index_path}")
+    for row in doc_index:
+        chunk_path = docs_root / f"worker_{int(row['worker']):04d}" / f"shard_{int(row['shard']):08d}.hkmchunk"
+        if not chunk_path.is_dir():
+            raise FileNotFoundError(f"Active document references missing chunk: {chunk_path}")
+        reader = ChunkReader(str(chunk_path), metadata_schema=[])
+        if int(row["idx"]) >= reader.document_count:
+            raise ValueError(f"Active document row out of range: {doc_index_path}: {int(row['doc_id'])}")
     return root
 
 
@@ -228,6 +303,7 @@ def hit_to_dict(hit: Hit) -> Dict[str, object]:
         "match_reasons": hit.match_reasons,
         "semantic_score": hit.semantic_score,
         "token_score": hit.token_score,
+        "window_size": hit.window_size,
         "document": asdict(hit.document),
     }
 
@@ -262,6 +338,10 @@ class Searcher:
     backend_name: str
     max_n_gram: int = 3
     append_only: bool = False
+    build_id: str = ""
+    generation_root: str = ""
+    generation_hkm_root: str = ""
+    generation_docs_root: str = ""
     _doc_index: np.ndarray | None = field(default=None, init=False, repr=False)
     _doc_rows: Dict[int, np.void] = field(default_factory=dict, init=False, repr=False)
     _reader_cache: Dict[str, ChunkReader] = field(default_factory=dict, init=False, repr=False)
@@ -269,22 +349,29 @@ class Searcher:
 
     @classmethod
     def from_index_root(cls, index_root: str, fs: FileSystem | None = None) -> "Searcher":
-        root_path = Path(index_root).resolve()
+        root_path = Path(index_root).absolute()
         fs = fs or make_filesystem(str(root_path))
         manifest = root_path / "index.json"
         if not manifest.exists():
             raise FileNotFoundError(f"Missing canonical index manifest: {manifest}")
         data = json.loads(manifest.read_text(encoding="utf-8"))
+        generation = _generation_root(root_path, data)
+        docs_path = str(data.get("docs_path", "docs"))
+        hkm_path = str(data.get("hkm_path", "hkm"))
         return cls(
             fs=fs,
-            index_root=str(root_path),
+            index_root=str(root_path.resolve()),
             source_root=data["source_root"],
-            docs_root=str(root_path / data.get("docs_path", "docs")),
-            hkm_root=str(root_path / data.get("hkm_path", "hkm")),
+            docs_root=str(root_path / docs_path),
+            hkm_root=str(root_path / hkm_path),
+            generation_root=str(generation),
+            generation_hkm_root=str(generation / hkm_path),
+            generation_docs_root=str(generation / docs_path),
             metadata_schema=_parse_metadata_schema(data.get("metadata_schema", [])),
             backend_name=data.get("embedder_backend", "drama"),
             max_n_gram=int(data.get("max_n_gram", data.get("build_config", {}).get("max_n_gram", 3))),
             append_only=bool(data.get("append_only", False)),
+            build_id=str(data.get("build_config", {}).get("build_id", "")),
         )
 
     def _backend(self):
@@ -292,7 +379,7 @@ class Searcher:
 
     def _load_doc_index(self) -> np.ndarray:
         if self._doc_index is None:
-            self._doc_index = np.load(Path(self.docs_root) / "doc_index.npy")
+            self._doc_index = np.load(Path(self.generation_docs_root or self.docs_root) / "doc_index.npy")
             self._doc_rows = {int(row["doc_id"]): row for row in self._doc_index}
         return self._doc_index
 
@@ -312,7 +399,7 @@ class Searcher:
         self._load_doc_index()
         row = self._doc_rows[doc_id]
         chunk_path = str(
-            Path(self.docs_root)
+            Path(self.generation_docs_root or self.docs_root)
             / f"worker_{int(row['worker']):04d}"
             / f"shard_{int(row['shard']):08d}.hkmchunk"
         )
@@ -389,7 +476,15 @@ class Searcher:
         span_tokens = tokens[slice(*span)] if span[1] > span[0] else tokens[: min(len(tokens), 64)]
         return self._backend().detokenize([span_tokens.tolist()])[0].strip()
 
-    def _hit(self, doc_id: int, score: float, span: Tuple[int, int], mode: str, query_text: str) -> Hit:
+    def _hit(
+        self,
+        doc_id: int,
+        score: float,
+        span: Tuple[int, int],
+        mode: str,
+        query_text: str,
+        window_size: int = 0,
+    ) -> Hit:
         tokens, meta = self._doc_context(doc_id)
         document = self._document_record(doc_id, meta, tokens)
         return Hit(
@@ -403,6 +498,7 @@ class Searcher:
             match_reasons=[mode] if mode in {"semantic", "token"} else [],
             semantic_score=float(score) if mode == "semantic" else 0.0,
             token_score=float(score) if mode == "token" else 0.0,
+            window_size=int(window_size),
         )
 
     def _leaf_manifest(self, node_dir: str | Path) -> Tuple[Path, Dict[str, object]]:
@@ -412,8 +508,8 @@ class Searcher:
             raise ValueError(f"Node is not a leaf: {path}")
         if not node.get("chunk_roots"):
             try:
-                if path.resolve() == Path(self.hkm_root).resolve():
-                    node["chunk_roots"] = [os.path.relpath(self.docs_root, path)]
+                if path.resolve() == Path(self.generation_hkm_root or self.hkm_root).resolve():
+                    node["chunk_roots"] = [os.path.relpath(self.generation_docs_root or self.docs_root, path)]
             except Exception:
                 pass
         return path, node
@@ -515,8 +611,13 @@ class Searcher:
             for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
                 reader = self._chunk_reader(str(chunk_path), [])
                 base = int(reader.chunk_metadata().get("min_document_id", 0) or 0)
+                document_ids = []
+                for meta in reader.embed_index:
+                    document_id = int(meta["document_id"])
+                    if not document_ids or document_ids[-1] != document_id:
+                        document_ids.append(document_id)
                 for idx in range(reader.document_count):
-                    doc_id = base + idx
+                    doc_id = document_ids[idx] if idx < len(document_ids) else base + idx
                     if doc_id not in active:
                         continue
                     tokens, _, _, _ = reader[idx]
@@ -528,6 +629,37 @@ class Searcher:
                             hits.append(self._hit(doc_id, 1.0, (hit_pos, hit_pos + len(token_sequence)), "token", query_text))
                         pos = token_bytes.find(target, pos + 4)
         return hits
+
+    # Collect active document ids containing one exact token sequence.
+    #
+    # Arguments:
+    #   node_dir (str | Path): Leaf or subtree to scan.
+    #   target (bytes): Packed token sequence.
+    #   token_sequence (list[int]): Query token ids.
+    #
+    # Returns:
+    #   (set[int]): Candidate document ids.
+    #
+    def _scan_leaf_token_ids(self, node_dir: str | Path, target: bytes, token_sequence: List[int]) -> set[int]:
+        path, node = self._leaf_manifest(node_dir)
+        active = self._active_doc_ids()
+        ids: set[int] = set()
+        for chunk_root in node.get("chunk_roots", []):
+            for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
+                reader = self._chunk_reader(str(chunk_path), [])
+                base = int(reader.chunk_metadata().get("min_document_id", 0) or 0)
+                document_ids = []
+                for meta in reader.embed_index:
+                    document_id = int(meta["document_id"])
+                    if not document_ids or document_ids[-1] != document_id:
+                        document_ids.append(document_id)
+                for idx in range(reader.document_count):
+                    doc_id = document_ids[idx] if idx < len(document_ids) else base + idx
+                    if doc_id not in active:
+                        continue
+                    if target in reader._get_tokens(idx).tobytes():
+                        ids.add(doc_id)
+        return ids
 
     def _search_token_node(self, node_dir: Path, target: bytes, token_sequence: List[int], query_text: str, hits: List[Hit]) -> None:
         node = self._node_manifest(node_dir)
@@ -541,6 +673,51 @@ class Searcher:
             if observer is not None and grams and not all(gram in observer for gram in grams):
                 continue
             self._search_token_node(child_dir, target, token_sequence, query_text, hits)
+
+    # Traverse token-pruning nodes and collect candidate document ids.
+    #
+    # Arguments:
+    #   node_dir (Path): Node to inspect.
+    #   target (bytes): Packed token sequence.
+    #   token_sequence (list[int]): Query token ids.
+    #   ids (set[int]): Mutable output set.
+    #
+    # Returns:
+    #   (None): Mutates ids in place.
+    #
+    def _search_token_node_ids(
+        self,
+        node_dir: Path,
+        target: bytes,
+        token_sequence: List[int],
+        ids: set[int],
+    ) -> None:
+        node = self._node_manifest(node_dir)
+        if node.get("is_leaf", False):
+            ids.update(self._scan_leaf_token_ids(node_dir, target, token_sequence))
+            return
+        grams = self._query_ngrams(token_sequence)
+        for child in node.get("children", []):
+            child_dir = node_dir / child
+            observer = self._node_observer(child_dir)
+            if observer is not None and grams and not all(gram in observer for gram in grams):
+                continue
+            self._search_token_node_ids(child_dir, target, token_sequence, ids)
+
+    # Return documents containing at least one query token through indexed pruning.
+    #
+    # Arguments:
+    #   token_ids (list[int]): Query token ids.
+    #
+    # Returns:
+    #   (set[int]): Candidate document ids.
+    #
+    def _indexed_token_candidates(self, token_ids: List[int]) -> set[int]:
+        candidates: set[int] = set()
+        for token_id in dict.fromkeys(int(token) for token in token_ids):
+            sequence = [token_id]
+            self._search_token_node_ids(Path(self.generation_hkm_root or self.hkm_root), _seq_to_bytes(sequence), sequence, candidates)
+        return candidates
 
     # Normalize and validate the public query dictionary.
     #
@@ -570,6 +747,7 @@ class Searcher:
                 where=query.get("where", {}),
                 top_k=query.get("top_k", 10),
                 offset=query.get("offset", 0),
+                probe_count=query.get("probe_count", 0),
                 filters=query.get("filters", {}),
             )
         spec.text = str(spec.text or "")
@@ -577,6 +755,7 @@ class Searcher:
         try:
             spec.top_k = int(spec.top_k)
             spec.offset = int(spec.offset)
+            spec.probe_count = int(spec.probe_count)
         except (TypeError, ValueError):
             raise ValueError("top_k and offset must be integers")
         if spec.mode not in VALID_MODES:
@@ -585,6 +764,8 @@ class Searcher:
             raise ValueError("top_k must be at least 1")
         if spec.offset < 0:
             raise ValueError("offset must be non-negative")
+        if spec.probe_count < 0:
+            raise ValueError("probe_count must be non-negative; zero means exhaustive")
         if not isinstance(spec.filters, dict):
             raise ValueError("filters must be an object")
         if not isinstance(spec.where, dict):
@@ -616,17 +797,29 @@ class Searcher:
     #   (Dict[str, object]): Public query record.
     #
     def _query_dict(self, spec: QuerySpec) -> Dict[str, object]:
-        return {
+        record = {
             "text": spec.text,
             "mode": spec.mode,
             "token_sequence": list(spec.token_sequence),
             "text_ast": spec.text_ast,
             "embeddings": spec.embeddings,
+            "label_include": spec.label_include,
+            "numeric_range": spec.numeric_range,
             "top_k": spec.top_k,
             "offset": spec.offset,
+            "probe_count": spec.probe_count,
             "where": spec.where,
             "filters": spec.filters,
         }
+        record["query_id"] = hashlib.sha256(
+            json.dumps(record, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        record["index_build_id"] = self.build_id
+        try:
+            record["generation_path"] = os.path.relpath(self.generation_root, self.index_root)
+        except ValueError:
+            record["generation_path"] = self.generation_root
+        return record
 
     # Normalize structured metadata filters and legacy filter aliases.
     #
@@ -820,16 +1013,24 @@ class Searcher:
         if spec.token_sequence:
             return self._page(self._search_tokens(spec.token_sequence, candidate_count, spec.text), spec)
         if spec.embeddings:
-            hits = self._search_embeddings(np.asarray(spec.embeddings[0], dtype=np.float32), candidate_count, spec.text)
+            hits = self._search_embeddings(
+                np.asarray(spec.embeddings[0], dtype=np.float32),
+                candidate_count,
+                spec.text,
+                spec.probe_count,
+            )
             return self._page(hits, spec)
         if spec.text and spec.mode == "token":
             return self._page(self._search_lexical_text(spec.text, candidate_count), spec)
         if spec.text and spec.mode == "semantic":
             query_ids = self._backend().tokenize([spec.text])
             query_emb = self._backend().embed(query_ids, role="query")[0]
-            return self._page(self._search_embeddings(query_emb, candidate_count, spec.text), spec)
+            return self._page(
+                self._search_embeddings(query_emb, candidate_count, spec.text, spec.probe_count),
+                spec,
+            )
         if spec.text and spec.mode == "hybrid":
-            return self._page(self._search_hybrid(spec.text, candidate_count), spec)
+            return self._page(self._search_hybrid(spec.text, candidate_count, spec.probe_count), spec)
         return self._page([], spec)
 
     def _search_tokens(self, token_sequence: List[int], top_k: int | None, query_text: str) -> List[Hit]:
@@ -837,7 +1038,7 @@ class Searcher:
             return []
         target = _seq_to_bytes(token_sequence)
         hits: List[Hit] = []
-        self._search_token_node(Path(self.hkm_root), target, token_sequence, query_text, hits)
+        self._search_token_node(Path(self.generation_hkm_root or self.hkm_root), target, token_sequence, query_text, hits)
         if self.append_only:
             seen = {(hit.doc_id, hit.span) for hit in hits}
             for hit in self._scan_active_tokens(target, token_sequence, query_text):
@@ -1007,7 +1208,8 @@ class Searcher:
         if not query_tokens:
             return []
         hits: List[Hit] = []
-        for doc_id in sorted(self._active_doc_ids()):
+        candidate_ids = self._indexed_token_candidates(query_tokens)
+        for doc_id in sorted(candidate_ids):
             tokens, _ = self._doc_context(doc_id)
             match = self._lexical_match(tokens, query_tokens)
             if match is None:
@@ -1043,7 +1245,13 @@ class Searcher:
                 pos = token_bytes.find(target, pos + 4)
         return hits
 
-    def _search_node(self, node_dir: Path, query_emb: np.ndarray, ranked: List[Tuple[float, int, Tuple[int, int]]]) -> None:
+    def _search_node(
+        self,
+        node_dir: Path,
+        query_emb: np.ndarray,
+        ranked: List[Tuple[float, int, Tuple[int, int], int]],
+        probe_count: int = 0,
+    ) -> None:
         node = json.loads((node_dir / "node.json").read_text(encoding="utf-8"))
         if node.get("is_leaf", False):
             active = self._active_doc_ids()
@@ -1058,23 +1266,34 @@ class Searcher:
                         if doc_id not in active:
                             continue
                         span = (int(meta["token_start"]), int(meta["token_end"]))
-                        ranked.append((float(dist), doc_id, span))
+                        ranked.append((float(dist), doc_id, span, int(meta["window_size"])))
             return
         centroids = np.load(node_dir / "centroids.npy")
         dists = np.linalg.norm(centroids - query_emb[None, :], axis=1)
-        for idx in np.argsort(dists)[: min(2, len(node.get("children", [])))]:
-            self._search_node(node_dir / node["children"][int(idx)], query_emb, ranked)
+        children = node.get("children", [])
+        child_count = len(children) if probe_count <= 0 else min(probe_count, len(children))
+        for idx in np.argsort(dists)[:child_count]:
+            self._search_node(node_dir / children[int(idx)], query_emb, ranked, probe_count)
 
-    def _search_embeddings(self, query_emb: np.ndarray, top_k: int, query_text: str) -> List[Hit]:
-        ranked: List[Tuple[float, int, Tuple[int, int]]] = []
-        self._search_node(Path(self.hkm_root), query_emb, ranked)
-        best: Dict[int, Tuple[float, int, Tuple[int, int]]] = {}
+    def _search_embeddings(
+        self,
+        query_emb: np.ndarray,
+        top_k: int,
+        query_text: str,
+        probe_count: int = 0,
+    ) -> List[Hit]:
+        ranked: List[Tuple[float, int, Tuple[int, int], int]] = []
+        self._search_node(Path(self.generation_hkm_root or self.hkm_root), query_emb, ranked, probe_count)
+        best: Dict[int, Tuple[float, int, Tuple[int, int], int]] = {}
         for item in ranked:
-            dist, doc_id, _span = item
+            dist, doc_id, _span, _window_size = item
             if doc_id not in best or dist < best[doc_id][0]:
                 best[doc_id] = item
         ranked_docs = sorted(best.values(), key=lambda item: (item[0], item[1], item[2]))
-        return [self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text) for dist, doc_id, span in ranked_docs[:top_k]]
+        return [
+            self._hit(doc_id, 1.0 / (1.0 + dist), span, "semantic", query_text, window_size)
+            for dist, doc_id, span, window_size in ranked_docs[:top_k]
+        ]
 
     # Find documents whose stable metadata contains the query text.
     #
@@ -1161,13 +1380,13 @@ class Searcher:
     # Returns:
     #   (List[Hit]): Ranked passage hits.
     #
-    def _search_hybrid(self, query_text: str, top_k: int) -> List[Hit]:
+    def _search_hybrid(self, query_text: str, top_k: int, probe_count: int = 0) -> List[Hit]:
         candidate_count = max(top_k * 8, 50)
         grouped: Dict[Tuple[int, Tuple[int, int]], Hit] = {}
         query_ids = self._backend().tokenize([query_text])
         query_tokens = query_ids[0] if query_ids else []
         query_emb = self._backend().embed(query_ids, role="query")[0]
-        for hit in self._search_embeddings(query_emb, candidate_count, query_text):
+        for hit in self._search_embeddings(query_emb, candidate_count, query_text, probe_count):
             self._merge_hybrid_hit(grouped, hit)
         if query_tokens:
             for hit in self._search_lexical_text(query_text, candidate_count):
@@ -1201,9 +1420,11 @@ def _resolve_node_dir(searcher: Searcher, node_arg: str) -> Path:
     candidates = [raw] if raw.is_absolute() else [
         Path(searcher.index_root) / raw,
         Path(searcher.hkm_root) / raw,
+        Path(searcher.generation_hkm_root or searcher.hkm_root) / raw,
     ]
     if str(raw) in ("", ".", "hkm"):
         candidates.insert(0, Path(searcher.hkm_root))
+        candidates.append(Path(searcher.generation_hkm_root or searcher.hkm_root))
     for candidate in candidates:
         if (candidate / "node.json").exists():
             return candidate
@@ -1220,6 +1441,10 @@ def _resolve_node_dir(searcher: Searcher, node_arg: str) -> Path:
 #   (str): Relative node path when possible.
 #
 def _relative_node_path(searcher: Searcher, node_dir: Path) -> str:
+    try:
+        return str(node_dir.absolute().relative_to(Path(searcher.index_root).absolute()))
+    except ValueError:
+        pass
     try:
         return str(node_dir.resolve().relative_to(Path(searcher.index_root).resolve()))
     except ValueError:

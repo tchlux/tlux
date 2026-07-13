@@ -118,6 +118,10 @@ tlux/search/hkm/bin/hkm-search idx query.json
 ```
 
 `mode` defaults to `hybrid` and may be `token`, `semantic`, or `hybrid`.
+Semantic and hybrid searches are exhaustive by default (`probe_count: 0`) so
+the default is optimized for agent-quality recall. Set a positive
+`probe_count` to probe only that many nearest child clusters per tree level;
+benchmark the resulting recall before using it for a production workload.
 `text_ast` runs exact tokenizer-based phrase search with `and` and `or`.
 `top_k` is the page size, `offset` is zero-based pagination, and `where` holds
 optional metadata filters. `where.FIELD` may be a scalar exact match, an
@@ -133,6 +137,9 @@ Builds are incremental by default when a compatible `manifests/source_snapshot.j
 exists. Use `--full-rebuild` to rebuild the HKM tree while preserving cached
 document embeddings.
 
+`--full-rebuild` is also the compaction operation: it removes stale append-only
+chunks and republishes only active documents while reusing the embedding cache.
+
 ## Current on-disk layout
 
 ```text
@@ -141,44 +148,28 @@ index_root/
   .hkm_jobs/
   .hkm_cache/
     embeddings/
-  manifests/
-    ingest_summary.json
-    source_snapshot.json
-    worker_0000.json
-  docs/
-    doc_index.npy
-    worker_0000/
-      shard_00000000.hkmchunk/
-        chunk_meta.json
-        tokens.bin
-        tokens_index.npy
-        embeddings.npy
-        embed_index.npy
-        metadata.npy
-        n_gram_counter.bytes
-        ...
-  hkm/
-    node.json
-    n_gram_counter.bytes
-    n_gram_exists.bytes
-    stats.json
-    centroids.npy
-    preview_random.npy
-    preview_diverse.npy
-    cluster_0000/
+  .hkm_builds/<generation>/
+    index.json
+    manifests/
+      ingest_summary.json
+      source_snapshot.json
+      worker_0000.json
+    docs/
+      doc_index.npy
+      worker_0000/shard_00000000.hkmchunk/...
+    hkm/
       node.json
-      n_gram_counter.bytes
-      n_gram_exists.bytes
-      data/
-      stats.json
-      ...
+      cluster_0000/...
+  docs -> .hkm_builds/<generation>/docs
+  hkm -> .hkm_builds/<generation>/hkm
+  manifests -> .hkm_builds/<generation>/manifests
 ```
 
 `.hkmchunk` directories are the canonical current storage unit. Search and build code should agree with that format exactly.
 
 The canonical query-time manifests and token artifacts are:
 
-- `index.json` at the root with source root, jobs root, embedder backend, metadata schema, build config, `max_n_gram`, `n_gram_fp_rate`, relative `docs/` + `hkm/` paths, and whether the tree has append-only incremental chunks
+- `index.json` at the root with the published `generation_path`, source root, stable jobs root, embedder backend, metadata schema, build config, `max_n_gram`, `n_gram_fp_rate`, relative `docs/` + `hkm/` paths, and whether the tree has append-only incremental chunks
 - `manifests/source_snapshot.json` with active source paths, content hashes, doc ids, canonical chunk rows, and leaf paths for incremental reuse
 - `.hkm_cache/embeddings/` with reusable per-document tokens, embedding windows, and embeddings keyed by backend/window settings and content hash
 - `node.json` at each HKM node with child order, counts, preview files, token artifact paths, and whether local `data/` exists
@@ -288,6 +279,16 @@ The supported package-level exports are:
 - `set_jobs_root`
 - `drain_jobs`
 - `Searcher`
+
+The local CLI now includes `hkm-audit`, `hkm-inspect`, and `hkm-benchmark`.
+`hkm-inspect` reports build stages, failures, storage composition, and warm
+search p50/p95/p99 timings; `hkm-benchmark` adds exhaustive quality oracles,
+probe work, exact checks, quantization/window ablations, and 1K-to-1B scale
+estimates. Builds stage under `.hkm_builds/`, keep `.hkm_jobs/` stable, audit
+the complete generation, and atomically replace the public `index.json`
+pointer. Compatibility aliases for `docs/`, `hkm/`, and `manifests/` are
+swapped after publication, so a failed build leaves the previous generation
+searchable.
 
 ## Forward-looking architecture
 

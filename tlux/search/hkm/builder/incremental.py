@@ -14,6 +14,7 @@ import json
 import math
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -22,6 +23,31 @@ import numpy as np
 from .chunk_io import ChunkReader, ChunkWriter
 from .recursive_index_builder import build_cluster_index
 from ..fs import make_filesystem
+
+
+# Drain descendants created by recursive tree jobs while leaving this barrier job running.
+#
+# Arguments:
+#   jobs_root (str): Shared jobs directory.
+#   max_workers (int): Configured build worker count.
+#
+# Returns:
+#   (None): Waits until no queued or waiting descendant remains.
+#
+def _drain_descendant_jobs(jobs_root: str, max_workers: int) -> None:
+    from ..jobs import watcher
+
+    fs = make_filesystem(jobs_root)
+    deadline = time.time() + 300.0
+    while time.time() < deadline:
+        watcher(fs=fs, max_workers=max(2, int(max_workers)))
+        waiting = len(fs.listdir("waiting"))
+        queued = len(fs.listdir("queued"))
+        running = len(fs.listdir("running"))
+        if waiting == 0 and queued == 0 and running <= 1:
+            return
+        time.sleep(0.05)
+    raise TimeoutError(f"Timed out waiting for recursive HKM jobs under {jobs_root}")
 from ..schema import DOC_INDEX_DTYPE
 from ..tools.unique_count_estimator import UniqueCounter
 from ..tools.value_seen_estimator import ValueObserver
@@ -172,16 +198,22 @@ def _assert_non_empty_build(index_root: Path, active_count: int) -> None:
 # Arguments:
 #   index_root (str): Index root.
 #
-# Returns:
-#   (None): Writes manifests/source_snapshot.json.
+#   publish_root (str | None): Public path to swap after audit.
 #
-def write_source_snapshot(index_root: str) -> None:
+# Returns:
+#   (None): Writes manifests/source_snapshot.json and optionally publishes it.
+#
+def write_source_snapshot(index_root: str, publish_root: str | None = None) -> None:
     root = Path(index_root)
     manifest = json.loads((root / "index.json").read_text(encoding="utf-8"))
+    _drain_descendant_jobs(manifest.get("jobs_root", str(root / ".hkm_jobs")), int(manifest.get("build_config", {}).get("num_workers", 1)))
     schema = _parse_schema(manifest.get("metadata_schema", []))
     docs_root = root / manifest.get("docs_path", "docs")
     doc_rows = _doc_rows(root)
     _assert_non_empty_build(root, len(doc_rows))
+    from ..search.searcher import audit_index
+
+    audit_index(index_root)
     leaf_paths = _leaf_map(root / manifest.get("hkm_path", "hkm"))
     entries = []
     for doc_id, row in sorted(doc_rows.items()):
@@ -208,6 +240,10 @@ def write_source_snapshot(index_root: str) -> None:
     out = root / "manifests" / "source_snapshot.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+    if publish_root:
+        from .launcher import publish_generation
+
+        publish_generation(str(root), publish_root)
 
 
 # Return the ChunkReader for a doc-index row.
@@ -416,7 +452,7 @@ def _split_oversized_leaves(
             max_n_gram=max_n_gram,
             n_gram_fp_rate=n_gram_fp_rate,
             seed=seed,
-            max_depth=int(node.get("depth", 0)) + 3,
+            max_depth=0,
             depth=int(node.get("depth", 0)),
         )
 
@@ -503,6 +539,7 @@ def _finish_summary(index_root: Path, worker_ids: List[int], active_count: int) 
 def finalize_incremental(
     index_root: str,
     plan_path: str,
+    publish_root: str | None = None,
     max_cluster_count: int = 8,
     leaf_embedding_limit: int = 1024,
     leaf_doc_limit: int = 1024,
@@ -532,7 +569,7 @@ def finalize_incremental(
         doc_index.sort(order="doc_id")
         np.save(docs_root / "doc_index.npy", doc_index)
     _finish_summary(root, [int(worker_id) for worker_id in plan.get("worker_ids", [])], len(rows))
-    write_source_snapshot(index_root)
+    write_source_snapshot(index_root, publish_root=publish_root)
 
 
 # No-op job entrypoint used for unchanged incremental builds.

@@ -48,6 +48,15 @@ def _token_paths(index_root: Path, text: str) -> list[str]:
     return [hit.source_path for hit in Searcher.from_index_root(str(index_root)).search({"mode": "token", "text": text, "top_k": 10}).docs]
 
 
+# Count canonical index bytes while excluding transient jobs and embedding cache.
+def _canonical_bytes(index_root: Path) -> int:
+    return sum(
+        path.stat().st_size
+        for path in index_root.rglob("*")
+        if path.is_file() and not {".hkm_jobs", ".hkm_cache"}.intersection(path.relative_to(index_root).parts)
+    )
+
+
 def test_incremental_reuses_adds_changes_and_deletes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     docs = tmp_path / "docs"
@@ -74,17 +83,25 @@ def test_incremental_reuses_adds_changes_and_deletes(tmp_path: Path, monkeypatch
     assert updated["changed"] == 1
     assert updated["new"] == 1
     assert updated["deleted"] == 1
+    manifest = json.loads((index_root / "index.json").read_text(encoding="utf-8"))
+    assert manifest["build_config"]["staging_copy_bytes"] > 0
+    assert manifest["build_config"]["staging_copy_seconds"] >= 0
 
     assert _token_paths(index_root, "3") == ["keep.txt"]
     assert _token_paths(index_root, "99") == ["change.txt"]
     assert _token_paths(index_root, "32") == ["new.txt"]
     assert _token_paths(index_root, "12") == []
     assert _token_paths(index_root, "22") == []
+    incremental_bytes = _canonical_bytes(index_root)
 
     searcher = Searcher.from_index_root(str(index_root))
     leaf_paths = [path.parent for path in (index_root / "hkm").rglob("node.json") if json.loads(path.read_text()).get("is_leaf")]
     browsed = [hit.source_path for leaf in leaf_paths for hit in searcher.leaf_docs(leaf)]
     assert "delete.txt" not in browsed
+
+    compacted = _build(docs, index_root, incremental=False)
+    assert compacted["cache_hits"] >= 3
+    assert _canonical_bytes(index_root) <= incremental_bytes
 
 
 def test_full_rebuild_uses_embedding_cache(tmp_path: Path, monkeypatch) -> None:

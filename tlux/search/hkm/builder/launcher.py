@@ -9,6 +9,8 @@ import fnmatch
 import hashlib
 import shutil
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -81,6 +83,131 @@ DEFAULT_SKIP_SUFFIXES = {
     ".gguf",
 }
 DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
+
+
+# Return the currently published generation for a public index root.
+#
+# Arguments:
+#   public_root (Path): User-facing index path.
+#
+# Returns:
+#   (Path): Active generation directory, or the legacy root.
+#
+def _active_generation_root(public_root: Path) -> Path:
+    manifest_path = public_root / "index.json"
+    if not manifest_path.exists():
+        return public_root
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    relative = str(data.get("generation_path", "") or "")
+    if not relative:
+        return public_root
+    generation = (public_root / relative).resolve()
+    if not generation.is_relative_to(public_root.resolve()):
+        raise ValueError(f"generation_path escapes index root: {relative}")
+    return generation
+
+
+# Create a unique staging generation beneath the public root.
+#
+# Arguments:
+#   public_root (Path): User-facing index path.
+#   build_id (str): Build identifier.
+#
+# Returns:
+#   (Path): Empty staging generation directory.
+#
+def _new_generation_root(public_root: Path, build_id: str) -> Path:
+    name = build_id.replace(":", "").replace("-", "") + "-" + uuid.uuid4().hex[:8]
+    generation = public_root / ".hkm_builds" / name
+    generation.mkdir(parents=True, exist_ok=False)
+    return generation
+
+
+# Clone an active generation before an append-only update.
+#
+# Arguments:
+#   source (Path): Existing active generation.
+#   destination (Path): New staging generation.
+#
+# Returns:
+#   (tuple[int, float]): Copied bytes and elapsed seconds.
+#
+def _clone_generation(source: Path, destination: Path) -> tuple[int, float]:
+    started = time.perf_counter()
+    copied_bytes = sum(
+        path.stat().st_size
+        for path in source.rglob("*")
+        if path.is_file() and path.name != "index.json"
+    )
+    shutil.copytree(
+        source,
+        destination,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("index.json", ".hkm_builds", ".hkm_jobs", ".hkm_cache"),
+    )
+    return copied_bytes, time.perf_counter() - started
+
+
+# Replace one public compatibility alias with a generation symlink.
+#
+# Arguments:
+#   public_root (Path): User-facing index path.
+#   generation (Path): New generation directory.
+#   name (str): Alias name such as docs, hkm, or manifests.
+#
+# Returns:
+#   (bool): True when the alias was replaced.
+#
+def _replace_generation_alias(public_root: Path, generation: Path, name: str) -> bool:
+    alias = public_root / name
+    if alias.exists() and not alias.is_symlink():
+        generated = {
+            "docs": (alias / "doc_index.npy").exists() or any(alias.rglob("*.hkmchunk")),
+            "hkm": (alias / "node.json").exists(),
+            "manifests": (alias / "ingest_summary.json").exists() or any(alias.glob("worker_*.json")),
+        }[name]
+        if not generated:
+            return False
+        backup = public_root / ".hkm_builds" / ".legacy" / uuid.uuid4().hex[:8] / name
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        alias.rename(backup)
+    elif alias.is_symlink():
+        alias.unlink()
+    temporary = public_root / f".{name}.next-{uuid.uuid4().hex[:8]}"
+    temporary.symlink_to(os.path.relpath(generation / name, public_root), target_is_directory=True)
+    os.replace(temporary, alias)
+    return True
+
+
+# Atomically publish an audited generation while retaining a stable public root.
+#
+# Arguments:
+#   generation_root (Path): Audited immutable build directory.
+#   public_root (Path): User-facing index path.
+#
+# Returns:
+#   (None): Replaces the public manifest in one filesystem operation.
+#
+def publish_generation(generation_root: str, public_root: str) -> None:
+    generation = Path(generation_root).resolve()
+    public = Path(public_root).resolve()
+    public.parent.mkdir(parents=True, exist_ok=True)
+    public.mkdir(parents=True, exist_ok=True)
+    previous = _active_generation_root(public)
+    from ..search.searcher import audit_index
+
+    audit_index(str(generation))
+    stage = json.loads((generation / "index.json").read_text(encoding="utf-8"))
+    stage["generation_path"] = Path(os.path.relpath(generation, public)).as_posix()
+    stage["jobs_root"] = stage.get("jobs_root", str(public / ".hkm_jobs"))
+    temporary = public / f".index.next-{uuid.uuid4().hex[:8]}"
+    temporary.write_text(json.dumps(stage, indent=2), encoding="utf-8")
+    os.replace(temporary, public / "index.json")
+    for name in ("docs", "hkm", "manifests"):
+        _replace_generation_alias(public, generation, name)
+    builds_root = (public / ".hkm_builds").resolve()
+    if previous != public and previous != generation and previous.is_relative_to(builds_root):
+        shutil.rmtree(previous, ignore_errors=True)
 
 
 # Parse a serialized or Python metadata schema into JSON and runtime forms.
@@ -483,29 +610,34 @@ def build_search_index(
     incremental: bool = True,
 ) -> Job:
     docs_dir_path = Path(docs_dir).resolve()
-    index_root_path = Path(index_root).resolve()
+    public_index_root = Path(index_root).expanduser().absolute()
+    public_index_root.mkdir(parents=True, exist_ok=True)
+    active_index_root = _active_generation_root(public_index_root)
     docs_dir = str(docs_dir_path)
-    index_root = str(index_root_path)
+    index_root = str(active_index_root)
 
     # Validate input parameters.
     if not docs_dir_path.exists():
         raise ValueError(f"docs_dir '{docs_dir}' does not exist")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
+    if max_file_bytes is not None and (not isinstance(max_file_bytes, int) or max_file_bytes <= 0):
+        raise ValueError("max_file_bytes must be positive or None")
+    if max_tokens is not None and (not isinstance(max_tokens, int) or max_tokens <= 0):
+        raise ValueError("max_tokens must be positive or None")
     if fs_root is None:
         try:
-            fs_root = os.path.commonpath([docs_dir, index_root])
+            fs_root = os.path.commonpath([docs_dir, str(public_index_root)])
         except Exception:
-            fs_root = index_root
+            fs_root = str(public_index_root)
         if fs_root in ("", os.sep):
-            fs_root = index_root
+            fs_root = str(public_index_root)
     else:
         fs_root = str(Path(fs_root).resolve())
     if jobs_root is None:
-        jobs_root = str(index_root_path / ".hkm_jobs")
+        jobs_root = str(public_index_root / ".hkm_jobs")
     else:
         jobs_root = str(Path(jobs_root).resolve())
-    set_jobs_root(jobs_root)
     try:
         metadata_schema_value = json.loads(metadata_schema)
     except Exception:
@@ -526,16 +658,66 @@ def build_search_index(
     if not all_files:
         raise ValueError("No documents found to index.")
 
-    manifest_dir = os.path.join(index_root, "manifests")
-    os.makedirs(manifest_dir, exist_ok=True)
-    cache_dir = os.path.join(index_root, ".hkm_cache", "embeddings")
-    snapshot = _load_snapshot(index_root, docs_dir, metadata_schema_value, backend_name) if incremental else None
+    snapshot = _load_snapshot(str(active_index_root), docs_dir, metadata_schema_value, backend_name) if incremental else None
     reused_docs: List[dict] = []
     work_files = all_files
     changed_count = 0
     deleted_count = 0
     if snapshot is not None:
         reused_docs, work_files, changed_count, deleted_count = _classify_incremental(docs_dir_path, all_files, snapshot)
+        new_count = len(work_files) - changed_count
+        summary = {
+            "scanned": len(all_files) + len(skipped_files),
+            "planned": len(all_files),
+            "indexed": len(reused_docs),
+            "skipped": len(skipped_files),
+            "failed": 0,
+            "reused": len(reused_docs),
+            "new": new_count,
+            "changed": changed_count,
+            "deleted": deleted_count,
+            "cache_hits": len(reused_docs),
+            "cache_misses": 0,
+            "skip_reasons": skip_reasons,
+            "skipped_files": skipped_files,
+            "failed_files": [],
+        }
+        active_summary = active_index_root / "manifests" / "ingest_summary.json"
+        active_summary.parent.mkdir(parents=True, exist_ok=True)
+        active_summary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        if not work_files and not deleted_count:
+            return run_job("tlux.search.hkm.builder.incremental.noop")
+
+    generation_root = _new_generation_root(public_index_root, build_id)
+    staging_copy_bytes = 0
+    staging_copy_seconds = 0.0
+    if snapshot is not None:
+        staging_copy_bytes, staging_copy_seconds = _clone_generation(active_index_root, generation_root)
+    index_root_path = generation_root
+    index_root = str(generation_root.resolve())
+    manifest_dir = os.path.join(index_root, "manifests")
+    cache_dir = os.path.join(str(public_index_root), ".hkm_cache", "embeddings")
+    if snapshot is None:
+        for name in ("docs", "hkm", "manifests"):
+            path = generation_root / name
+            if path.exists():
+                shutil.rmtree(path)
+        for name in ("docs", "hkm", "manifests"):
+            (generation_root / name).mkdir(parents=True, exist_ok=True)
+        for name in ("docs", "hkm", "manifests"):
+            _replace_generation_alias(public_index_root, generation_root, name)
+    else:
+        (generation_root / "docs").mkdir(parents=True, exist_ok=True)
+        (generation_root / "hkm").mkdir(parents=True, exist_ok=True)
+        (generation_root / "manifests").mkdir(parents=True, exist_ok=True)
+    set_jobs_root(jobs_root)
+
+    docs_root_out = os.path.join(index_root, "docs")
+    hkm_root = os.path.join(index_root, "hkm")
+    os.makedirs(docs_root_out, exist_ok=True)
+    os.makedirs(hkm_root, exist_ok=True)
+    os.makedirs(manifest_dir, exist_ok=True)
+    if snapshot is not None:
         new_count = len(work_files) - changed_count
         Path(manifest_dir, "ingest_summary.json").write_text(json.dumps({
             "scanned": len(all_files) + len(skipped_files),
@@ -553,22 +735,6 @@ def build_search_index(
             "skipped_files": skipped_files,
             "failed_files": [],
         }, indent=2), encoding="utf-8")
-        if not work_files and not deleted_count:
-            return run_job("tlux.search.hkm.builder.incremental.noop")
-
-    docs_root_out = os.path.join(index_root, "docs")
-    hkm_root = os.path.join(index_root, "hkm")
-    if snapshot is None:
-        for name in ("docs", "hkm", "manifests"):
-            path = Path(index_root) / name
-            if path.exists():
-                shutil.rmtree(path)
-        os.makedirs(docs_root_out, exist_ok=True)
-        os.makedirs(hkm_root, exist_ok=True)
-        os.makedirs(manifest_dir, exist_ok=True)
-    else:
-        os.makedirs(docs_root_out, exist_ok=True)
-        os.makedirs(hkm_root, exist_ok=True)
     Path(index_root, "index.json").write_text(json.dumps({
         "version": 1,
         "source_root": docs_dir,
@@ -585,6 +751,8 @@ def build_search_index(
             "n_gram_fp_rate": n_gram_fp_rate,
             "seed": seed,
             "build_id": build_id,
+            "staging_copy_bytes": staging_copy_bytes,
+            "staging_copy_seconds": staging_copy_seconds,
         },
         "max_n_gram": max_n_gram,
         "n_gram_fp_rate": n_gram_fp_rate,
@@ -656,6 +824,7 @@ def build_search_index(
             "tlux.search.hkm.builder.incremental.finalize_incremental",
             index_root,
             str(plan_path),
+            publish_root=str(public_index_root),
             max_cluster_count=max_k,
             leaf_embedding_limit=leaf_embedding_limit,
             leaf_doc_limit=leaf_doc_limit,
@@ -681,13 +850,14 @@ def build_search_index(
         n_gram_fp_rate=n_gram_fp_rate,
         seed=seed,
         fs_root=fs_root,
-        max_depth=3,
+        max_depth=0,
         depth=0,
         dependencies=[consolidate_job],
     )
     return run_job(
         "tlux.search.hkm.builder.incremental.write_source_snapshot",
         index_root,
+        publish_root=str(public_index_root),
         dependencies=[build_job],
     )
 
@@ -719,20 +889,18 @@ def build_search_index_from_documents(
     chunk_size_limit: int = 8 * 2**20,
     max_tokens: int | None = 200_000,
 ) -> Job:
-    index_root_path = Path(index_root).resolve()
-    index_root = str(index_root_path)
-    fs_root = str(Path(fs_root).resolve()) if fs_root is not None else index_root
-    jobs_root = str(Path(jobs_root).resolve()) if jobs_root is not None else str(index_root_path / ".hkm_jobs")
+    public_index_root = Path(index_root).expanduser().absolute()
+    public_index_root.mkdir(parents=True, exist_ok=True)
+    build_id = _utc_now()
+    index_root_path = _new_generation_root(public_index_root, build_id)
+    index_root = str(index_root_path.resolve())
+    fs_root = str(Path(fs_root).resolve()) if fs_root is not None else str(public_index_root)
+    jobs_root = str(Path(jobs_root).resolve()) if jobs_root is not None else str(public_index_root / ".hkm_jobs")
     if not isinstance(num_workers, int) or num_workers <= 0:
         raise ValueError("num_workers must be a positive integer")
     schema_value, parsed_schema = _parse_metadata_schema_value(metadata_schema)
-    build_id = _utc_now()
     backend_name = get_backend().name
 
-    for name in ("docs", "hkm", "manifests"):
-        path = index_root_path / name
-        if path.exists():
-            shutil.rmtree(path)
     (index_root_path / "docs" / "worker_0000").mkdir(parents=True, exist_ok=True)
     (index_root_path / "hkm").mkdir(parents=True, exist_ok=True)
     (index_root_path / "manifests").mkdir(parents=True, exist_ok=True)
@@ -740,7 +908,7 @@ def build_search_index_from_documents(
 
     Path(index_root, "index.json").write_text(json.dumps({
         "version": 1,
-        "source_root": index_root,
+        "source_root": str(public_index_root),
         "jobs_root": jobs_root,
         "embedder_backend": backend_name,
         "metadata_schema": schema_value,
@@ -754,6 +922,8 @@ def build_search_index_from_documents(
             "n_gram_fp_rate": n_gram_fp_rate,
             "seed": seed,
             "build_id": build_id,
+            "staging_copy_bytes": 0,
+            "staging_copy_seconds": 0.0,
         },
         "max_n_gram": max_n_gram,
         "n_gram_fp_rate": n_gram_fp_rate,
@@ -806,13 +976,16 @@ def build_search_index_from_documents(
         n_gram_fp_rate=n_gram_fp_rate,
         seed=seed,
         fs_root=fs_root,
-        max_depth=3,
+        max_depth=0,
         depth=0,
     )
     drain_jobs(FileSystem(root=jobs_root), max_workers=num_workers)
     root_job.reload()
     if root_job.status != "SUCCEEDED":
         raise RuntimeError(root_job.status_reason or root_job.stderr or "HKM build failed")
+    from .incremental import write_source_snapshot
+
+    write_source_snapshot(index_root, publish_root=str(public_index_root))
     return root_job
 
 

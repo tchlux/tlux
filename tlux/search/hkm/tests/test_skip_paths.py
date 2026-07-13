@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tlux.search.hkm import Searcher, build_search_index, drain_jobs
 from tlux.search.hkm.fs import FileSystem
 
@@ -216,3 +218,12 @@ def test_all_worker_skipped_documents_fail_root_build(tmp_path, monkeypatch):
     assert summary["planned"] == 1
     assert summary["indexed"] == 0
     assert summary["skip_reasons"]["max_tokens"] == 1
+
+
+def test_non_positive_file_limit_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "one.txt").write_text("1", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_file_bytes must be positive"):
+        build_search_index(str(docs), str(tmp_path / "idx"), 1, max_file_bytes=0)

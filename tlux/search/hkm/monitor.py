@@ -192,11 +192,32 @@ def gpu_util_percent() -> float | None:
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-prev_cpu: Optional[Tuple[float, float]] = None  # (proc_time, wall_time)
+prev_cpu: Dict[int, Tuple[float, float]] = {}
+
+
+# Parse one macOS ps row into bytes and CPU percent.
+#
+# Arguments:
+#   output (str): Raw `ps -o rss=,pcpu=` output.
+#
+# Returns:
+#   (Tuple[int, float]): RSS bytes and CPU percent.
+#
+def _parse_ps_usage(output: str) -> Tuple[int, float]:
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        try:
+            return int(float(fields[0]) * 1024), float(fields[1])
+        except ValueError:
+            continue
+    return 0, 0.0
 
 # Return {'rss','cpu_percent','gpu_percent'} for the hottest PID.
 def proc_usage(pids: list[int]) -> Dict[str, Any]:
@@ -213,13 +234,13 @@ def proc_usage(pids: list[int]) -> Dict[str, Any]:
             clk = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
             proc_time = (ut + st) / clk
             wall = time.time()
-            global prev_cpu
-            if prev_cpu is not None:
-                dt_cpu = proc_time - prev_cpu[0]
-                dt_wall = wall - prev_cpu[1]
+            previous = prev_cpu.get(pid)
+            if previous is not None:
+                dt_cpu = proc_time - previous[0]
+                dt_wall = wall - previous[1]
                 if dt_wall > 0:
                     cpu_pct = 100 * dt_cpu / dt_wall
-            prev_cpu = (proc_time, wall)
+            prev_cpu[pid] = (proc_time, wall)
             with status_path.open() as f:
                 for line in f:
                     if line.startswith("VmRSS:"):
@@ -227,16 +248,14 @@ def proc_usage(pids: list[int]) -> Dict[str, Any]:
                         break
         else:
             try:
-                out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True)
-                rss_kb = int(out.strip() or 0)
-                rss = rss_kb * 1024
-            except Exception:
-                rss = 0
-            try:
-                out = subprocess.check_output(["ps", "-o", "%cpu=", "-p", str(pid)], text=True)
-                cpu_pct = float(out.strip() or 0.0)
-            except Exception:
-                cpu_pct = 0.0
+                out = subprocess.check_output(
+                    ["ps", "-p", str(pid), "-o", "rss=,pcpu="],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+                rss, cpu_pct = _parse_ps_usage(out)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                rss, cpu_pct = 0, 0.0
         gpu_pct = None
         if os.environ.get("HKM_ENABLE_GPU_SAMPLER") == "1":
             try:

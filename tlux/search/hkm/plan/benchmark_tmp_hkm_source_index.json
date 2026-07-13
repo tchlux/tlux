@@ -1,0 +1,849 @@
+{
+  "index_root": "/Users/thomaslux/Git/tlux/tlux/search/hkm/tmp_hkm_source_index",
+  "backend": "drama",
+  "python": "3.12.12",
+  "platform": "macOS-26.5.2-arm64-arm-64bit",
+  "documents": 76,
+  "embedding_windows": 6615,
+  "embedding_dimension": 768,
+  "source_bytes": 2563196370,
+  "canonical_index_bytes": 109715954,
+  "storage_components": {
+    "metadata_and_manifests": 4823614,
+    "token_sketches": 25554008,
+    "centroids": 49408,
+    "previews": 32431616,
+    "tokens": 717772,
+    "embeddings": 46139536
+  },
+  "storage_ablations": {
+    "float16": 86769906,
+    "int8": 75296882
+  },
+  "embedding_cache_bytes": 0,
+  "bytes_per_window": 16585.934089191232,
+  "bytes_per_source_byte": 0.04280434978924381,
+  "top_k": 10,
+  "probe_count": 0,
+  "mean_work_fraction": 1.0,
+  "queries": [
+    {
+      "query": "0 1 2 3",
+      "recall_at_k": 1.0,
+      "window_recall_at_k": 1.0,
+      "quantized_recall_at_k": {
+        "float16": 1.0,
+        "int8": 1.0
+      },
+      "window_ablation": {
+        "1": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "2": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "9": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "10": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "11": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "13": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "17": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "18": {
+          "recall_without_size": 1.0,
+          "windows_removed": 2
+        },
+        "32": {
+          "recall_without_size": 0.1,
+          "windows_removed": 4990
+        },
+        "128": {
+          "recall_without_size": 0.9,
+          "windows_removed": 1217
+        },
+        "512": {
+          "recall_without_size": 1.0,
+          "windows_removed": 279
+        },
+        "1024": {
+          "recall_without_size": 1.0,
+          "windows_removed": 120
+        }
+      },
+      "overlap_ablation": {
+        "1": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "2": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "9": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "10": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "11": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "13": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "17": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "18": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "32": {
+          "recall_after_dropping_alternate_windows": 0.6,
+          "windows_removed": 2479,
+          "method": "drop alternate windows within each document and size"
+        },
+        "128": {
+          "recall_after_dropping_alternate_windows": 0.9,
+          "windows_removed": 596,
+          "method": "drop alternate windows within each document and size"
+        },
+        "512": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 132,
+          "method": "drop alternate windows within each document and size"
+        },
+        "1024": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 55,
+          "method": "drop alternate windows within each document and size"
+        }
+      },
+      "exact_work_windows": 6615,
+      "hkm_work_windows": 6615,
+      "hkm_work_fraction": 1.0,
+      "first_traversal_ms": 52.0844999991823,
+      "warm_traversal_ms": {
+        "min": 19.265749997430248,
+        "median": 19.59593749961641,
+        "p95": 19.926125001802575,
+        "p99": 19.926125001802575,
+        "max": 19.926125001802575
+      },
+      "exact_keys": [
+        [
+          125,
+          144,
+          176
+        ],
+        [
+          119,
+          672,
+          704
+        ],
+        [
+          83,
+          176,
+          208
+        ],
+        [
+          2,
+          128,
+          160
+        ],
+        [
+          10,
+          80,
+          112
+        ],
+        [
+          115,
+          11584,
+          11616
+        ],
+        [
+          78,
+          576,
+          704
+        ],
+        [
+          1,
+          1712,
+          1744
+        ],
+        [
+          3,
+          1408,
+          1440
+        ],
+        [
+          40,
+          1984,
+          2016
+        ]
+      ],
+      "hkm_keys": [
+        [
+          125,
+          144,
+          176
+        ],
+        [
+          119,
+          672,
+          704
+        ],
+        [
+          83,
+          176,
+          208
+        ],
+        [
+          2,
+          128,
+          160
+        ],
+        [
+          10,
+          80,
+          112
+        ],
+        [
+          115,
+          11584,
+          11616
+        ],
+        [
+          78,
+          576,
+          704
+        ],
+        [
+          1,
+          1712,
+          1744
+        ],
+        [
+          3,
+          1408,
+          1440
+        ],
+        [
+          40,
+          1984,
+          2016
+        ]
+      ]
+    },
+    {
+      "query": "job scheduler",
+      "recall_at_k": 1.0,
+      "window_recall_at_k": 1.0,
+      "quantized_recall_at_k": {
+        "float16": 1.0,
+        "int8": 1.0
+      },
+      "window_ablation": {
+        "1": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "2": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "9": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "10": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "11": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "13": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "17": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "18": {
+          "recall_without_size": 1.0,
+          "windows_removed": 2
+        },
+        "32": {
+          "recall_without_size": 0.1,
+          "windows_removed": 4990
+        },
+        "128": {
+          "recall_without_size": 0.9,
+          "windows_removed": 1217
+        },
+        "512": {
+          "recall_without_size": 1.0,
+          "windows_removed": 279
+        },
+        "1024": {
+          "recall_without_size": 1.0,
+          "windows_removed": 120
+        }
+      },
+      "overlap_ablation": {
+        "1": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "2": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "9": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "10": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "11": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "13": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "17": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "18": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "32": {
+          "recall_after_dropping_alternate_windows": 0.4,
+          "windows_removed": 2479,
+          "method": "drop alternate windows within each document and size"
+        },
+        "128": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 596,
+          "method": "drop alternate windows within each document and size"
+        },
+        "512": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 132,
+          "method": "drop alternate windows within each document and size"
+        },
+        "1024": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 55,
+          "method": "drop alternate windows within each document and size"
+        }
+      },
+      "exact_work_windows": 6615,
+      "hkm_work_windows": 6615,
+      "hkm_work_fraction": 1.0,
+      "first_traversal_ms": 18.15300000089337,
+      "warm_traversal_ms": {
+        "min": 19.192208001186373,
+        "median": 19.212791501558968,
+        "p95": 19.233375001931563,
+        "p99": 19.233375001931563,
+        "max": 19.233375001931563
+      },
+      "exact_keys": [
+        [
+          39,
+          0,
+          32
+        ],
+        [
+          4,
+          1088,
+          1120
+        ],
+        [
+          79,
+          624,
+          656
+        ],
+        [
+          8,
+          1072,
+          1104
+        ],
+        [
+          49,
+          16,
+          48
+        ],
+        [
+          115,
+          1520,
+          1552
+        ],
+        [
+          87,
+          80,
+          112
+        ],
+        [
+          129,
+          64,
+          96
+        ],
+        [
+          48,
+          80,
+          112
+        ],
+        [
+          127,
+          0,
+          128
+        ]
+      ],
+      "hkm_keys": [
+        [
+          39,
+          0,
+          32
+        ],
+        [
+          4,
+          1088,
+          1120
+        ],
+        [
+          79,
+          624,
+          656
+        ],
+        [
+          8,
+          1072,
+          1104
+        ],
+        [
+          49,
+          16,
+          48
+        ],
+        [
+          115,
+          1520,
+          1552
+        ],
+        [
+          87,
+          80,
+          112
+        ],
+        [
+          129,
+          64,
+          96
+        ],
+        [
+          48,
+          80,
+          112
+        ],
+        [
+          127,
+          0,
+          128
+        ]
+      ]
+    },
+    {
+      "query": "source index",
+      "recall_at_k": 1.0,
+      "window_recall_at_k": 1.0,
+      "quantized_recall_at_k": {
+        "float16": 1.0,
+        "int8": 1.0
+      },
+      "window_ablation": {
+        "1": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "2": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "9": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "10": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "11": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "13": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "17": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1
+        },
+        "18": {
+          "recall_without_size": 1.0,
+          "windows_removed": 2
+        },
+        "32": {
+          "recall_without_size": 0.0,
+          "windows_removed": 4990
+        },
+        "128": {
+          "recall_without_size": 1.0,
+          "windows_removed": 1217
+        },
+        "512": {
+          "recall_without_size": 1.0,
+          "windows_removed": 279
+        },
+        "1024": {
+          "recall_without_size": 1.0,
+          "windows_removed": 120
+        }
+      },
+      "overlap_ablation": {
+        "1": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "2": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "9": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "10": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "11": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "13": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "17": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "18": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 0,
+          "method": "drop alternate windows within each document and size"
+        },
+        "32": {
+          "recall_after_dropping_alternate_windows": 0.7,
+          "windows_removed": 2479,
+          "method": "drop alternate windows within each document and size"
+        },
+        "128": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 596,
+          "method": "drop alternate windows within each document and size"
+        },
+        "512": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 132,
+          "method": "drop alternate windows within each document and size"
+        },
+        "1024": {
+          "recall_after_dropping_alternate_windows": 1.0,
+          "windows_removed": 55,
+          "method": "drop alternate windows within each document and size"
+        }
+      },
+      "exact_work_windows": 6615,
+      "hkm_work_windows": 6615,
+      "hkm_work_fraction": 1.0,
+      "first_traversal_ms": 17.50591699965298,
+      "warm_traversal_ms": {
+        "min": 19.330000002810266,
+        "median": 19.342291499924613,
+        "p95": 19.35458299703896,
+        "p99": 19.35458299703896,
+        "max": 19.35458299703896
+      },
+      "exact_keys": [
+        [
+          116,
+          592,
+          624
+        ],
+        [
+          115,
+          2656,
+          2688
+        ],
+        [
+          2,
+          2016,
+          2048
+        ],
+        [
+          118,
+          1728,
+          1760
+        ],
+        [
+          5,
+          1568,
+          1600
+        ],
+        [
+          128,
+          144,
+          176
+        ],
+        [
+          117,
+          2496,
+          2528
+        ],
+        [
+          77,
+          2832,
+          2864
+        ],
+        [
+          85,
+          64,
+          96
+        ],
+        [
+          125,
+          544,
+          576
+        ]
+      ],
+      "hkm_keys": [
+        [
+          116,
+          592,
+          624
+        ],
+        [
+          115,
+          2656,
+          2688
+        ],
+        [
+          2,
+          2016,
+          2048
+        ],
+        [
+          118,
+          1728,
+          1760
+        ],
+        [
+          5,
+          1568,
+          1600
+        ],
+        [
+          128,
+          144,
+          176
+        ],
+        [
+          117,
+          2496,
+          2528
+        ],
+        [
+          77,
+          2832,
+          2864
+        ],
+        [
+          85,
+          64,
+          96
+        ],
+        [
+          125,
+          544,
+          576
+        ]
+      ]
+    }
+  ],
+  "exact_checks": [
+    {
+      "query": "job scheduler",
+      "expected_documents": [
+        8
+      ],
+      "actual_documents": [
+        8
+      ],
+      "exact": true
+    }
+  ],
+  "filter_check": null,
+  "build": {
+    "stages": {
+      "default_worker": {
+        "count": 4,
+        "duration_seconds": 453.6012418270111,
+        "max_seconds": 131.28475308418274
+      },
+      "run_consolidate": {
+        "count": 1,
+        "duration_seconds": 0.357133150100708,
+        "max_seconds": 0.357133150100708
+      },
+      "build_cluster_index": {
+        "count": 17,
+        "duration_seconds": 11.74055290222168,
+        "max_seconds": 2.6726999282836914
+      },
+      "route_chunk": {
+        "count": 44,
+        "duration_seconds": 13.162267208099365,
+        "max_seconds": 0.9707419872283936
+      },
+      "finalize_node": {
+        "count": 17,
+        "duration_seconds": 5.505042552947998,
+        "max_seconds": 1.8071470260620117
+      }
+    },
+    "ingest_summary": {},
+    "failures": []
+  },
+  "synthetic_scale": [
+    {
+      "vectors": 1000,
+      "dimension": 8,
+      "bytes": 32000,
+      "exact_scan_ms": 0.08195799819077365,
+      "measured": true
+    },
+    {
+      "vectors": 10000,
+      "dimension": 8,
+      "bytes": 320000,
+      "exact_scan_ms": 0.15187499957391992,
+      "measured": true
+    },
+    {
+      "vectors": 100000,
+      "dimension": 8,
+      "bytes": 3200000,
+      "exact_scan_ms": 2.039915998466313,
+      "measured": true
+    }
+  ],
+  "scaling": [
+    {
+      "windows": 1000,
+      "estimated_index_bytes": 16585934,
+      "estimated_index_gib": 0.01544685483834821,
+      "estimated_candidate_windows": 1000,
+      "estimated_tree_levels": 1,
+      "basis": "linear observed bytes/window extrapolation"
+    },
+    {
+      "windows": 10000,
+      "estimated_index_bytes": 165859340,
+      "estimated_index_gib": 0.1544685483834821,
+      "estimated_candidate_windows": 10000,
+      "estimated_tree_levels": 2,
+      "basis": "linear observed bytes/window extrapolation"
+    },
+    {
+      "windows": 100000,
+      "estimated_index_bytes": 1658593408,
+      "estimated_index_gib": 1.544685483834821,
+      "estimated_candidate_windows": 100000,
+      "estimated_tree_levels": 3,
+      "basis": "linear observed bytes/window extrapolation"
+    },
+    {
+      "windows": 1000000,
+      "estimated_index_bytes": 16585934089,
+      "estimated_index_gib": 15.44685483834821,
+      "estimated_candidate_windows": 1000000,
+      "estimated_tree_levels": 4,
+      "basis": "linear observed bytes/window extrapolation"
+    },
+    {
+      "windows": 1000000000,
+      "estimated_index_bytes": 16585934089191,
+      "estimated_index_gib": 15446.85483834821,
+      "estimated_candidate_windows": 1000000000,
+      "estimated_tree_levels": 7,
+      "basis": "linear observed bytes/window extrapolation"
+    }
+  ],
+  "scaling_note": "Scale rows are extrapolations from observed bytes/window; they are not 1B-document measurements."
+}
