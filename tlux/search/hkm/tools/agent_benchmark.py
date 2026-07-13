@@ -228,21 +228,37 @@ def _target_rank(result: Any, doc_id: int) -> int | None:
 
 
 # Return lower-case evidence text for a hit, including its canonical source file.
-def _hit_evidence_text(hit: Any, searcher: Searcher) -> str:
+def _hit_evidence_text(
+    hit: Any,
+    searcher: Searcher,
+    source_cache: Dict[tuple[str, int, int], str] | None = None,
+) -> str:
     text = f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}"
     if hit.document.source_path:
         source = Path(searcher.source_root) / hit.document.source_path
         if source.exists():
-            raw = source.read_bytes()
             start = int(getattr(hit.document, "byte_start", 0))
-            end = int(getattr(hit.document, "byte_end", 0)) or len(raw)
-            text += " " + raw[start:end].decode("utf-8", errors="ignore")
+            end = int(getattr(hit.document, "byte_end", 0)) or source.stat().st_size
+            key = (str(source), start, end)
+            if source_cache is not None and key in source_cache:
+                decoded = source_cache[key]
+            else:
+                raw = source.read_bytes()
+                decoded = raw[start:end].decode("utf-8", errors="ignore")
+                if source_cache is not None:
+                    source_cache[key] = decoded
+            text += " " + decoded
     return text.lower()
 
 
 # Return the fraction of sampled evidence terms present in a hit's source.
-def _evidence_coverage(hit: Any, excerpt: str, searcher: Searcher) -> float:
-    text = _hit_evidence_text(hit, searcher)
+def _evidence_coverage(
+    hit: Any,
+    excerpt: str,
+    searcher: Searcher,
+    source_cache: Dict[tuple[str, int, int], str] | None = None,
+) -> float:
+    text = _hit_evidence_text(hit, searcher, source_cache)
     normalized_excerpt = " ".join(excerpt.split()).lower()
     normalized_text = " ".join(text.split())
     if normalized_excerpt and normalized_excerpt in normalized_text:
@@ -254,21 +270,31 @@ def _evidence_coverage(hit: Any, excerpt: str, searcher: Searcher) -> float:
 
 
 # Return the first result with substantial raw-evidence agreement.
-def _evidence_rank(result: Any, excerpt: str, searcher: Searcher) -> int | None:
+def _evidence_rank(
+    result: Any,
+    excerpt: str,
+    searcher: Searcher,
+    source_cache: Dict[tuple[str, int, int], str] | None = None,
+) -> int | None:
     for rank, hit in enumerate(result.docs, 1):
-        if _evidence_coverage(hit, excerpt, searcher) >= 0.9:
+        if _evidence_coverage(hit, excerpt, searcher, source_cache) >= 0.9:
             return rank
     return None
 
 
 # Re-rank returned snippets against the raw evidence held by the agent.
-def _rerank_with_evidence(result: Any, excerpt: str, searcher: Searcher | None = None) -> Any:
+def _rerank_with_evidence(
+    result: Any,
+    excerpt: str,
+    searcher: Searcher | None = None,
+    source_cache: Dict[tuple[str, int, int], str] | None = None,
+) -> Any:
     terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower()))
     if not terms:
         return result
 
     def rank_key(hit: Any) -> tuple[float, float, float, int]:
-        text = _hit_evidence_text(hit, searcher) if searcher is not None else (
+        text = _hit_evidence_text(hit, searcher, source_cache) if searcher is not None else (
             f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}".lower()
         )
         overlap = len(terms.intersection(re.findall(r"[A-Za-z0-9]+", text))) / len(terms)
@@ -342,6 +368,7 @@ def evaluate_agent(
         raise ValueError("probe counts must be non-negative")
     searcher = Searcher.from_index_root(index_root)
     sampled = sample_passages(searcher, samples, seed, max_tokens)
+    source_cache: Dict[tuple[str, int, int], str] = {}
     rows = []
     probe_rows: Dict[int, List[Dict[str, Any]]] = {probe: [] for probe in probe_counts}
     planner_errors = []
@@ -357,10 +384,12 @@ def evaluate_agent(
         first_rank = _target_rank(first, sample.doc_id)
         fallback_query = ""
         fallback_ms = 0.0
-        first_relevant_rank = _evidence_rank(first, sample.excerpt, searcher)
-        final = first if first_relevant_rank == 1 else _rerank_with_evidence(first, sample.excerpt, searcher)
+        first_relevant_rank = _evidence_rank(first, sample.excerpt, searcher, source_cache)
+        final = first if first_relevant_rank == 1 else _rerank_with_evidence(
+            first, sample.excerpt, searcher, source_cache
+        )
         final_rank = _target_rank(final, sample.doc_id)
-        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher)
+        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher, source_cache)
         if final_relevant_rank != 1:
             phrase_results = []
             for phrase in _fallback_queries(sample.excerpt):
@@ -369,15 +398,15 @@ def evaluate_agent(
                 phrase_results.append(fallback)
                 fallback_ms += elapsed
             fallback = _merge_results(phrase_results, top_k, sample.excerpt) if phrase_results else final
-            fallback = _rerank_with_evidence(fallback, sample.excerpt, searcher)
+            fallback = _rerank_with_evidence(fallback, sample.excerpt, searcher, source_cache)
             fallback.docs = fallback.docs[:top_k]
-            fallback_relevant_rank = _evidence_rank(fallback, sample.excerpt, searcher)
+            fallback_relevant_rank = _evidence_rank(fallback, sample.excerpt, searcher, source_cache)
             if fallback_relevant_rank is not None and (
                 final_relevant_rank is None or fallback_relevant_rank < final_relevant_rank
             ):
                 final = fallback
         final_rank = _target_rank(final, sample.doc_id)
-        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher)
+        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher, source_cache)
         rows.append({
             "sample_id": sample.sample_id,
             "doc_id": sample.doc_id,

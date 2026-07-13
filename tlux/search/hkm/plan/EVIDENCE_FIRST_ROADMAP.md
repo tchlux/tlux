@@ -110,7 +110,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Run a 50-passage Fourth Wing prose baseline: final evidence-assisted recall@10 and precision@1 are both 1.000; model first-pass precision@1 is 0.960.
 - [x] Run the harness with Gemma 4 E4B served by LM Studio's bundled llama.cpp 2.24 backend; 100 random Fourth Wing passages reached final target-doc and evidence relevance recall@10/precision@1 of 1.000, with 1% fallback.
 - [x] Evaluate 174 non-empty random passages across prose, code, and metadata-heavy corpora: 100 Fourth Wing prose passages plus 74 repository passages. The repository final evidence relevance recall@10/precision@1 is 1.000/1.000; exact document identity is 0.919/0.784 because several files contain identical evidence.
-- [x] Remove target-document knowledge from fallback decisions, disable model reasoning, shorten the planner prompt, and cap query output at 24 tokens. The 74-passage repository run measured about 1.1 s median planning and 162 ms median exhaustive search with a 9.5% fallback rate.
+- [x] Remove target-document knowledge from fallback decisions, disable model reasoning, shorten the planner prompt, cap query output at 24 tokens, and cache source slices during evidence ranking. The 74-passage repository run measured about 1.1 s median planning and 162 ms median exhaustive search with a 9.5% fallback rate.
 - [ ] Minimize fallback work and probe/embedding latency only after the real-model recall gate remains at 1.000.
 
 Evidence relevance is content-based: a returned source must contain the sampled
