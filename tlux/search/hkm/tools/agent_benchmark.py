@@ -89,7 +89,8 @@ def _keyword_query(excerpt: str, limit: int = 8) -> str:
             item[0],
         ),
     )
-    return " ".join(word for _, word in ranked[:limit] or list(enumerate(words[:limit])))
+    selected = ranked[:limit] or list(enumerate(words[:limit]))
+    return " ".join(word for _, word in selected) or _phrase_query(excerpt, limit)
 
 
 # Parse a model response into one bounded search query.
@@ -108,7 +109,7 @@ def parse_query(response: str) -> str:
             except json.JSONDecodeError:
                 pass
     text = " ".join(text.split())
-    if not text:
+    if not text or text.lower().startswith("thinking process:"):
         raise ValueError("query planner returned an empty query")
     return text[:256]
 
@@ -144,22 +145,22 @@ class LMStudioQueryGenerator:
 
     def generate(self, excerpt: str) -> str:
         prompt = (
-            "You plan one search query for a retrieval tool. Read the evidence passage and "
-            "return JSON only as {\"query\": \"...\"}. Use 3-8 concrete words that would "
-            "retrieve this passage. Do not answer the passage or mention these instructions.\n\n"
-            f"Evidence passage:\n{excerpt}"
+            "Extract a search query. Return only {\"query\":\"...\"}; copy 3-8 exact "
+            "words from evidence, preferring rare names, identifiers, or numbers. No explanation.\n"
+            f"Evidence:\n{excerpt}"
         )
         response = self._request("chat/completions", {
             "model": self._model_name(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 64,
+            "max_tokens": 24,
             "stream": False,
         })
         choices = response.get("choices", [])
         if not choices:
             raise RuntimeError("LM Studio returned no chat completion choices")
-        content = choices[0].get("message", {}).get("content", "")
+        message = choices[0].get("message", {})
+        content = message.get("content") or message.get("reasoning_content", "")
         return parse_query(str(content))
 
 
@@ -193,6 +194,8 @@ def sample_passages(searcher: Searcher, count: int, seed: int, max_tokens: int =
             raw = source_file.read_bytes()
             raw = raw[document.byte_start:document.byte_end or len(raw)]
             raw_text = raw.decode("utf-8", errors="ignore")
+            if not raw_text.strip():
+                continue
         words = raw_text.split()
         token_start = 0
         token_end = int(tokens.shape[0])
@@ -224,6 +227,40 @@ def _target_rank(result: Any, doc_id: int) -> int | None:
     return None
 
 
+# Return lower-case evidence text for a hit, including its canonical source file.
+def _hit_evidence_text(hit: Any, searcher: Searcher) -> str:
+    text = f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}"
+    if hit.document.source_path:
+        source = Path(searcher.source_root) / hit.document.source_path
+        if source.exists():
+            raw = source.read_bytes()
+            start = int(getattr(hit.document, "byte_start", 0))
+            end = int(getattr(hit.document, "byte_end", 0)) or len(raw)
+            text += " " + raw[start:end].decode("utf-8", errors="ignore")
+    return text.lower()
+
+
+# Return the fraction of sampled evidence terms present in a hit's source.
+def _evidence_coverage(hit: Any, excerpt: str, searcher: Searcher) -> float:
+    text = _hit_evidence_text(hit, searcher)
+    normalized_excerpt = " ".join(excerpt.split()).lower()
+    normalized_text = " ".join(text.split())
+    if normalized_excerpt and normalized_excerpt in normalized_text:
+        return 1.0
+    terms = set(re.findall(r"[A-Za-z0-9]+", normalized_excerpt))
+    if len(terms) < 2:
+        return 0.0
+    return len(terms.intersection(re.findall(r"[A-Za-z0-9]+", normalized_text))) / len(terms)
+
+
+# Return the first result with substantial raw-evidence agreement.
+def _evidence_rank(result: Any, excerpt: str, searcher: Searcher) -> int | None:
+    for rank, hit in enumerate(result.docs, 1):
+        if _evidence_coverage(hit, excerpt, searcher) >= 0.9:
+            return rank
+    return None
+
+
 # Re-rank returned snippets against the raw evidence held by the agent.
 def _rerank_with_evidence(result: Any, excerpt: str, searcher: Searcher | None = None) -> Any:
     terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower()))
@@ -231,13 +268,9 @@ def _rerank_with_evidence(result: Any, excerpt: str, searcher: Searcher | None =
         return result
 
     def rank_key(hit: Any) -> tuple[float, float, float, int]:
-        text = f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}".lower()
-        if searcher is not None and hit.document.source_path:
-            source = Path(searcher.source_root) / hit.document.source_path
-            if source.exists():
-                raw = source.read_bytes()
-                raw = raw[hit.document.byte_start:hit.document.byte_end or len(raw)]
-                text += " " + raw.decode("utf-8", errors="ignore").lower()
+        text = _hit_evidence_text(hit, searcher) if searcher is not None else (
+            f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}".lower()
+        )
         overlap = len(terms.intersection(re.findall(r"[A-Za-z0-9]+", text))) / len(terms)
         return (-overlap, -float(hit.score), -float(getattr(hit, "token_score", 0.0)), int(hit.doc_id))
 
@@ -259,9 +292,10 @@ def _merge_results(results: List[Any], top_k: int, excerpt: str = "") -> Any:
     def rank_key(hit: Any) -> tuple[float, float, str, int, tuple[int, int]]:
         text = f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}".lower()
         overlap = len(terms.intersection(re.findall(r"[A-Za-z0-9]+", text))) / len(terms) if terms else 0.0
-        return (-float(hit.score), -overlap, hit.source_path, hit.doc_id, hit.span)
+        return (-overlap, -float(hit.score), hit.source_path, hit.doc_id, hit.span)
 
-    base.docs = sorted(hits.values(), key=rank_key)[:top_k]
+    # Keep one full page per fallback query until evidence ranking can inspect it.
+    base.docs = sorted(hits.values(), key=rank_key)[:max(top_k * len(results), top_k)]
     return base
 
 
@@ -323,9 +357,11 @@ def evaluate_agent(
         first_rank = _target_rank(first, sample.doc_id)
         fallback_query = ""
         fallback_ms = 0.0
-        final = first if first_rank == 1 else _rerank_with_evidence(first, sample.excerpt, searcher)
+        first_relevant_rank = _evidence_rank(first, sample.excerpt, searcher)
+        final = first if first_relevant_rank == 1 else _rerank_with_evidence(first, sample.excerpt, searcher)
         final_rank = _target_rank(final, sample.doc_id)
-        if final_rank != 1:
+        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher)
+        if final_relevant_rank != 1:
             phrase_results = []
             for phrase in _fallback_queries(sample.excerpt):
                 fallback_query = phrase
@@ -334,10 +370,14 @@ def evaluate_agent(
                 fallback_ms += elapsed
             fallback = _merge_results(phrase_results, top_k, sample.excerpt) if phrase_results else final
             fallback = _rerank_with_evidence(fallback, sample.excerpt, searcher)
-            fallback_rank = _target_rank(fallback, sample.doc_id)
-            if fallback_rank is not None and (final_rank is None or fallback_rank < final_rank):
+            fallback.docs = fallback.docs[:top_k]
+            fallback_relevant_rank = _evidence_rank(fallback, sample.excerpt, searcher)
+            if fallback_relevant_rank is not None and (
+                final_relevant_rank is None or fallback_relevant_rank < final_relevant_rank
+            ):
                 final = fallback
         final_rank = _target_rank(final, sample.doc_id)
+        final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher)
         rows.append({
             "sample_id": sample.sample_id,
             "doc_id": sample.doc_id,
@@ -346,6 +386,8 @@ def evaluate_agent(
             "query": query,
             "first_rank": first_rank,
             "final_rank": final_rank,
+            "first_relevant_rank": first_relevant_rank,
+            "final_relevant_rank": final_relevant_rank,
             "fallback_query": fallback_query,
             "planner_ms": planner_ms,
             "first_search_ms": first_ms,
@@ -369,12 +411,15 @@ def evaluate_agent(
     return {
         "index_root": str(Path(index_root).expanduser().absolute()),
         "generator": generator.name,
+        "model": getattr(generator, "model", None),
         "samples": len(rows),
         "seed": seed,
         "top_k": top_k,
         "planner_errors": planner_errors,
         "first_pass": _metrics(rows, "first_rank"),
         "final": _metrics(rows, "final_rank"),
+        "first_pass_relevance": _metrics(rows, "first_relevant_rank"),
+        "final_relevance": _metrics(rows, "final_relevant_rank"),
         "fallback_rate": sum(bool(row["fallback_query"]) for row in rows) / len(rows) if rows else 0.0,
         "probe_curve": curve,
         "rows": rows,
@@ -385,13 +430,18 @@ def evaluate_agent(
 def render_report(report: Dict[str, Any]) -> str:
     first = report["first_pass"]
     final = report["final"]
+    first_relevance = report["first_pass_relevance"]
+    final_relevance = report["final_relevance"]
     lines = [
         "# HKM Agent Search Benchmark",
         "",
         f"- Generator: `{report['generator']}`",
+        f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k: {report['samples']} / {report['seed']} / {report['top_k']}",
-        f"- Model first-pass recall@k: `{first['recall_at_k']:.3f}`; precision@1: `{first['precision_at_1']:.3f}`; MRR: `{first['mrr']:.3f}`",
-        f"- Final evidence-assisted recall@k: `{final['recall_at_k']:.3f}`; precision@1: `{final['precision_at_1']:.3f}`; MRR: `{final['mrr']:.3f}`",
+        f"- Model first-pass target-doc recall@k: `{first['recall_at_k']:.3f}`; precision@1: `{first['precision_at_1']:.3f}`; MRR: `{first['mrr']:.3f}`",
+        f"- Model first-pass evidence relevance@k: `{first_relevance['recall_at_k']:.3f}`; precision@1: `{first_relevance['precision_at_1']:.3f}`; MRR: `{first_relevance['mrr']:.3f}`",
+        f"- Final target-doc recall@k: `{final['recall_at_k']:.3f}`; precision@1: `{final['precision_at_1']:.3f}`; MRR: `{final['mrr']:.3f}`",
+        f"- Final evidence relevance@k: `{final_relevance['recall_at_k']:.3f}`; precision@1: `{final_relevance['precision_at_1']:.3f}`; MRR: `{final_relevance['mrr']:.3f}`",
         f"- Fallback rate: `{report['fallback_rate']:.3f}`",
         "",
         "## Probe curve (model query only)",

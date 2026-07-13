@@ -292,11 +292,19 @@ searchable.
 
 `hkm-agent-benchmark` samples raw indexed passages, asks a local LM Studio
 OpenAI-compatible endpoint for queries, and reports model first-pass quality
-separately from evidence-assisted recall and precision. Use `--stub` for
-deterministic offline regression; probe counts are diagnostic until a real-model
-run proves a lower-work setting preserves recall. For example:
+separately from exact target-document and content-evidence relevance. Use
+`--stub` for deterministic offline regression; probe counts are diagnostic until
+a real-model run proves a lower-work setting preserves recall. For example:
 
     bin/hkm-agent-benchmark data/fourth_wing_hkm_index --samples 50 --stub
+
+The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
+desktop server is unavailable, its installed llama.cpp backend can serve the
+same GGUF directly:
+
+    runtime="$HOME/.cache/lm-studio/extensions/backends/llama.cpp-mac-arm64-apple-metal-advsimd-2.24.0"
+    model="$HOME/.cache/lm-studio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf"
+    DYLD_LIBRARY_PATH="$runtime" "$runtime/llama-server" -m "$model" --host 127.0.0.1 --port 1234 -c 4096 --n-predict 32 --reasoning off --jinja
 
 ## Forward-looking architecture
 
