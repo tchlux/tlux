@@ -101,6 +101,25 @@ long-running executor sample remains an environment-level verification item.
 - [x] Keep the first deployment embedded/private; defer service, auth, replication, and tenancy until a design partner requires them.
 - [x] Publish a benchmark report with hardware, corpus revisions, commands, raw results, and known limits.
 
+### F. Agentic retrieval quality — in progress
+
+- [x] Sample deterministic raw passages from active HKM documents and record the exact target document.
+- [x] Add `hkm-agent-benchmark` with an OpenAI-compatible LM Studio query planner, deterministic offline planner, evidence-aware reranking, and probe curves.
+- [x] Preserve exact-retrieval recall for active documents absent from searchable HKM leaves; these are now explicitly routed through a safe fallback path.
+- [x] Run a 20-passage repository-corpus baseline: final evidence-assisted recall@10 and precision@1 are both 1.000 with the deterministic planner.
+- [x] Run a 50-passage Fourth Wing prose baseline: final evidence-assisted recall@10 and precision@1 are both 1.000; model first-pass precision@1 is 0.960.
+- [ ] Run the same harness with a real LM Studio model and retain the model's first-pass metrics separately from tool-assisted metrics.
+- [ ] Evaluate at least 100 random passages across prose, code, and metadata-heavy corpora before declaring the agentic gate complete.
+- [ ] Minimize fallback work and probe/embedding latency only after the real-model recall gate remains at 1.000.
+
+The LM Studio application and multiple GGUF models are installed locally, but its
+server is not running in the current locked-Mac session; Computer Use cannot
+unlock the desktop, and `lms server start` waits for that service. The separate
+audio environment has `llama-cpp-python==0.3.9`, but it cannot load the newer
+Gemma 4 or GPT-OSS GGUF files. The harness therefore records deterministic
+results honestly and leaves the real-model gate open rather than treating the
+fallback as model evidence.
+
 ## Decisions
 
 - The first milestone is evidence and quality, not a hosted service.
@@ -122,3 +141,4 @@ long-running executor sample remains an environment-level verification item.
 - 2026-07-13: Measured incremental storage and verified `--full-rebuild` compacts stale append-only chunks while reusing cached embeddings; added a regression assertion that compacted canonical bytes do not exceed the incremental form.
 - 2026-07-13: Added filtered pagination/provenance checks (`query_id`, `index_build_id`), p50/p95/p99 timing output, overlap-removal ablations, `hkm-audit`/`hkm-inspect`, a clean local wheel/console-script package, and a checked-in source-index benchmark report. Atomic generation publication was initially documented as blocked pending a stable sidecar job-root design.
 - 2026-07-13: Replaced in-place publication with stable-root generations under `.hkm_builds/`; `.hkm_jobs` and source roots remain stable, audited generations publish through one public-manifest replacement, aliases are swapped afterward, and failed-build coverage proves the prior generation remains searchable. Incremental staging bytes and elapsed copy time are now part of build evidence.
+- 2026-07-13: Added `hkm-agent-benchmark` for raw-passage sampling, LM Studio-compatible query planning, deterministic offline regression, evidence-aware reranking, and probe curves. A 20-passage repository run reached 1.000 final recall@10 and precision@1 after repairing token-context variants and active documents omitted from HKM leaves; real LM Studio evaluation remains pending while the Mac is locked.

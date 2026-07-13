@@ -346,6 +346,7 @@ class Searcher:
     _doc_rows: Dict[int, np.void] = field(default_factory=dict, init=False, repr=False)
     _reader_cache: Dict[str, ChunkReader] = field(default_factory=dict, init=False, repr=False)
     _observer_cache: Dict[str, ValueObserver | None] = field(default_factory=dict, init=False, repr=False)
+    _unrouted_cache: set[int] | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_index_root(cls, index_root: str, fs: FileSystem | None = None) -> "Searcher":
@@ -385,6 +386,25 @@ class Searcher:
 
     def _doc_count(self) -> int:
         return int(self._load_doc_index().shape[0])
+
+    # Return active documents absent from every searchable HKM leaf.
+    def _unrouted_doc_ids(self) -> set[int]:
+        if self._unrouted_cache is not None:
+            return self._unrouted_cache
+        active = self._active_doc_ids()
+        routed: set[int] = set()
+        root = Path(self.generation_hkm_root or self.hkm_root)
+        for manifest_path in root.rglob("node.json"):
+            node_dir = manifest_path.parent
+            node = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not node.get("is_leaf", False):
+                continue
+            for chunk_root in node.get("chunk_roots", []):
+                for chunk_path in sorted((node_dir / chunk_root).rglob("*.hkmchunk")):
+                    reader = self._chunk_reader(str(chunk_path), [])
+                    routed.update(int(value) for value in reader.embed_index["document_id"])
+        self._unrouted_cache = active - routed
+        return self._unrouted_cache
 
     def _active_doc_ids(self) -> set[int]:
         self._load_doc_index()
@@ -1039,8 +1059,18 @@ class Searcher:
         target = _seq_to_bytes(token_sequence)
         hits: List[Hit] = []
         self._search_token_node(Path(self.generation_hkm_root or self.hkm_root), target, token_sequence, query_text, hits)
+        seen = {(hit.doc_id, hit.span) for hit in hits}
+        for doc_id in self._unrouted_doc_ids():
+            tokens, _ = self._doc_context(doc_id)
+            position = tokens.tobytes().find(target)
+            while position >= 0:
+                if position % 4 == 0:
+                    span = (position // 4, position // 4 + len(token_sequence))
+                    if (doc_id, span) not in seen:
+                        hits.append(self._hit(doc_id, 1.0, span, "token", query_text))
+                        seen.add((doc_id, span))
+                position = tokens.tobytes().find(target, position + 4)
         if self.append_only:
-            seen = {(hit.doc_id, hit.span) for hit in hits}
             for hit in self._scan_active_tokens(target, token_sequence, query_text):
                 key = (hit.doc_id, hit.span)
                 if key not in seen:
@@ -1058,8 +1088,18 @@ class Searcher:
     #   (list[Hit]): Exact phrase hits.
     #
     def _search_phrase_ast(self, phrase: str) -> List[Hit]:
-        tokens = self._backend().tokenize([phrase])[0]
-        hits = self._search_tokens(tokens, None, phrase)
+        backend = self._backend()
+        variants = [backend.tokenize([phrase])[0], backend.tokenize([" " + phrase])[0]]
+        hits: List[Hit] = []
+        seen = set()
+        for tokens in variants:
+            if not tokens:
+                continue
+            for hit in self._search_tokens(tokens, None, phrase):
+                key = (hit.doc_id, hit.span)
+                if key not in seen:
+                    hits.append(hit)
+                    seen.add(key)
         for hit in hits:
             hit.match_reasons = ["token", "phrase", "text_ast"]
             hit.token_score = 1.0
@@ -1204,14 +1244,20 @@ class Searcher:
     #   (list[Hit]): Lexically ranked passage hits.
     #
     def _search_lexical_text(self, query_text: str, top_k: int) -> List[Hit]:
-        query_tokens = self._backend().tokenize([query_text])[0]
-        if not query_tokens:
+        backend = self._backend()
+        query_variants = [backend.tokenize([query_text])[0], backend.tokenize([" " + query_text])[0]]
+        query_variants = [tokens for idx, tokens in enumerate(query_variants) if tokens and tokens not in query_variants[:idx]]
+        if not query_variants:
             return []
+        candidate_ids: set[int] = set()
+        for query_tokens in query_variants:
+            candidate_ids.update(self._indexed_token_candidates(query_tokens))
+        candidate_ids.update(self._unrouted_doc_ids())
         hits: List[Hit] = []
-        candidate_ids = self._indexed_token_candidates(query_tokens)
         for doc_id in sorted(candidate_ids):
             tokens, _ = self._doc_context(doc_id)
-            match = self._lexical_match(tokens, query_tokens)
+            matches = [self._lexical_match(tokens, query_tokens) for query_tokens in query_variants]
+            match = max((value for value in matches if value is not None), default=None, key=lambda value: value[0])
             if match is None:
                 continue
             score, span, exact = match

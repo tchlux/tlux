@@ -290,6 +290,14 @@ pointer. Compatibility aliases for `docs/`, `hkm/`, and `manifests/` are
 swapped after publication, so a failed build leaves the previous generation
 searchable.
 
+`hkm-agent-benchmark` samples raw indexed passages, asks a local LM Studio
+OpenAI-compatible endpoint for queries, and reports model first-pass quality
+separately from evidence-assisted recall and precision. Use `--stub` for
+deterministic offline regression; probe counts are diagnostic until a real-model
+run proves a lower-work setting preserves recall. For example:
+
+    bin/hkm-agent-benchmark data/fourth_wing_hkm_index --samples 50 --stub
+
 ## Forward-looking architecture
 
 The future-oriented design lives in [`ARCHITECTURE.md`](ARCHITECTURE.md). That document describes the intended scalable destination. This README describes only the current supported surface.
