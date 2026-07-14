@@ -373,6 +373,14 @@ repository gate kept 1.000 content-evidence recall/precision@1 with zero model
 calls at 112.73/1,561.82 ms median/p95 latency; semantic recovery remains the
 correctness path for the few misses.
 
+The stronger all-395 random-passage live LM Studio tool-only gate on the real
+`drama` corpus returned the target and evidence result at rank 1 for every
+sample, with 1.000 recall/precision@1/MRR, zero errors, 6.3% raw model tool
+calls, and 93.7% deterministic recovery. Agent latency was 2,647/3,088 ms
+median/p95; the deterministic-first path avoids that generation cost and now
+measures 254/361 ms median/p95 on the same corpus after ranking candidates
+before constructing source previews.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:

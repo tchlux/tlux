@@ -1257,20 +1257,23 @@ class Searcher:
         for query_tokens in query_variants:
             candidate_ids.update(self._indexed_token_candidates(query_tokens))
         candidate_ids.update(self._unrouted_doc_ids())
-        hits: List[Hit] = []
+        ranked: List[Tuple[float, str, int, Tuple[int, int], bool]] = []
         for doc_id in sorted(candidate_ids):
-            tokens, _ = self._doc_context(doc_id)
+            tokens, metadata = self._doc_context(doc_id)
             matches = [self._lexical_match(tokens, query_tokens) for query_tokens in query_variants]
             match = max((value for value in matches if value is not None), default=None, key=lambda value: value[0])
             if match is None:
                 continue
             score, span, exact = match
+            ranked.append((score, self._source_path(metadata), doc_id, span, exact))
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+        hits: List[Hit] = []
+        for score, _source_path, doc_id, span, exact in ranked[:top_k]:
             hit = self._hit(doc_id, score, span, "token", query_text)
             hit.match_reasons = ["token", "phrase" if exact else "terms"]
             hit.token_score = score
             hits.append(hit)
-        hits.sort(key=lambda hit: (-hit.score, hit.source_path, hit.doc_id, hit.span))
-        return hits[:top_k]
+        return hits
 
     # Verify token matches against active canonical documents.
     #
