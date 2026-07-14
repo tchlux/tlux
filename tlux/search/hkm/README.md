@@ -327,7 +327,7 @@ The report still records model citation quality separately.
 A current 20-sample live Gemma 4 E4B repository run made one tool call for
 every sample and retained 1.000 content-evidence recall and precision@1;
 median agent latency was 1.70 s (p95 2.90 s). The tool query response is
-bounded to 32 output tokens, and this expensive model lane should be reserved
+bounded to 16 output tokens, and this expensive model lane should be reserved
 for passages that fail the cheap first pass.
 
 A fresh 50-sample repository gate against the installed llama.cpp 2.24 server
@@ -375,11 +375,11 @@ correctness path for the few misses.
 
 The stronger all-395 random-passage live LM Studio tool-only gate on the real
 `drama` corpus returned the target and evidence result at rank 1 for every
-sample, with 1.000 recall/precision@1/MRR, zero errors, 6.3% raw model tool
-calls, and 93.7% deterministic recovery. Agent latency was 2,647/3,088 ms
-median/p95; the deterministic-first path avoids that generation cost and now
-measures 254/361 ms median/p95 on the same corpus after ranking candidates
-before constructing source previews.
+sample, with 1.000 recall/precision@1/MRR, zero errors, and 100% deterministic
+recovery after one bounded LM Studio request per sample. Agent latency was
+1,485/1,603 ms median/p95; the deterministic-first path avoids that generation
+cost and measures 254/361 ms median/p95 on the same corpus after ranking
+candidates before constructing source previews.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the

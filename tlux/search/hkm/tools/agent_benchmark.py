@@ -30,7 +30,7 @@ STOP_WORDS = {
     "through", "under", "what", "when", "where", "which", "while", "with", "would",
 }
 TOOL_QUERY_WORDS = 16
-TOOL_MAX_TOKENS = 32
+TOOL_MAX_TOKENS = 16
 TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
