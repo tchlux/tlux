@@ -387,6 +387,25 @@ def test_persistent_local_agent_can_require_native_tool_call(tmp_path: Path, mon
     assert agent.runner.native_tool is True
 
 
+def test_native_planner_caches_structured_query_but_calls_tool_again(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    agent = LMStudioPlannerToolAgent(NativePlannerClient(), mode="token", native_tool=True)
+    searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
+    first = agent.run("alpha dragon fortress", searcher, top_k=1)
+    second = agent.run("alpha dragon fortress", searcher, top_k=1)
+    assert first["completion_calls"] == 2
+    assert second["completion_calls"] == 1
+    assert second["planner_cache_hit"] is True
+    assert second["model_tool_called"] is True
+
+
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     (tmp_path / "index").mkdir()

@@ -428,6 +428,10 @@ raw passage. In a repeated-passage smoke test, the first grounded request took
 The cache stores only the generated query; HKM search and evidence validation
 still run for every request.
 
+Native mode reuses the same planner cache while still requiring a fresh model
+tool call: a repeated-passage smoke dropped from 1,579 ms and two completions
+to 674 ms and one completion, with both results grounded.
+
 Planner prompts are bounded to 64 words (head and tail) for long raw inputs;
 the complete passage still drives deterministic fallback and exact evidence
 validation. A 2,048-word source passage stayed exactly grounded after warmup at

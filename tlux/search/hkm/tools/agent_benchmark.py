@@ -605,10 +605,7 @@ class LMStudioPlannerToolAgent:
         recovered = False
         planner_cache_hit = False
         try:
-            if self.native_tool:
-                query = self.client.generate(excerpt)
-            else:
-                query, planner_cache_hit = self._plan_query(excerpt)
+            query, planner_cache_hit = self._plan_query(excerpt)
         except (OSError, RuntimeError, ValueError, urllib.error.URLError):
             query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
             recovered = True
