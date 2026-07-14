@@ -31,7 +31,7 @@ STOP_WORDS = {
 }
 TOOL_QUERY_WORDS = 16
 TOOL_KEYWORD_WORDS = 6
-TOOL_RESCUE_QUERIES = 4
+TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
 
@@ -74,11 +74,14 @@ def _phrase_queries(excerpt: str, limit: int = 8, count: int = 6) -> List[str]:
 # Return bounded fallback queries, including distinctive code identifiers.
 def _fallback_queries(excerpt: str) -> List[str]:
     identifiers = re.findall(r"[A-Za-z_][A-Za-z0-9_'-]{3,}", excerpt)
-    distinctive = list(dict.fromkeys(
+    repeated = list(dict.fromkeys(
+        word for word in identifiers if identifiers.count(word) > 1 and len(word) >= 6
+    ))
+    distinctive = repeated + [
         word for word in identifiers
         if "_" in word or any(char.isdigit() for char in word) or len(word) >= 12
-    ))
-    queries = _phrase_queries(excerpt) + [_keyword_query(excerpt)] + distinctive[:8]
+    ]
+    queries = _phrase_queries(excerpt) + [_keyword_query(excerpt)] + list(dict.fromkeys(distinctive))[:8]
     return list(dict.fromkeys(query for query in queries if query.strip()))
 
 
@@ -249,10 +252,12 @@ def _adaptive_tool_search(
         _rerank_with_evidence(result, fallback_text, searcher, source_cache)
         if _evidence_rank(result, fallback_text, searcher, source_cache) == 1:
             return result, elapsed, fallback_calls
-    if mode != "token" or (
-        result.docs
-        and float(result.docs[0].score) >= TOOL_FALLBACK_SCORE
-        and len(query.split()) > 5
+    if not fallback_text and (
+        mode != "token" or (
+            result.docs
+            and float(result.docs[0].score) >= TOOL_FALLBACK_SCORE
+            and len(query.split()) > 5
+        )
     ):
         return result, elapsed, fallback_calls
     docs = list(result.docs)

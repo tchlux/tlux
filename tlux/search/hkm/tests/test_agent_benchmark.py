@@ -1,4 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+import tlux.search.hkm.tools.agent_benchmark as benchmark
 
 from tlux.search.hkm import build_search_index_from_documents
 from tlux.search.hkm.tools.agent_benchmark import (
@@ -181,3 +184,25 @@ def test_tool_deterministic_first_skips_model_on_exact_hit(tmp_path: Path, monke
     assert report["model_call_rate"] == 0.0
     assert report["completion_calls_per_sample"] == 0.0
     assert report["grounded_source_match_rate"] == 1.0
+
+
+def test_high_score_without_evidence_still_escalates(monkeypatch) -> None:
+    hit = SimpleNamespace(doc_id=1, span=(0, 1), score=0.99)
+    searches = []
+    ranks = iter([None, 1])
+
+    def fake_search(*args, **kwargs):
+        searches.append(kwargs.get("mode", args[-1] if args else ""))
+        return SimpleNamespace(docs=[hit]), 1.0
+
+    monkeypatch.setattr(benchmark, "_search", fake_search)
+    monkeypatch.setattr(benchmark, "_rerank_with_evidence", lambda result, *args: result)
+    monkeypatch.setattr(benchmark, "_evidence_rank", lambda *args: next(ranks))
+    raw = " ".join(f"term{index}" for index in range(48))
+    result, elapsed, fallback_calls = benchmark._adaptive_tool_search(
+        object(), "long model query with many words", 1, 0, "token", raw, {}
+    )
+    assert result.docs
+    assert elapsed == 7.0
+    assert fallback_calls == 6
+    assert len(searches) == 7
