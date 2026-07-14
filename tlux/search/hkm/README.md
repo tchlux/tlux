@@ -320,7 +320,7 @@ Gemma 4's native tool template can truncate on long raw passages. Use
 `--planner-tool` to have the model emit a structured query first, then execute
 `search_index` once in the wrapper; combine it with `--deterministic-first` for
 the low-compute path. Across all 395 prose passages this path returned rank-1
-evidence with 1.000 recall/precision@1/MRR at 255/360 ms median/p95 and zero
+evidence with 1.000 recall/precision@1/MRR at 83/117 ms median/p95 and zero
 model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
 at 90/466 ms median/p95; exact document identity remains limited by duplicate
 source content.
@@ -340,7 +340,7 @@ Evidence ranking now requires the normalized raw passage in a readable indexed
 source before accepting a hit; generic term overlap is used only when the
 source snapshot is unavailable. With this stricter precision gate, deterministic
 token retrieval still returns 1.000 evidence recall/precision@1/MRR across all
-395 prose passages (255/360 ms median/p95) and all 75 repository passages
+395 prose passages (83/117 ms median/p95) and all 75 repository passages
 (90/466 ms median/p95). Duplicate repository files can still lower exact
 document identity without lowering content relevance.
 
@@ -352,7 +352,8 @@ agent latency was 609/1,179 ms and search latency was 208/553 ms.
 
 The same live gate with `--deterministic-first` made zero model calls while
 retaining 1.000 target/evidence recall, precision@1, and MRR with zero errors;
-median/p95 agent latency fell to 252/326 ms. This is the recommended low-compute
+median/p95 agent latency fell to 83/117 ms in the latest all-395 gate. This is
+the recommended low-compute
 path when indexed raw passages usually contain enough lexical evidence.
 
 For lower warm latency, pass `--model google/gemma-3-4b` with
@@ -495,7 +496,7 @@ The larger all-active deterministic gates now cover 75 eligible repository
 passages and all 395 prose chunks. Both retain 1.000 content-evidence recall
 and precision@1 with zero model calls. The deterministic planner uses six
 keyword terms and bounds rescue to eight distinctive terms. Median/p95 result
-latency is 88/1,122 ms on the repository and 256/358 ms on prose. Exact
+latency is 88/1,122 ms on the repository and 83/117 ms on prose. Exact
 document-id precision is
 lower on the repository because repeated boilerplate produces content-equivalent
 duplicate chunks; evidence relevance is the product gate.
@@ -512,7 +513,7 @@ The stronger all-395 random-passage live LM Studio tool-only gate on the real
 sample, with 1.000 recall/precision@1/MRR, zero errors, and 100% deterministic
 recovery after one bounded LM Studio request per sample. Agent latency was
 1,485/1,603 ms median/p95; the deterministic-first path avoids that generation
-cost and measures 254/361 ms median/p95 on the same corpus after ranking
+cost and measures 83/117 ms median/p95 on the same corpus after ranking
 candidates before constructing source previews.
 The 16-token tool cap intentionally treats a truncated Gemma tool response as
 recoverable; on this long-passage prompt the raw model tool-call rate was 0.0,

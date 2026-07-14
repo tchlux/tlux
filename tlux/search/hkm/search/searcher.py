@@ -651,20 +651,24 @@ class Searcher:
                         pos = token_bytes.find(target, pos + 4)
         return hits
 
-    # Collect active document ids containing one exact token sequence.
+    # Collect active document ids containing one or more token sequences.
     #
     # Arguments:
     #   node_dir (str | Path): Node or subtree to scan.
-    #   target (bytes): Packed token sequence.
-    #   token_sequence (list[int]): Query token ids.
+    #   target (bytes | tuple[bytes, ...]): Packed token sequence(s).
     #
     # Returns:
     #   (set[int]): Candidate document ids.
     #
-    def _scan_node_token_ids(self, node_dir: str | Path, target: bytes, token_sequence: List[int]) -> set[int]:
+    def _scan_node_token_ids(
+        self,
+        node_dir: str | Path,
+        target: bytes | Tuple[bytes, ...],
+    ) -> set[int]:
         path = Path(node_dir)
         node = self._node_manifest(path)
         active = self._active_doc_ids()
+        targets = (target,) if isinstance(target, bytes) else target
         ids: set[int] = set()
         for chunk_root in node.get("chunk_roots", []):
             for chunk_path in sorted((path / chunk_root).rglob("*.hkmchunk")):
@@ -679,7 +683,8 @@ class Searcher:
                     doc_id = document_ids[idx] if idx < len(document_ids) else base + idx
                     if doc_id not in active:
                         continue
-                    if target in reader._get_tokens(idx).tobytes():
+                    token_bytes = reader._get_tokens(idx).tobytes()
+                    if any(value in token_bytes for value in targets):
                         ids.add(doc_id)
         return ids
 
@@ -717,7 +722,7 @@ class Searcher:
     ) -> None:
         node = self._node_manifest(node_dir)
         if node.get("chunk_roots"):
-            ids.update(self._scan_node_token_ids(node_dir, target, token_sequence))
+            ids.update(self._scan_node_token_ids(node_dir, target))
         if node.get("is_leaf", False):
             return
         grams = self._query_ngrams(token_sequence)
@@ -727,6 +732,25 @@ class Searcher:
             if observer is not None and grams and not all(gram in observer for gram in grams):
                 continue
             self._search_token_node_ids(child_dir, target, token_sequence, ids)
+
+    # Traverse token-pruning nodes once when a query has multiple terms.
+    def _search_token_node_ids_any(
+        self,
+        node_dir: Path,
+        targets: Tuple[bytes, ...],
+        ids: set[int],
+    ) -> None:
+        node = self._node_manifest(node_dir)
+        if node.get("chunk_roots"):
+            ids.update(self._scan_node_token_ids(node_dir, targets))
+        if node.get("is_leaf", False):
+            return
+        for child in node.get("children", []):
+            child_dir = node_dir / child
+            observer = self._node_observer(child_dir)
+            if observer is not None and not any(target in observer for target in targets):
+                continue
+            self._search_token_node_ids_any(child_dir, targets, ids)
 
     # Return documents containing at least one query token through indexed pruning.
     #
@@ -738,9 +762,14 @@ class Searcher:
     #
     def _indexed_token_candidates(self, token_ids: List[int]) -> set[int]:
         candidates: set[int] = set()
-        for token_id in dict.fromkeys(int(token) for token in token_ids):
-            sequence = [token_id]
-            self._search_token_node_ids(Path(self.generation_hkm_root or self.hkm_root), _seq_to_bytes(sequence), sequence, candidates)
+        targets = tuple(
+            _seq_to_bytes([token_id])
+            for token_id in dict.fromkeys(int(token) for token in token_ids)
+        )
+        if targets:
+            self._search_token_node_ids_any(
+                Path(self.generation_hkm_root or self.hkm_root), targets, candidates
+            )
         return candidates
 
     # Normalize and validate the public query dictionary.
