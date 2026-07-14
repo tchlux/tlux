@@ -1,11 +1,14 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import tlux.search.hkm.tools.agent_benchmark as benchmark
 
 from tlux.search.hkm import build_search_index_from_documents
 from tlux.search.hkm.tools.agent_benchmark import (
     DeterministicToolAgent,
+    LMStudioQueryGenerator,
     LMStudioToolAgent,
     StubQueryGenerator,
     _parse_tool_query,
@@ -75,6 +78,17 @@ def test_tool_query_is_bounded_and_recovers_truncated_json() -> None:
         "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
     )
     assert _parse_tool_query('{"query":"alpha dragon') == "alpha dragon"
+
+
+def test_lmstudio_query_rejects_unquoted_planner_text(monkeypatch) -> None:
+    client = LMStudioQueryGenerator(model="fake")
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda path, payload: {"choices": [{"message": {"content": "The user wants a query."}}]},
+    )
+    with pytest.raises(ValueError, match="did not quote"):
+        client.generate("alpha dragon fortress")
 
 
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:

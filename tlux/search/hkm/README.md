@@ -355,6 +355,9 @@ so the model returns an actual bounded query instead of hidden instruction text.
 Across all 395 random prose passages, model first-pass recall/precision@1 were
 0.924/0.830 with no planner errors; the evidence-aware fallback raised final
 recall and precision@1 to 1.000 with a 7.6% fallback rate.
+Planner responses are also required to quote evidence terms; unsupported
+endpoints that return instruction text are rejected before search and use the
+same deterministic recovery path.
 
 Add `--deterministic-first` to skip Gemma when a cheap lexical result already
 contains the raw passage. On the same 50-sample gates it reduced model calls

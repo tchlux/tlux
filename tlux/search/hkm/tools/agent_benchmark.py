@@ -198,7 +198,12 @@ class LMStudioQueryGenerator:
             raise RuntimeError("LM Studio returned no chat completion choices")
         message = choices[0].get("message", {})
         content = message.get("content") or message.get("reasoning_content", "")
-        return parse_query(str(content))
+        query = parse_query(str(content))
+        query_terms = set(re.findall(r"[A-Za-z0-9]+", query.lower()))
+        evidence_terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower()))
+        if not query_terms.intersection(evidence_terms):
+            raise ValueError("LM Studio query did not quote the supplied evidence")
+        return " ".join(query.split()[:TOOL_QUERY_WORDS])
 
 
 # Deterministic planner used for offline tests and endpoint recovery.
