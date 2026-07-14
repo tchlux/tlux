@@ -9,6 +9,7 @@ from tlux.search.hkm import build_search_index_from_documents
 from tlux.search.hkm.tools.agent_benchmark import (
     DeterministicToolAgent,
     LMStudioQueryGenerator,
+    LMStudioPlannerToolAgent,
     LMStudioToolAgent,
     StubQueryGenerator,
     _parse_tool_query,
@@ -196,6 +197,30 @@ def test_lmstudio_tool_recovery_handles_missing_tool_call(tmp_path: Path, monkey
     assert report["evidence"]["precision_at_1"] == 1.0
     assert report["answer_source_match_rate"] == 0.0
     assert report["rows"][0]["recovered"] is True
+
+
+def test_structured_planner_runs_grounded_tool(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    client = StubQueryGenerator()
+    client.model = "fake"
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"),
+        agent=LMStudioPlannerToolAgent(client, mode="token"),
+        samples=1,
+        top_k=1,
+    )
+    assert report["model_call_rate"] == 1.0
+    assert report["tool_call_rate"] == 1.0
+    assert report["completion_calls_per_sample"] == 1.0
+    assert report["evidence"]["precision_at_1"] == 1.0
+    assert report["recovery_rate"] == 0.0
 
 
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:

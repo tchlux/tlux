@@ -539,6 +539,45 @@ class LMStudioToolAgent:
         }
 
 
+# Run a structured model query followed by one grounded search-tool call.
+class LMStudioPlannerToolAgent:
+    name = "lmstudio_planner_tool_agent"
+    final_answer = False
+
+    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid"):
+        self.client = client
+        self.model = client.model
+        self.mode = mode
+        self.source_cache: Dict[tuple[str, int, int], str] = {}
+
+    def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
+        started = time.perf_counter()
+        recovered = False
+        try:
+            query = self.client.generate(excerpt)
+        except (OSError, RuntimeError, ValueError, urllib.error.URLError):
+            query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
+            recovered = True
+        result, search_ms, fallback_calls = _adaptive_tool_search(
+            searcher, query, top_k, probe_count, self.mode, excerpt, self.source_cache
+        )
+        _rerank_with_evidence(result, excerpt, searcher, self.source_cache)
+        return {
+            "tool_called": True,
+            "model_tool_called": False,
+            "recovered": recovered,
+            "query": query,
+            "result": result,
+            "answer": "",
+            "answer_source_path": "",
+            "completion_calls": 1,
+            "search_ms": search_ms,
+            "fallback_calls": fallback_calls,
+            "expanded_docs": len(result.docs),
+            "agent_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
+
 # Use the same tool boundary without a model for offline tests and recovery.
 class DeterministicToolAgent:
     name = "deterministic_tool_agent"
@@ -1149,6 +1188,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
     parser.add_argument("--tool-agent", action="store_true", help="Run a model/tool/model search conversation")
+    parser.add_argument("--planner-tool", action="store_true", help="Use structured model query output before the search tool")
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="hybrid")
     parser.add_argument("--tool-only", action="store_true", help="Return the grounded tool result after one model call")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
@@ -1163,7 +1203,11 @@ def main() -> None:
             client = LMStudioQueryGenerator(args.base_url, args.model, args.timeout)
             try:
                 client._model_name()
-                agent = LMStudioToolAgent(client, args.tool_mode, not args.tool_only)
+                agent = (
+                    LMStudioPlannerToolAgent(client, args.tool_mode)
+                    if args.planner_tool
+                    else LMStudioToolAgent(client, args.tool_mode, not args.tool_only)
+                )
             except (OSError, RuntimeError, urllib.error.URLError) as exc:
                 print(f"LM Studio unavailable; using deterministic tool agent: {exc}")
                 agent = DeterministicToolAgent(args.tool_mode)

@@ -311,6 +311,15 @@ JSON answer:
 
     bin/hkm-agent-benchmark data/fourth_wing_hkm_index --tool-agent --samples 10 --initial-probe 2
 
+Gemma 4's native tool template can truncate on long raw passages. Use
+`--planner-tool` to have the model emit a structured query first, then execute
+`search_index` once in the wrapper; combine it with `--deterministic-first` for
+the low-compute path. Across all 395 prose passages this path returned rank-1
+evidence with 1.000 recall/precision@1/MRR at 256/361 ms median/p95 and zero
+model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
+at 92/954 ms median/p95; exact document identity remains limited by duplicate
+source content.
+
 For short model-generated keyword queries, `--tool-mode token` avoids the
 embedding pass. The tool bounds model queries to a small 16-word budget and
 retained 1.000 tool evidence recall/precision on the live cross-corpus gate;
