@@ -339,8 +339,10 @@ remains available for low-confidence passages.
 
 The larger all-active deterministic gates now cover 75 eligible repository
 passages and all 395 prose chunks. Both retain 1.000 content-evidence recall
-and precision@1 with zero model calls. Median/p95 result latency is 101/1,148
-ms on the repository and 330/433 ms on prose. Exact document-id precision is
+and precision@1 with zero model calls. The deterministic planner uses six
+keyword terms and bounds rescue to four distinctive terms. Median/p95 result
+latency is 88/1,122 ms on the repository and 256/358 ms on prose. Exact
+document-id precision is
 lower on the repository because repeated boilerplate produces content-equivalent
 duplicate chunks; evidence relevance is the product gate.
 

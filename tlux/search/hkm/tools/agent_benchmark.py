@@ -30,6 +30,8 @@ STOP_WORDS = {
     "through", "under", "what", "when", "where", "which", "while", "with", "would",
 }
 TOOL_QUERY_WORDS = 16
+TOOL_KEYWORD_WORDS = 6
+TOOL_RESCUE_QUERIES = 4
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
 
@@ -243,8 +245,10 @@ def _adaptive_tool_search(
     result, elapsed = _search(searcher, query, top_k, probe_count, mode)
     fallback_calls = 0
     # Do not spend fallback work when the initial page already proves relevance.
-    if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) == 1:
-        return result, elapsed, fallback_calls
+    if fallback_text:
+        _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+        if _evidence_rank(result, fallback_text, searcher, source_cache) == 1:
+            return result, elapsed, fallback_calls
     if mode != "token" or (
         result.docs
         and float(result.docs[0].score) >= TOOL_FALLBACK_SCORE
@@ -278,7 +282,7 @@ def _adaptive_tool_search(
     # Probe remaining distinctive terms only when the first lanes lack evidence.
     if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) is None:
         rescue_sources = []
-        for alternate in alternates[5:]:
+        for alternate in alternates[5:5 + TOOL_RESCUE_QUERIES]:
             if alternate == query:
                 continue
             rescue, rescue_ms = _search(searcher, alternate, top_k * 2, probe_count, "token")
@@ -453,7 +457,7 @@ class DeterministicToolAgent:
 
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
         started = time.perf_counter()
-        query = _keyword_query(excerpt)
+        query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
         result, search_ms, fallback_calls = _adaptive_tool_search(
             searcher, query, top_k, probe_count, self.mode, excerpt, self.source_cache
         )
