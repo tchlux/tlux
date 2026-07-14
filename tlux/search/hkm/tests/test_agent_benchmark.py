@@ -1,7 +1,15 @@
 from pathlib import Path
 
 from tlux.search.hkm import build_search_index_from_documents
-from tlux.search.hkm.tools.agent_benchmark import StubQueryGenerator, _keyword_query, evaluate_agent, parse_query
+from tlux.search.hkm.tools.agent_benchmark import (
+    DeterministicToolAgent,
+    LMStudioToolAgent,
+    StubQueryGenerator,
+    _keyword_query,
+    evaluate_agent,
+    evaluate_tool_agent,
+    parse_query,
+)
 
 
 class CountingGenerator(StubQueryGenerator):
@@ -11,6 +19,32 @@ class CountingGenerator(StubQueryGenerator):
     def generate(self, excerpt: str) -> str:
         self.calls += 1
         return super().generate(excerpt)
+
+
+class FakeToolAgent(LMStudioToolAgent):
+    def __init__(self) -> None:
+        client = StubQueryGenerator()
+        self.client = client
+        self.model = "fake"
+        self.responses = [
+            {
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "function": {"name": "search_index", "arguments": '{"query":"alpha dragon"}'},
+                        }]
+                    }
+                }]
+            },
+            {"choices": [{"message": {"content": '{"answer":"found","source_path":"a.txt"}'}}]},
+        ]
+
+    def _request(self, path, payload=None):
+        return self.responses.pop(0)
+
+    def _model_name(self):
+        return self.model
 
 
 def test_parse_query_accepts_json_and_code_fences() -> None:
@@ -63,3 +97,44 @@ def test_deterministic_first_skips_model_when_evidence_hits(tmp_path: Path, monk
     assert generator.calls == 0
     assert report["planner_call_rate"] == 0.0
     assert report["final_relevance"]["precision_at_1"] == 1.0
+
+
+def test_tool_agent_reports_grounded_tool_result(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"),
+        agent=DeterministicToolAgent(),
+        samples=1,
+        top_k=1,
+    )
+    assert report["tool_call_rate"] == 1.0
+    assert report["evidence"]["recall_at_k"] == 1.0
+    assert report["grounded_source_match_rate"] == 1.0
+
+
+def test_lmstudio_tool_protocol_executes_search_and_answer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"),
+        agent=FakeToolAgent(),
+        samples=1,
+        top_k=1,
+    )
+    assert report["tool_call_rate"] == 1.0
+    assert report["evidence"]["recall_at_k"] == 1.0
+    assert report["grounded_source_match_rate"] == 1.0
+    assert report["answer_source_match_rate"] == 1.0

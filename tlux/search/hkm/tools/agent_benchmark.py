@@ -1,15 +1,15 @@
-"""Evaluate a local query-planning agent against sampled HKM passages.
+"""Evaluate local agents against sampled HKM passages.
 
 The benchmark uses an OpenAI-compatible LM Studio endpoint when available and
-falls back to a deterministic query planner for offline regression tests. It
-reports model first-pass quality separately from the final evidence-assisted
-tool result so a perfect fallback cannot hide a weak model query.
+falls back to deterministic agents for offline regression tests. It reports
+model first-pass quality separately from an evidence-grounded tool result.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import re
 import statistics
@@ -170,6 +170,202 @@ class StubQueryGenerator:
 
     def generate(self, excerpt: str) -> str:
         return _keyword_query(excerpt)
+
+
+# OpenAI-compatible function schema exposed to the local model.
+SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_index",
+        "description": "Search the HKM index for relevant source passages.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Short search query."},
+                "top_k": {"type": "integer", "description": "Maximum number of results."},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+# Extract plain text from an OpenAI-compatible message.
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content") or message.get("reasoning_content", "")
+    if isinstance(content, list):
+        content = " ".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+    return str(content)
+
+
+# Parse a model-selected source path from its final JSON answer.
+def _answer_source_path(response: str) -> str:
+    text = response.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return str(value.get("source_path", ""))
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'"source_path"\s*:\s*"([^"]+)"', text)
+    return match.group(1) if match else ""
+
+
+# Return the small JSON payload given to an agent after a search tool call.
+def _tool_result_payload(result: Any, limit: int) -> Dict[str, Any]:
+    return {
+        "docs": [
+            {
+                "doc_id": int(hit.doc_id),
+                "source_path": hit.source_path,
+                "score": float(hit.score),
+                "preview_text": hit.preview_text[:400],
+            }
+            for hit in result.docs[:limit]
+        ],
+        "count": int(result.count),
+    }
+
+
+# Recover a query when a small local model truncates its JSON arguments.
+def _parse_tool_query(arguments: Any) -> str:
+    if isinstance(arguments, dict):
+        value = arguments.get("query", "")
+        return parse_query(json.dumps({"query": value}))
+    text = str(arguments)
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return parse_query(json.dumps({"query": value.get("query", "")}))
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'"query"\s*:\s*"((?:\\.|[^"\\])*)', text, re.DOTALL)
+    if not match:
+        raise ValueError("tool call did not contain a query")
+    value = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+    return parse_query(json.dumps({"query": value}))
+
+
+# Run one model/tool/model turn against the HKM search index.
+class LMStudioToolAgent:
+    name = "lmstudio_tool_agent"
+
+    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid"):
+        self.client = client
+        self.model = client.model
+        self.mode = mode
+
+    def _request(self, path: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return self.client._request(path, payload)
+
+    def _model_name(self) -> str:
+        return self.client._model_name()
+
+    def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
+        started = time.perf_counter()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You answer from indexed evidence. You must call search_index before answering. "
+                    "After the tool result, return only JSON {\"answer\":\"...\",\"source_path\":\"...\"}."
+                ),
+            },
+            {"role": "user", "content": f"Find the indexed source for this raw passage:\n{excerpt}"},
+        ]
+        response = self._request("chat/completions", {
+            "model": self._model_name(),
+            "messages": messages,
+            "tools": [SEARCH_TOOL],
+            "tool_choice": {"type": "function", "function": {"name": "search_index"}},
+            "temperature": 0,
+            "max_tokens": 64,
+            "stream": False,
+        })
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("LM Studio returned no tool-agent choices")
+        assistant = choices[0].get("message", {})
+        calls = assistant.get("tool_calls", [])
+        if not calls and assistant.get("function_call"):
+            calls = [{"id": "legacy-call", "function": assistant["function_call"]}]
+        if not calls:
+            return {
+                "tool_called": False,
+                "query": "",
+                "result": None,
+                "answer": _message_text(assistant),
+                "answer_source_path": "",
+                "completion_calls": 1,
+                "search_ms": 0.0,
+                "agent_ms": (time.perf_counter() - started) * 1000.0,
+            }
+        call = calls[0]
+        function = call.get("function", {})
+        query = _parse_tool_query(function.get("arguments", {}))
+        result, search_ms = _search(searcher, query, top_k, probe_count, mode=getattr(self, "mode", "hybrid"))
+        call_id = str(call.get("id", "tool-call"))
+        normalized_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "search_index",
+                "arguments": json.dumps({"query": query, "top_k": top_k}),
+            },
+        }
+        messages.extend([
+            {"role": "assistant", "content": assistant.get("content"), "tool_calls": [normalized_call]},
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "search_index",
+                "content": json.dumps(_tool_result_payload(result, top_k)),
+            },
+        ])
+        final_response = self._request("chat/completions", {
+            "model": self._model_name(),
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 96,
+            "stream": False,
+        })
+        final_choices = final_response.get("choices", [])
+        answer = _message_text(final_choices[0].get("message", {})) if final_choices else ""
+        return {
+            "tool_called": True,
+            "query": query,
+            "result": result,
+            "answer": answer,
+            "answer_source_path": _answer_source_path(answer),
+            "completion_calls": 2,
+            "search_ms": search_ms,
+            "agent_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
+
+# Use the same tool boundary without a model for offline tests and recovery.
+class DeterministicToolAgent:
+    name = "deterministic_tool_agent"
+    model = None
+
+    def __init__(self, mode: str = "hybrid"):
+        self.mode = mode
+
+    def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
+        started = time.perf_counter()
+        query = _keyword_query(excerpt)
+        result, search_ms = _search(searcher, query, top_k, probe_count, mode=self.mode)
+        answer_source_path = result.docs[0].source_path if result.docs else ""
+        return {
+            "tool_called": True,
+            "query": query,
+            "result": result,
+            "answer": "",
+            "answer_source_path": answer_source_path,
+            "completion_calls": 0,
+            "search_ms": search_ms,
+            "agent_ms": (time.perf_counter() - started) * 1000.0,
+        }
 
 
 # Sample raw text from actual active documents in the index.
@@ -371,7 +567,7 @@ def _timing_metrics(rows: Iterable[Dict[str, Any]], key: str) -> Dict[str, float
         return {"median_ms": 0.0, "p95_ms": 0.0, "mean_ms": 0.0}
     return {
         "median_ms": statistics.median(values),
-        "p95_ms": values[int(0.95 * (len(values) - 1))],
+        "p95_ms": values[min(len(values) - 1, max(0, math.ceil(0.95 * len(values)) - 1))],
         "mean_ms": sum(values) / len(values),
     }
 
@@ -531,6 +727,94 @@ def evaluate_agent(
     }
 
 
+# Evaluate a real model/tool/model loop against sampled raw passages.
+def evaluate_tool_agent(
+    index_root: str,
+    agent: Any,
+    samples: int = 8,
+    seed: int = 42,
+    top_k: int = 10,
+    max_tokens: int = 48,
+    probe_count: int = 0,
+    mode: str = "hybrid",
+) -> Dict[str, Any]:
+    if top_k < 1:
+        raise ValueError("top_k must be positive")
+    if probe_count < 0:
+        raise ValueError("probe count must be non-negative")
+    searcher = Searcher.from_index_root(index_root)
+    sampled = sample_passages(searcher, samples, seed, max_tokens)
+    source_cache: Dict[tuple[str, int, int], str] = {}
+    rows = []
+    errors = []
+    for sample in sampled:
+        started = time.perf_counter()
+        try:
+            run = agent.run(sample.excerpt, searcher, top_k, probe_count)
+        except Exception as exc:
+            run = {
+                "tool_called": False,
+                "query": "",
+                "result": None,
+                "answer": "",
+                "answer_source_path": "",
+                "completion_calls": 0,
+                "search_ms": 0.0,
+                "agent_ms": (time.perf_counter() - started) * 1000.0,
+            }
+            errors.append({"sample_id": sample.sample_id, "error": str(exc)})
+        result = run.get("result")
+        target_rank = _target_rank(result, sample.doc_id) if result is not None else None
+        relevant_rank = (
+            _evidence_rank(result, sample.excerpt, searcher, source_cache)
+            if result is not None else None
+        )
+        grounded_source_path = (
+            result.docs[relevant_rank - 1].source_path
+            if result is not None and relevant_rank else ""
+        )
+        answer_source_path = str(run.get("answer_source_path", ""))
+        rows.append({
+            "sample_id": sample.sample_id,
+            "doc_id": sample.doc_id,
+            "source_path": sample.source_path,
+            "excerpt": sample.excerpt,
+            "query": run.get("query", ""),
+            "tool_called": bool(run.get("tool_called")),
+            "target_rank": target_rank,
+            "relevant_rank": relevant_rank,
+            "grounded_source_path": grounded_source_path,
+            "answer_source_path": answer_source_path,
+            "answer_source_match": answer_source_path == sample.source_path if answer_source_path else False,
+            "grounded_source_match": grounded_source_path == sample.source_path if grounded_source_path else False,
+            "completion_calls": int(run.get("completion_calls", 0)),
+            "search_ms": float(run.get("search_ms", 0.0)),
+            "agent_ms": float(run.get("agent_ms", 0.0)),
+        })
+    return {
+        "index_root": str(Path(index_root).expanduser().absolute()),
+        "agent": agent.name,
+        "model": getattr(agent, "model", None) or getattr(getattr(agent, "client", None), "model", None),
+        "samples": len(rows),
+        "seed": seed,
+        "top_k": top_k,
+        "probe_count": probe_count,
+        "mode": mode,
+        "errors": errors,
+        "tool_call_rate": sum(row["tool_called"] for row in rows) / len(rows) if rows else 0.0,
+        "completion_calls_per_sample": sum(row["completion_calls"] for row in rows) / len(rows) if rows else 0.0,
+        "target": _metrics(rows, "target_rank"),
+        "evidence": _metrics(rows, "relevant_rank"),
+        "answer_source_match_rate": sum(row["answer_source_match"] for row in rows) / len(rows) if rows else 0.0,
+        "grounded_source_match_rate": sum(row["grounded_source_match"] for row in rows) / len(rows) if rows else 0.0,
+        "latency_ms": {
+            "agent": _timing_metrics(rows, "agent_ms"),
+            "search": _timing_metrics(rows, "search_ms"),
+        },
+        "rows": rows,
+    }
+
+
 # Render a compact agent-quality report.
 def render_report(report: Dict[str, Any]) -> str:
     first = report["first_pass"]
@@ -574,6 +858,38 @@ def render_report(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# Render a compact tool-agent quality report.
+def render_tool_report(report: Dict[str, Any]) -> str:
+    target = report["target"]
+    evidence = report["evidence"]
+    latency = report["latency_ms"]
+    lines = [
+        "# HKM Tool-Agent Benchmark",
+        "",
+        f"- Agent: `{report['agent']}`",
+        f"- Model: `{report['model'] or 'deterministic'}`",
+        f"- Samples/seed/top-k/probe/mode: {report['samples']} / {report['seed']} / {report['top_k']} / {report['probe_count']} / `{report['mode']}`",
+        f"- Tool-call rate: `{report['tool_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
+        f"- Tool target-doc recall@k: `{target['recall_at_k']:.3f}`; precision@1: `{target['precision_at_1']:.3f}`; MRR: `{target['mrr']:.3f}`",
+        f"- Tool evidence relevance@k: `{evidence['recall_at_k']:.3f}`; precision@1: `{evidence['precision_at_1']:.3f}`; MRR: `{evidence['mrr']:.3f}`",
+        f"- Grounded tool source-path match: `{report['grounded_source_match_rate']:.3f}`; model citation match: `{report['answer_source_match_rate']:.3f}`",
+        f"- Latency ms (median/p95): agent `{latency['agent']['median_ms']:.2f}/{latency['agent']['p95_ms']:.2f}`; search `{latency['search']['median_ms']:.2f}/{latency['search']['p95_ms']:.2f}`",
+        f"- Errors: `{len(report['errors'])}`",
+        "",
+        "## Samples",
+        "",
+        "| ID | Target doc | Query | Relevant rank | Answer source | Tool |",
+        "|---:|---:|---|---:|---|:---:|",
+    ]
+    for row in report["rows"]:
+        lines.append(
+            f"| {row['sample_id']} | {row['doc_id']} | {row['query'].replace('|', ' ')} | "
+            f"{row['relevant_rank'] or '-'} | {row['answer_source_path'] or '-'} | "
+            f"{'yes' if row['tool_called'] else 'no'} |"
+        )
+    return "\n".join(lines)
+
+
 # Parse CLI arguments and write machine/human-readable evidence.
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate an LM Studio query agent against HKM samples.")
@@ -587,11 +903,41 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
+    parser.add_argument("--tool-agent", action="store_true", help="Run a model/tool/model search conversation")
+    parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="hybrid")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
     parser.add_argument("--initial-probe", type=int, default=0, help="Use this probe budget before exhaustive escalation")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--report-output", default=None)
     args = parser.parse_args()
+    if args.tool_agent:
+        if args.stub:
+            agent: Any = DeterministicToolAgent(args.tool_mode)
+        else:
+            client = LMStudioQueryGenerator(args.base_url, args.model, args.timeout)
+            try:
+                client._model_name()
+                agent = LMStudioToolAgent(client, args.tool_mode)
+            except (OSError, RuntimeError, urllib.error.URLError) as exc:
+                print(f"LM Studio unavailable; using deterministic tool agent: {exc}")
+                agent = DeterministicToolAgent(args.tool_mode)
+        report = evaluate_tool_agent(
+            args.index_root,
+            agent,
+            args.samples,
+            args.seed,
+            args.top_k,
+            args.max_tokens,
+            args.initial_probe,
+            args.tool_mode,
+        )
+        markdown = render_tool_report(report)
+        if args.json_output:
+            Path(args.json_output).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        if args.report_output:
+            Path(args.report_output).write_text(markdown, encoding="utf-8")
+        print(markdown)
+        return
     generator: QueryGenerator = StubQueryGenerator() if args.stub else LMStudioQueryGenerator(args.base_url, args.model, args.timeout)
     if not args.stub:
         try:

@@ -303,6 +303,20 @@ the model; the model is used only when that first result is not evidence-relevan
 Add `--initial-probe 2` to try a small HKM probe first and retry exhaustive
 search only when the evidence check misses.
 
+Use `--tool-agent` to exercise the complete local model/tool/model protocol:
+the model calls `search_index`, HKM returns ranked snippets, and the model
+answers from that payload. The report separates tool evidence relevance (the
+grounding gate) from whether the model copied the source path into its final
+JSON answer:
+
+    bin/hkm-agent-benchmark data/fourth_wing_hkm_index --tool-agent --samples 10 --initial-probe 2
+
+For short model-generated keyword queries, `--tool-mode token` avoids the
+embedding pass. It retained 1.000 tool evidence recall/precision on the live
+five-passage repository gate and reduced median HKM search time from about
+476 ms to 336 ms; keep `hybrid` as the correctness default until a larger
+corpus gate supports switching it.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:
