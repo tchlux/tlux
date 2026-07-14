@@ -328,10 +328,9 @@ source content.
 The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
 repository run both returned 1.000 evidence recall/precision@1/MRR with zero
-errors and one model call per sample. With the 8-token planner budget, median
-/p95 agent latency was 0.953/1.281 seconds on prose and 0.958/1.368 seconds
-on the repository; wrapper recovery handled 22.0% and 17.3% of truncated
-planner responses respectively. Planner output rejects generic
+errors and one model call per sample. With the 16-token planner budget, the
+latest warmed Gemma 4 prose gate measured 1.001/1.329 seconds median/p95 with
+zero planner recovery and 28% bounded fallback. Planner output rejects generic
 instruction-word overlap, accepts truncated JSON arguments, and falls back
 after the bounded 1.5-second LM Studio timeout. If every bounded search lane misses
 the raw evidence, the tool fails closed with an empty result rather than
@@ -401,12 +400,11 @@ planner completion per request; median/p95 agent time was 536/1,013 ms and
 deterministic recovery handled 8.3% of responses. The p95 remains the main
 model-serving optimization target.
 
-The current 50-sample repository gate uses the 1.5-second timeout and still
-returns 1.000 evidence recall/precision@1/MRR with zero errors; observed
-model-first agent latency was 578/1,227 ms median/p95 after ordering the
-deterministic rare-term lane first. The 8-token prompt now
-asks for only 1-3 exact words, matching the output budget: this gate had zero
-planner recoveries, 36% bounded fallback, and 6% repeated-passage cache hits.
+The current warmed 50-sample Gemma 4 prose gate uses the 1.5-second timeout and
+returns 1.000 evidence recall/precision@1/MRR with zero errors at 1,001/1,329
+ms median/p95 agent latency. The 16-token prompt asks for only 1-3 exact words,
+leaving enough room for complete JSON on both installed Gemma models; this run
+had zero planner recoveries and 28% bounded fallback.
 The timeout is a bounded failure budget, not a quality shortcut: failed planner
 calls use the same evidence-checked deterministic rescue path.
 
@@ -417,7 +415,8 @@ maximum after warmup.
 
 For the planner-only path, the smaller `google/gemma-3-4b` is a lower-cost
 option: a warmed 50-request random-passage run grounded 50/50 requests, used
-48 model-generated queries and 2 rescues, and measured 917/1,124 ms median/p95.
+48 model-generated queries and 2 rescues, and measured 780/1,160 ms median/p95
+with the 16-token planner budget.
 Use Gemma 4 when native model-emitted tool calls are required.
 
 Pass `--native-planner-tool` with `--model-first` when the model itself must
