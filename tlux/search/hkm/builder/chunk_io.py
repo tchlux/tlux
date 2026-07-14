@@ -382,6 +382,11 @@ class ChunkReader:
         self._tokens_blob = np.memmap(self._path / "tokens.bin", mode="r", dtype=np.uint8)
         self._embeddings = np.load(self._path / "embeddings.npy", mmap_mode="r")
         self._embed_index = np.load(self._path / "embed_index.npy", mmap_mode="r")
+        unique_ids = []
+        for value in self._embed_index["document_id"]:
+            doc_id = int(value)
+            if not unique_ids or unique_ids[-1] != doc_id:
+                unique_ids.append(doc_id)
         self._metadata = np.load(self._path / "metadata.npy", mmap_mode="r")
         blobs_path = self._path / "blobs.bin"
         self._blobs = blobs_path.read_bytes() if blobs_path.exists() else b""
@@ -393,8 +398,14 @@ class ChunkReader:
             self._chunk_meta = {
                 "min_document_id": None,
                 "max_document_id": None,
-                "document_count": int(self._tokens_index.shape[0]),
-            }
+            "document_count": int(self._tokens_index.shape[0]),
+        }
+        base = int(self._chunk_meta.get("min_document_id") or 0)
+        self._document_ids = (
+            unique_ids
+            if len(unique_ids) == self.document_count
+            else [base + i for i in range(self.document_count)]
+        )
 
     @property
     def document_count(self) -> int:
@@ -426,8 +437,7 @@ class ChunkReader:
             raise IndexError(f"Document index {i} out of range [0, {self.document_count})")
 
         tokens = self._get_tokens(i)
-        doc_id_base = self._chunk_meta.get("min_document_id")
-        doc_id = (doc_id_base + i) if doc_id_base is not None else i
+        doc_id = self._document_ids[i]
         mask = self._embed_index["document_id"] == doc_id
         embedding_meta = self._embed_index[mask]
         embeddings = self._embeddings[np.where(mask)[0]] if np.any(mask) else np.empty((0,), dtype=np.float32)

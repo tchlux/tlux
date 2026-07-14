@@ -5,6 +5,7 @@ import tempfile
 import numpy as np
 
 from tlux.search.hkm.builder.chunk_io import ChunkReader, ChunkWriter
+from tlux.search.hkm.builder.partitioner import route_chunk
 from tlux.search.hkm.fs import FileSystem
 
 
@@ -77,6 +78,22 @@ def test_chunk_writer_and_reader_roundtrip():
         arrays = reader.arrays()
         assert len(arrays["tokens"]) == 2
         assert arrays["embeddings"].shape[0] == 3
+
+
+def test_route_chunk_preserves_noncontiguous_document_ids(tmp_path):
+    source = tmp_path / "source"
+    writer = ChunkWriter(FileSystem(root=str(tmp_path)), str(source), 1_000_000, [])
+    for doc_id, token in ((10, 10), (20, 20)):
+        writer.add_document(doc_id, [token, token + 1], np.array([[1.0, 0.0]], dtype=np.float32), [(0, 2, 2)], [])
+    writer.save_chunk()
+    centroids = tmp_path / "centroids.npy"
+    np.save(centroids, np.array([[1.0, 0.0]], dtype=np.float32))
+    hkm_root = tmp_path / "hkm"
+    hkm_root.mkdir()
+    route_chunk(str(next(source.glob("*.hkmchunk"))), str(hkm_root), str(centroids))
+    routed = next((hkm_root / "cluster_0000").rglob("*.hkmchunk"))
+    reader = ChunkReader(str(routed), [])
+    assert reader.embed_index["document_id"].tolist() == [10, 20]
 
 
 if __name__ == "__main__":

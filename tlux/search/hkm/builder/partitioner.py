@@ -101,7 +101,7 @@ def route_chunk(
             cluster_dir = os.path.join(hkm_dir, f"cluster_{cid:04d}", "data", f"worker_{worker_index:04d}")
             os.makedirs(cluster_dir, exist_ok=True)
             writers[cid] = ChunkWriter(fs, cluster_dir, chunk_size_limit=8 * 2**20, metadata_schema=[])
-        doc_id = int(reader.chunk_metadata().get("min_document_id", 0) or 0) + local_idx
+        doc_id = int(emb_meta[0]["document_id"])
         emb_windows = [(int(m["token_start"]), int(m["token_end"]), int(m["window_size"])) for m in emb_meta]
         writers[cid].add_document(doc_id, token_list, emb, emb_windows, [])
     for writer in writers.values():
@@ -146,7 +146,7 @@ def route_embeddings(
                 writers[cid] = ChunkWriter(fs, cluster_dir, chunk_size_limit=8 * 2**20, metadata_schema=[], emit_worker_stats=True)
             writer = writers[cid]
             for doc_local_idx, tokens, emb, emb_meta in docs:
-                doc_id = reader.chunk_metadata().get("min_document_id", 0) + doc_local_idx
+                doc_id = int(emb_meta[0]["document_id"])
                 emb_windows = [(int(m["token_start"]), int(m["token_end"]), int(m["window_size"])) for m in emb_meta]
                 writer.add_document(doc_id, tokens.tolist(), emb, emb_windows, [])
                 cluster_embeddings[cid].append(emb)

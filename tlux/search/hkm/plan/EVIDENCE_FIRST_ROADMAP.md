@@ -112,8 +112,11 @@ long-running executor sample remains an environment-level verification item.
 - [x] Evaluate 174 non-empty random passages across prose, code, and metadata-heavy corpora: 100 Fourth Wing prose passages plus 74 repository passages. The repository final evidence relevance recall@10/precision@1 is 1.000/1.000; exact document identity is 0.919/0.784 because several files contain identical evidence.
 - [x] Remove target-document knowledge from fallback decisions, disable model reasoning, shorten the planner prompt, cap query output at 24 tokens, and cache source slices during evidence ranking. The 74-passage repository run measured about 1.1 s median planning and 162 ms median exhaustive search with a 9.5% fallback rate.
 - [x] Add an optional deterministic-first planner path. On a 20-passage real Gemma run it called the model for 20% of samples while retaining final evidence relevance recall@10/precision@1 of 1.000; the full current source-index sample still exposes two stale leaf-artifact misses.
-- [ ] Rebuild the source index and repair any internal/leaf token-routing misses before treating the 74-passage real-model gate as authoritative again. The current baseline and deterministic-first runs both miss `tests/test_chunk_io.py` and `embedder.py` for the same sampled passages.
-- [ ] Minimize fallback work and probe/embedding latency only after the real-model recall gate remains at 1.000.
+- [x] Preserve non-contiguous document IDs while routing recursive chunks. The old source index had silently reassigned later documents to `min_id + local_index`, causing the reproducible `tests/test_chunk_io.py` and `embedder.py` misses.
+- [x] Rebuild the 76-file source corpus after that repair: 169 active passages pass audit, and deterministic-first real Gemma retrieval reaches final content-evidence recall@10/precision@1/MRR of 1.000/1.000/1.000.
+- [x] Add adaptive probe escalation. With `--initial-probe 2`, the 74-passage real Gemma run used the model for 16.2% of samples, reached exact target recall@10 of 1.000 and final evidence relevance recall@10/precision@1 of 1.000/1.000, with about 212 ms median initial search and 64 ms median exhaustive escalation.
+- [x] Validate adaptive probe 2 on 100 random Fourth Wing prose passages: final target and evidence recall@10/precision@1/MRR were all 1.000, with no model calls or fallback searches required.
+- [ ] Benchmark adaptive defaults on larger corpora and minimize the remaining search/model tail latency.
 
 Evidence relevance is content-based: a returned source must contain the sampled
 passage after whitespace normalization or at least 90% of its distinct terms.

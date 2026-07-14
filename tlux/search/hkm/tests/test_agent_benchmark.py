@@ -35,9 +35,11 @@ def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> N
         samples=2,
         top_k=3,
         probe_counts=[0],
+        initial_probe_count=1,
     )
     assert report["final"]["recall_at_k"] == 1.0
     assert report["final"]["mrr"] > 0.0
+    assert report["initial_probe_count"] == 1
 
 
 def test_deterministic_first_skips_model_when_evidence_hits(tmp_path: Path, monkeypatch) -> None:

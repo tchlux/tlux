@@ -386,9 +386,12 @@ def evaluate_agent(
     max_tokens: int = 48,
     probe_counts: List[int] | None = None,
     deterministic_first: bool = False,
+    initial_probe_count: int = 0,
 ) -> Dict[str, Any]:
     if top_k < 1:
         raise ValueError("top_k must be positive")
+    if initial_probe_count < 0:
+        raise ValueError("initial probe count must be non-negative")
     probe_counts = probe_counts or [0, 1, 2, 4]
     if any(probe < 0 for probe in probe_counts):
         raise ValueError("probe counts must be non-negative")
@@ -414,12 +417,20 @@ def evaluate_agent(
                 query = _keyword_query(sample.excerpt)
                 planner_source = "deterministic_fallback"
         planner_ms = (time.perf_counter() - planner_started) * 1000.0
-        first, first_ms = _search(searcher, query, top_k, 0)
+        first, first_ms = _search(searcher, query, top_k, initial_probe_count)
         first_rank = _target_rank(first, sample.doc_id)
         fallback_query = ""
         fallback_ms = 0.0
         first_relevant_rank = _evidence_rank(first, sample.excerpt, searcher, source_cache)
-        if deterministic_first and first_relevant_rank != 1:
+        current = first
+        current_relevant_rank = first_relevant_rank
+        exhaustive_ms = 0.0
+        if initial_probe_count and current_relevant_rank != 1:
+            exhaustive, elapsed = _search(searcher, query, top_k, 0)
+            exhaustive_ms += elapsed
+            current = _merge_results([current, exhaustive], top_k, sample.excerpt)
+            current_relevant_rank = _evidence_rank(current, sample.excerpt, searcher, source_cache)
+        if deterministic_first and current_relevant_rank != 1:
             planner_started = time.perf_counter()
             planner_calls = 1
             planner_source = generator.name
@@ -431,10 +442,11 @@ def evaluate_agent(
                 planner_source = "deterministic_fallback"
             planner_ms += (time.perf_counter() - planner_started) * 1000.0
             model_result, model_ms = _search(searcher, query, top_k, 0)
-            first = _merge_results([first, model_result], top_k, sample.excerpt)
+            current = _merge_results([current, model_result], top_k, sample.excerpt)
+            current_relevant_rank = _evidence_rank(current, sample.excerpt, searcher, source_cache)
             first_ms += model_ms
-        final = first if first_relevant_rank == 1 else _rerank_with_evidence(
-            first, sample.excerpt, searcher, source_cache
+        final = current if current_relevant_rank == 1 else _rerank_with_evidence(
+            current, sample.excerpt, searcher, source_cache
         )
         final_rank = _target_rank(final, sample.doc_id)
         final_relevant_rank = _evidence_rank(final, sample.excerpt, searcher, source_cache)
@@ -470,6 +482,7 @@ def evaluate_agent(
             "fallback_query": fallback_query,
             "planner_ms": planner_ms,
             "first_search_ms": first_ms,
+            "exhaustive_search_ms": exhaustive_ms,
             "fallback_search_ms": fallback_ms,
         })
         for probe in probe_counts:
@@ -501,10 +514,16 @@ def evaluate_agent(
         "final_relevance": _metrics(rows, "final_relevant_rank"),
         "fallback_rate": sum(bool(row["fallback_query"]) for row in rows) / len(rows) if rows else 0.0,
         "planner_call_rate": sum(row["planner_calls"] for row in rows) / len(rows) if rows else 0.0,
+        "exhaustive_escalation_rate": (
+            sum(row["exhaustive_search_ms"] > 0 for row in rows) / len(rows)
+            if rows else 0.0
+        ),
         "deterministic_first": deterministic_first,
+        "initial_probe_count": initial_probe_count,
         "latency_ms": {
             "planner": _timing_metrics(rows, "planner_ms"),
             "first_search": _timing_metrics(rows, "first_search_ms"),
+            "exhaustive_search": _timing_metrics(rows, "exhaustive_search_ms"),
             "fallback_search": _timing_metrics(rows, "fallback_search_ms"),
         },
         "probe_curve": curve,
@@ -526,13 +545,14 @@ def render_report(report: Dict[str, Any]) -> str:
         f"- Generator: `{report['generator']}`",
         f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k: {report['samples']} / {report['seed']} / {report['top_k']}",
-        f"- Planner mode: `{'deterministic-first' if report['deterministic_first'] else report['generator']}`; model calls/sample: `{report['planner_call_rate']:.3f}`",
+        f"- Planner mode: `{'deterministic-first' if report['deterministic_first'] else report['generator']}`; model calls/sample: `{report['planner_call_rate']:.3f}`; initial probe: `{report['initial_probe_count']}`",
         f"- {first_label} target-doc recall@k: `{first['recall_at_k']:.3f}`; precision@1: `{first['precision_at_1']:.3f}`; MRR: `{first['mrr']:.3f}`",
         f"- {first_label} evidence relevance@k: `{first_relevance['recall_at_k']:.3f}`; precision@1: `{first_relevance['precision_at_1']:.3f}`; MRR: `{first_relevance['mrr']:.3f}`",
         f"- Final target-doc recall@k: `{final['recall_at_k']:.3f}`; precision@1: `{final['precision_at_1']:.3f}`; MRR: `{final['mrr']:.3f}`",
         f"- Final evidence relevance@k: `{final_relevance['recall_at_k']:.3f}`; precision@1: `{final_relevance['precision_at_1']:.3f}`; MRR: `{final_relevance['mrr']:.3f}`",
         f"- Fallback rate: `{report['fallback_rate']:.3f}`",
-        f"- Latency ms (median/p95): planner `{latency['planner']['median_ms']:.2f}/{latency['planner']['p95_ms']:.2f}`; search `{latency['first_search']['median_ms']:.2f}/{latency['first_search']['p95_ms']:.2f}`; fallback `{latency['fallback_search']['median_ms']:.2f}/{latency['fallback_search']['p95_ms']:.2f}`",
+        f"- Exhaustive escalation rate: `{report['exhaustive_escalation_rate']:.3f}`",
+        f"- Latency ms (median/p95): planner `{latency['planner']['median_ms']:.2f}/{latency['planner']['p95_ms']:.2f}`; search `{latency['first_search']['median_ms']:.2f}/{latency['first_search']['p95_ms']:.2f}`; exhaustive escalation `{latency['exhaustive_search']['median_ms']:.2f}/{latency['exhaustive_search']['p95_ms']:.2f}`; fallback `{latency['fallback_search']['median_ms']:.2f}/{latency['fallback_search']['p95_ms']:.2f}`",
         "",
         "## Probe curve (model query only)",
         "",
@@ -568,6 +588,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
+    parser.add_argument("--initial-probe", type=int, default=0, help="Use this probe budget before exhaustive escalation")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--report-output", default=None)
     args = parser.parse_args()
@@ -587,6 +608,7 @@ def main() -> None:
         args.max_tokens,
         [int(value) for value in args.probes.split(",") if value.strip()],
         args.deterministic_first,
+        args.initial_probe,
     )
     markdown = render_report(report)
     if args.json_output:

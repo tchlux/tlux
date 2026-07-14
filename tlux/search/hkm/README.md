@@ -300,6 +300,8 @@ a real-model run proves a lower-work setting preserves recall. For example:
 
 Add `--deterministic-first` to search with cheap lexical evidence before calling
 the model; the model is used only when that first result is not evidence-relevant.
+Add `--initial-probe 2` to try a small HKM probe first and retry exhaustive
+search only when the evidence check misses.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
