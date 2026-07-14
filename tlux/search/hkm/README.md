@@ -317,8 +317,9 @@ Gemma 4's native tool template can truncate on long raw passages. Use
 the low-compute path. Across all 395 prose passages this path returned rank-1
 evidence with 1.000 recall/precision@1/MRR at 256/361 ms median/p95 and zero
 model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
-at 92/954 ms median/p95; exact document identity remains limited by duplicate
-source content.
+at 89/382 ms median/p95; exact document identity remains limited by duplicate
+source content. The current all-395 prose gate is 251/354 ms median/p95 with
+the same perfect evidence metrics.
 
 The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
