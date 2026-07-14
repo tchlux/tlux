@@ -398,7 +398,8 @@ model-serving optimization target.
 
 The current 50-sample repository gate uses the 1.5-second timeout and still
 returns 1.000 evidence recall/precision@1/MRR with zero errors; observed
-model-first agent latency was 897/1,542 ms median/p95. The 8-token prompt now
+model-first agent latency was 578/1,227 ms median/p95 after ordering the
+deterministic rare-term lane first. The 8-token prompt now
 asks for only 1-3 exact words, matching the output budget: this gate had zero
 planner recoveries, 36% bounded fallback, and 6% repeated-passage cache hits.
 The timeout is a bounded failure budget, not a quality shortcut: failed planner

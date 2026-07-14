@@ -16,6 +16,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     LMStudioToolAgent,
     StubQueryGenerator,
     _evidence_coverage,
+    _fallback_queries,
     _parse_tool_query,
     _keyword_query,
     _planner_excerpt,
@@ -106,6 +107,12 @@ def test_planner_excerpt_bounds_long_raw_input() -> None:
     words = [f"word{index}" for index in range(100)]
     excerpt = _planner_excerpt(" ".join(words), limit=10)
     assert excerpt.split() == words[:5] + words[-5:]
+
+
+def test_fallback_queries_try_rare_terms_before_phrases() -> None:
+    excerpt = "alpha dragon fortress with repeated identifier_123"
+    queries = _fallback_queries(excerpt)
+    assert queries[0] == _keyword_query(excerpt)
 
 
 def test_tool_query_is_bounded_and_recovers_truncated_json() -> None:

@@ -112,7 +112,7 @@ def _fallback_queries(excerpt: str) -> List[str]:
         word for word in identifiers
         if "_" in word or any(char.isdigit() for char in word) or len(word) >= 12
     ]
-    queries = _phrase_queries(excerpt) + [_keyword_query(excerpt)] + list(dict.fromkeys(distinctive))[:8]
+    queries = [_keyword_query(excerpt)] + _phrase_queries(excerpt) + list(dict.fromkeys(distinctive))[:8]
     return list(dict.fromkeys(query for query in queries if query.strip()))
 
 
