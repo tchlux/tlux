@@ -204,6 +204,53 @@ def test_lmstudio_timeout_does_not_retry() -> None:
     assert client._connection is None
 
 
+def test_lmstudio_reconnects_once_after_dropped_socket(monkeypatch) -> None:
+    class DroppedConnection:
+        sock = None
+
+        def __init__(self) -> None:
+            self.timeout = None
+            self.closed = False
+
+        def request(self, *args, **kwargs):
+            raise ConnectionResetError("socket dropped")
+
+        def close(self) -> None:
+            self.closed = True
+
+    class WorkingConnection:
+        sock = None
+
+        def __init__(self) -> None:
+            self.timeout = None
+            self.requests = 0
+
+        def request(self, *args, **kwargs):
+            self.requests += 1
+
+        def getresponse(self):
+            return SimpleNamespace(
+                status=200,
+                reason="OK",
+                headers={},
+                read=lambda: b'{"data": []}',
+            )
+
+    client = LMStudioQueryGenerator("http://localhost:1234/v1", model="fake")
+    dropped = DroppedConnection()
+    working = WorkingConnection()
+    connections = iter((dropped, working))
+
+    def next_connection():
+        client._connection = next(connections)
+        return client._connection
+
+    monkeypatch.setattr(client, "_http_connection", next_connection)
+    assert client._request("models") == {"data": []}
+    assert dropped.closed is True
+    assert working.requests == 1
+
+
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     build_search_index_from_documents(
