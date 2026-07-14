@@ -416,8 +416,8 @@ maximum after warmup.
 
 For the planner-only path, the smaller `google/gemma-3-4b` is a lower-cost
 option: a warmed 50-request random-passage run grounded 50/50 requests, used
-48 model-generated queries and 2 rescues, and measured 780/1,160 ms median/p95
-with the 16-token planner budget.
+48 model-generated queries and 2 rescues, and measured 721/881 ms median/p95
+with the 16-token planner budget and 1.0-second timeout.
 Use Gemma 4 when native model-emitted tool calls are required.
 
 Pass `--native-planner-tool` with `--model-first` when the model itself must

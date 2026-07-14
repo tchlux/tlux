@@ -138,7 +138,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Separate persistent startup from request latency with a one-time 15-second planner warmup budget; a live 20-request model-first run grounded 20/20 requests, with 17 model queries and 3 deterministic rescues.
 - [x] Expose the native planner/tool bridge through persistent `hkm-agent --native-planner-tool`; a live 10-sample gate emitted `search_index` on 10/10 requests with perfect evidence metrics.
 - [x] Reuse the bounded planner cache in native mode while retaining a fresh `search_index` completion; repeated native requests drop from two completions to one without skipping evidence validation.
-- [x] Re-measure the smaller Gemma 3 planner-only path: a warmed 50-request random-passage run grounded 50/50 requests with 48 model queries and 780/1,160 ms median/p95 latency under the 16-token budget; Gemma 4 remains the native-tool choice.
+- [x] Re-measure the smaller Gemma 3 planner-only path: a warmed 50-request random-passage run grounded 50/50 requests with 48 model queries and 721/881 ms median/p95 latency under the 16-token, 1.0-second budget; Gemma 4 remains the native-tool choice.
 - [x] Normalize whitespace in planner-cache keys so equivalent raw passages reuse one query without changing evidence validation.
 - [x] Collapse multi-term lexical candidate scans into one HKM traversal; all 395 prose chunks retain 1.000 evidence recall/precision@1/MRR with zero model calls at 83/117 ms median/p95.
 - [ ] Reduce the remaining tail latency. The deterministic path is now below 120 ms p95 on the prose corpus; the latest warmed 50-sample Gemma 4 planner gate measures 0.880/1.055 s median/p95, so local model generation remains the main tail.
@@ -219,3 +219,4 @@ before relying on direct Python serving.
 - 2026-07-14: Changed token candidate collection to scan each HKM node once for all query terms. The all-395 grounded prose gate stayed perfect while deterministic-first latency fell to 83/117 ms median/p95.
 - 2026-07-14: Re-ran the native Gemma 4 bridge after the search optimization: 10/10 model-emitted tool calls and grounded results, with search latency at 114/197 ms median/p95.
 - 2026-07-14: Reduced the default planner timeout from 1.5 to 1.0 seconds. A warmed 50-sample Gemma 4 planner gate retained perfect grounded metrics with zero planner recovery while reducing agent latency to 880/1,055 ms median/p95; timeout rescue remains evidence-checked.
+- 2026-07-14: Re-measured the lower-cost Gemma 3 planner at the same 1.0-second timeout: 50/50 grounded, 48 model queries, 2 rescues, and 721/881 ms median/p95 latency.
