@@ -52,10 +52,13 @@ and reached 0.875 recall@5/precision@1/MRR overall; the six genuinely generated
 queries were all rank-one, while the two rescued missing-entity cases were not.
 
 The heterogeneous FineWeb profile index at `/tmp/hkm_fineweb_profile_drama`
-provides the next challenge corpus: an eight-sample deterministic slice (32
-cases) reached 0.906 recall@5, 0.750 precision@1, and 0.807 MRR at 1.97/2.98 s
-median/p95 agent latency. Its misses are generic terms such as `authors`,
-`reading`, and `Update`, so larger gates need rarity-stratified sampling.
+now passes an eight-sample model-first slice (32 cases) at 1.000 recall@5,
+precision@1, and MRR across all four styles. Gemma 3 generated 31/32 requests;
+one invalid missing-entity generation used the evidence-checked deterministic
+rescue. Median agent/search latency was 5.94/2.74 s (p95 6.34/2.96 s).
+Its deterministic-only slice remains a useful hard gate at 0.906/0.750/0.807,
+where generic terms such as `authors`, `reading`, and `Update` expose the next
+rarity-stratified challenge.
 
 Use `--query-source lm --base-url URL --model MODEL` to ask LM Studio to write
 each request from the raw evidence. Generated requests must quote at least two

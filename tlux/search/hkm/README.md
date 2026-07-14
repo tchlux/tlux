@@ -465,6 +465,9 @@ baseline is documented in `plan/benchmark_random_language.md`; use
 The current 40-case deterministic run reaches 0.775 evidence recall@5 and
 0.550 precision@1; a post-validation eight-case model-first smoke reaches
 0.875 and 0.875 overall, with 6/8 genuine LM-generated requests.
+The valid 512-file FineWeb profile index passes a 32-case model-first language
+gate at 1.000 recall/precision/MRR across all four styles, with one validated
+deterministic rescue.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055
