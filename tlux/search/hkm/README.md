@@ -324,12 +324,24 @@ random prose passages, this path reached 1.000 content-evidence recall with
 zero tool errors; median one-completion agent latency was about 2.7-3.0 s.
 The report still records model citation quality separately.
 
+A current 20-sample live Gemma 4 E4B repository run made one tool call for
+every sample and retained 1.000 content-evidence recall and precision@1;
+median agent latency was 2.87 s (p95 4.01 s). Reserve this expensive model
+lane for passages that fail the cheap first pass.
+
 Add `--deterministic-first` to skip Gemma when a cheap lexical result already
 contains the raw passage. On the same 50-sample gates it reduced model calls
 to 0% on both prose and repository after evidence-aware reranking, with
 content-evidence recall and precision@1 at 1.000; median result latency was
 about 351 ms on prose and 163 ms on the repository. The model-assisted path
 remains available for low-confidence passages.
+
+The larger all-active deterministic gates now cover 75 eligible repository
+passages and all 395 prose chunks. Both retain 1.000 content-evidence recall
+and precision@1 with zero model calls. Median/p95 result latency is 675/1,432
+ms on the repository and 338/2,252 ms on prose. Exact document-id precision is
+lower on the repository because repeated boilerplate produces content-equivalent
+duplicate chunks; evidence relevance is the product gate.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the

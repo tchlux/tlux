@@ -120,19 +120,20 @@ long-running executor sample remains an environment-level verification item.
 - [x] Add explicit tool search modes. Token-only retrieval avoids the embedding pass; hybrid remains the correctness default for general callers.
 - [x] Add the one-completion grounded tool-only path, a 16-word query budget, and score/short-query fallback lanes. Across 50 random repository passages and 50 random Fourth Wing passages, live Gemma tool calls achieved 1.000 content-evidence recall with zero errors; evidence precision@1 was 0.920 and 0.980 respectively.
 - [x] Wire deterministic-first routing and evidence-aware reranking into the tool path. The same 50-sample gates retained 1.000 content-evidence recall and precision@1 with zero model calls; median result latency was about 351 ms on prose and 163 ms on the repository.
-- [ ] Benchmark adaptive defaults on larger corpora and minimize the remaining search/model tail latency.
+- [x] Benchmark adaptive defaults on larger corpora: all 75 eligible repository passages and all 395 prose chunks retain 1.000 content-evidence recall and precision@1 with deterministic-first routing and zero model calls.
+- [ ] Reduce the remaining tail latency. Current deterministic-first median/p95 result latency is 675/1,432 ms on the repository and 338/2,252 ms on prose; the live one-completion Gemma lane is 2.87/4.01 s on a 20-sample repository gate.
 
 Evidence relevance is content-based: a returned source must contain the sampled
 passage after whitespace normalization or at least 90% of its distinct terms.
 This separates a genuinely relevant duplicate file from an exact document-id
 miss and keeps the target-id audit visible.
 
-The LM Studio application and multiple GGUF models are installed locally, but its
-desktop server is not running in the current locked-Mac session; `lms server
-start` waits for that service. Its installed llama.cpp 2.24 backend does serve
-the Gemma 4 GGUF directly with reasoning disabled, so the real-model gate is
-now measurable without installing another runtime. The separate audio environment has
-`llama-cpp-python==0.3.9`, but it cannot load these newer GGUF architectures.
+The LM Studio application and multiple GGUF models are installed locally. Its
+bundled llama.cpp 2.24 backend serves the Gemma 4 E4B GGUF with reasoning
+disabled, and the live model/tool gate is repeatable. The separately installed
+Python 3.12 `llama_cpp` binding is older (0.3.16) and aborts while loading these
+newer GGUF architectures; use the LM Studio backend or upgrade the binding
+before relying on direct Python serving.
 
 ## Decisions
 
@@ -158,4 +159,4 @@ now measurable without installing another runtime. The separate audio environmen
 - 2026-07-13: Added `hkm-agent-benchmark` for raw-passage sampling, LM Studio-compatible query planning, deterministic offline regression, evidence-aware reranking, and probe curves. A 20-passage repository run reached 1.000 final recall@10 and precision@1 after repairing token-context variants and active documents omitted from HKM leaves.
 - 2026-07-13: Served Gemma 4 E4B through the installed LM Studio llama.cpp 2.24 backend with reasoning disabled. Final content-evidence relevance was 1.000 recall@10/precision@1 across 100 prose passages and 74 non-empty code/metadata repository passages; exact document identity remains lower for duplicate files.
 - 2026-07-13: Added the real model/tool/model agent harness and validated five live Gemma tool calls at 1.000 tool-call rate and 1.000 target/evidence recall@5; normalized truncated tool arguments and kept grounded evidence separate from optional model source-path citations.
-- 2026-07-13: Added token-only tool retrieval, a one-completion grounded result path, bounded model queries, confidence-triggered semantic/lexical fallback lanes, deterministic-first routing, and evidence-aware reranking. A 100-sample live cross-corpus gate retained 1.000 content-evidence recall and precision@1; deterministic-first reduced median result latency to about 163-351 ms with zero model calls on this gate.
+- 2026-07-13: Added token-only tool retrieval, a one-completion grounded result path, bounded model queries, confidence-triggered semantic/lexical fallback lanes, deterministic-first routing, and evidence-aware reranking. The current live 20-sample Gemma tool-only gate retains 1.000 content-evidence recall and precision@1. All-active deterministic gates cover 75 repository passages and 395 prose chunks at the same evidence quality; p95 latency remains the next optimization target.

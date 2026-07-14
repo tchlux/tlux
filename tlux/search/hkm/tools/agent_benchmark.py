@@ -237,6 +237,8 @@ def _adaptive_tool_search(
     top_k: int,
     probe_count: int,
     mode: str,
+    fallback_text: str = "",
+    source_cache: Dict[tuple[str, int, int], str] | None = None,
 ) -> tuple[Any, float, int]:
     result, elapsed = _search(searcher, query, top_k, probe_count, mode)
     fallback_calls = 0
@@ -252,7 +254,8 @@ def _adaptive_tool_search(
     elapsed += semantic_ms
     fallback_calls += 1
     sources = [semantic]
-    for alternate in _fallback_queries(query)[:4]:
+    alternates = _fallback_queries(fallback_text or query)
+    for alternate in alternates[:5]:
         if alternate == query:
             continue
         lexical, lexical_ms = _search(searcher, alternate, top_k, probe_count, "token")
@@ -265,7 +268,29 @@ def _adaptive_tool_search(
             if key not in seen:
                 docs.append(hit)
                 seen.add(key)
-    result.docs = docs[:top_k * TOOL_EXPANSION_FACTOR]
+    result.docs = docs
+    # Rank all first-pass lanes before truncating so later phrase hits survive.
+    if fallback_text:
+        _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+    # Probe remaining distinctive terms only when the first lanes lack evidence.
+    if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) is None:
+        rescue_sources = []
+        for alternate in alternates[5:]:
+            if alternate == query:
+                continue
+            rescue, rescue_ms = _search(searcher, alternate, top_k * 2, probe_count, "token")
+            rescue_sources.append(rescue)
+            elapsed += rescue_ms
+            fallback_calls += 1
+        for source in rescue_sources:
+            for hit in source.docs:
+                key = (int(hit.doc_id), tuple(hit.span))
+                if key not in seen:
+                    docs.append(hit)
+                    seen.add(key)
+        result.docs = docs
+        _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+    result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
     return result, elapsed, fallback_calls
 
 
@@ -351,7 +376,13 @@ class LMStudioToolAgent:
         function = call.get("function", {})
         query = _parse_tool_query(function.get("arguments", {}))
         result, search_ms, fallback_calls = _adaptive_tool_search(
-            searcher, query, top_k, probe_count, getattr(self, "mode", "hybrid")
+            searcher,
+            query,
+            top_k,
+            probe_count,
+            getattr(self, "mode", "hybrid"),
+            excerpt,
+            getattr(self, "source_cache", None),
         )
         _rerank_with_evidence(result, excerpt, searcher, getattr(self, "source_cache", None))
         call_id = str(call.get("id", "tool-call"))
@@ -421,7 +452,7 @@ class DeterministicToolAgent:
         started = time.perf_counter()
         query = _keyword_query(excerpt)
         result, search_ms, fallback_calls = _adaptive_tool_search(
-            searcher, query, top_k, probe_count, self.mode
+            searcher, query, top_k, probe_count, self.mode, excerpt, self.source_cache
         )
         _rerank_with_evidence(result, excerpt, searcher, self.source_cache)
         answer_source_path = result.docs[0].source_path if result.docs else ""
