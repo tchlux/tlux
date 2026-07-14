@@ -802,6 +802,10 @@ def _evidence_coverage(
     if source_path and searcher is not None:
         source = Path(searcher.source_root) / source_path
         if source.exists():
+            excerpt_terms = set(re.findall(r"[A-Za-z0-9]+", normalized_excerpt))
+            evidence_terms = set(re.findall(r"[A-Za-z0-9]+", normalized_text))
+            if len(excerpt_terms) >= 4 and excerpt_terms.issubset(evidence_terms):
+                return 1.0
             if len(normalized_excerpt.split()) > PLANNER_INPUT_WORDS:
                 size = source.stat().st_size
                 key = (str(source), 0, size)

@@ -498,6 +498,13 @@ def test_evidence_guard_rejects_generic_overlap_when_source_exists(tmp_path: Pat
         )
     assert _evidence_coverage(hit("target.txt"), target, searcher) == 1.0
     assert _evidence_coverage(hit("decoy.txt"), target, searcher) == 0.0
+    punctuated = "Industry praise for: Suspenseful, sexy, and entertaining storytelling -- first in Yarros Empyrean series."
+    (tmp_path / "punctuated.txt").write_text(punctuated, encoding="utf-8")
+    assert _evidence_coverage(
+        hit("punctuated.txt"),
+        "Industry praise for Suspenseful sexy entertaining storytelling first Yarros Empyrean series",
+        searcher,
+    ) == 1.0
     result = SimpleNamespace(docs=[hit("decoy.txt", 1.0), hit("target.txt", 0.1)])
     _rerank_with_evidence(result, target, searcher)
     assert result.docs[0].document.source_path == "target.txt"

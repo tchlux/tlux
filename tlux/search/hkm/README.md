@@ -336,9 +336,10 @@ after the bounded 1.0-second LM Studio timeout. If every bounded search lane mis
 the raw evidence, the tool fails closed with an empty result rather than
 returning an ungrounded candidate.
 
-Evidence ranking now requires the normalized raw passage in a readable indexed
-source before accepting a hit; generic term overlap is used only when the
-source snapshot is unavailable. With this stricter precision gate, deterministic
+Evidence ranking now requires the normalized raw passage, or all of at least
+four distinct request terms after punctuation/word-order normalization, in a
+readable indexed source before accepting a hit; partial generic overlap is
+still rejected. With this stricter precision gate, deterministic
 token retrieval still returns 1.000 evidence recall/precision@1/MRR across all
 395 prose passages (83/117 ms median/p95) and all 75 repository passages
 (90/466 ms median/p95). Duplicate repository files can still lower exact
