@@ -471,12 +471,13 @@ missing-entity requests against exact source evidence. The fixed Fourth Wing
 baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
-The current 40-case deterministic run reaches 0.850 evidence recall@5 and
-0.675 precision@1 (MRR 0.743); vague and specific precision improved after
-contraction-aware, signal-ranked clue generation, while conditional and
-missing-entity recall remain open. A latest eight-case Gemma 3 model-first smoke reaches
+The current 40-case deterministic run reaches 1.000 evidence recall@5,
+0.775 precision@1, and 0.866 MRR; vague and specific requests now retain four
+grounded clues, while missing-entity requests retain four later clues after
+omitting the first. Conditional precision remains the main open challenge. A
+latest eight-case Gemma 3 model-first smoke reaches
 1.000 recall@5, 0.875 precision@1, and 0.938 MRR, including two rejected
-missing-entity generations recovered with three retained clues; larger random
+missing-entity generations recovered with four retained clues; larger random
 gates remain open.
 The valid 512-file FineWeb profile index passes a 32-case model-first language
 gate at 1.000 recall/precision/MRR across all four styles, with one validated

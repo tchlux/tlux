@@ -22,7 +22,9 @@ def test_deterministic_queries_keep_evidence_terms_and_vary_style() -> None:
     )]
     assert all("archivist" in query and "crosses" in query for query in queries[:3])
     assert all("basalt" in query for query in queries)
+    assert all("thunder" in query for query in queries[:3])
     assert "archivist" not in queries[-1]
+    assert "thunder" in queries[-1]
     assert len(set(queries)) == 4
     assert "who or what" in queries[-1]
     assert "If " in queries[2]
@@ -38,6 +40,7 @@ def test_content_terms_skip_contraction_fragments_and_dialogue_glue() -> None:
     assert "doesn" not in terms
     assert terms[:3] == ["unhealthy", "voice", "echoes"]
     assert "stairwell" in terms
+    assert _content_terms("slowly cracks a yawn near Andarna") == ["Andarna"]
 
 
 def test_build_cases_is_reproducible_and_rejects_unknown_style() -> None:

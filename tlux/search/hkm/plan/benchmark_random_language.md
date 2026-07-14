@@ -4,7 +4,7 @@
 memory-style requests from each raw passage, and runs the persistent language
 agent. Four styles are included: vague, specific, conditional, and
 missing-entity. The last style deliberately drops the first content term and
-retains three later clues to model forgetting a subject or object. A fixed
+retains four later clues to model forgetting a subject or object. A fixed
 seed makes every query and target reproducible.
 
 The report separates exact target-document ranks from raw-evidence ranks. The
@@ -22,12 +22,13 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
 ```
 
 On 10 Fourth Wing samples (40 cases), the deterministic generator now reaches
-evidence recall@5 0.850, precision@1 0.675, and MRR 0.743. By style, evidence
-recall is 0.900 vague, 0.800 specific, 0.800 conditional, and 0.900
-missing-entity; missing-entity precision@1 is 0.500. Median agent/search
-latency is 548/466 ms (p95 894/766 ms). The generator normalizes contractions, drops common
-dialogue glue, and keeps three early clues plus one later distinctive clue;
-this improves ranking without changing the index.
+evidence recall@5 1.000, precision@1 0.775, and MRR 0.866. By style, evidence
+recall is 1.000 vague, 1.000 specific, 1.000 conditional, and 1.000
+missing-entity; conditional precision@1 is 0.500 and missing-entity precision@1
+is 0.700. Median agent/search latency is 545/458 ms (p95 892/767 ms). The
+generator normalizes contractions, drops common dialogue glue, and keeps four
+grounded clues for ordinary styles plus four later clues after omitting the first
+for missing-entity requests; this improves ranking without changing the index.
 This remains a challenge baseline, not a production quality claim; the
 conditional and forgotten-entity styles still need larger quality gates.
 The deterministic templates intentionally retain lexical clues, so they test

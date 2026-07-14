@@ -48,24 +48,25 @@ _CONTENT_STOP_WORDS = _QUERY_WORDS | {
     "right", "scene", "separate", "side", "something", "specifically", "start",
     "started", "steady", "still", "than", "then", "think", "thoughts", "those",
     "though", "topic", "toward", "trying", "under", "want", "without", "wording",
-    "wrong", "yourself",
+    "wrong", "yourself", "slowly", "cracks", "yawn",
 }
 _STYLE_TEMPLATES = {
     "vague": (
-        "A scene involving {a} and {b} near {c}, without relying on the exact wording",
-        "Something happens around {a} while {b} and {c} are present",
+        "A scene involving {a}, {b}, and {c}, with {d}, without relying on exact wording",
+        "Something happens around {a} while {b}, {c}, and {d} are present",
     ),
     "specific": (
-        "Find the passage where {a} meets {b} near {c}",
-        "A passage specifically about {a}, {b}, and {c}",
+        "Find the passage where {a}, {b}, and {c} appear near {d}",
+        "A passage specifically about {a}, {b}, {c}, and {d}",
     ),
     "conditional": (
-        "If {a} appears while {b} is happening near {c}, find it even if the surrounding details differ",
-        "Find where {a} occurs after {b}, unless {c} is a separate scene",
+        "If {a} appears while {b} is happening near {c}, and {d} is present, find it even if "
+        "the surrounding details differ",
+        "Find where {a} occurs after {b}, unless {c} is a separate scene and {d} is absent",
     ),
     "missing_entity": (
-        "I remember {b} near {c} and {d}, but not who or what was involved",
-        "I cannot recall the person or object; search for the part with {b}, {c}, and {d}",
+        "I remember {b} near {c}, {d}, and {e}, but not who or what was involved",
+        "I cannot recall the person or object; search for the part with {b}, {c}, {d}, and {e}",
     ),
 }
 _STYLES = tuple(_STYLE_TEMPLATES)
@@ -120,11 +121,14 @@ def _content_terms(text: str, limit: int = 4) -> List[str]:
 def deterministic_query(excerpt: str, style: str, variant: int = 0) -> str:
     if style not in _STYLE_TEMPLATES:
         raise ValueError(f"unknown query style: {style}")
-    terms = _content_terms(excerpt, 4)
-    while len(terms) < 4:
+    limit = 5 if style == "missing_entity" else 4
+    terms = _content_terms(excerpt, limit)
+    while len(terms) < limit:
         terms.append(terms[-1])
     template = _STYLE_TEMPLATES[style][variant % len(_STYLE_TEMPLATES[style])]
-    return _bounded_query(template.format(a=terms[0], b=terms[1], c=terms[2], d=terms[3]))
+    return _bounded_query(template.format(
+        a=terms[0], b=terms[1], c=terms[2], d=terms[3], e=terms[4] if len(terms) > 4 else terms[-1],
+    ))
 
 
 # Parse a bounded JSON query returned by a compatible language model.
