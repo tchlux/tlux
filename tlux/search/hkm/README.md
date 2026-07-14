@@ -312,10 +312,17 @@ JSON answer:
     bin/hkm-agent-benchmark data/fourth_wing_hkm_index --tool-agent --samples 10 --initial-probe 2
 
 For short model-generated keyword queries, `--tool-mode token` avoids the
-embedding pass. It retained 1.000 tool evidence recall/precision on the live
-five-passage repository gate and reduced median HKM search time from about
-476 ms to 336 ms; keep `hybrid` as the correctness default until a larger
-corpus gate supports switching it.
+embedding pass. The tool bounds model queries to a small 16-word budget and
+retained 1.000 tool evidence recall/precision on the live cross-corpus gate;
+keep `hybrid` as the correctness default until a larger corpus gate supports
+switching it.
+
+For the lowest result latency, add `--tool-only --tool-mode token`. This stops
+after one model function call and returns the grounded HKM result directly,
+avoiding a second model completion. On 50 random repository passages and 50
+random prose passages, this path reached 1.000 content-evidence recall with
+zero tool errors; median one-completion agent latency was about 2.7-3.0 s.
+The report still records model citation quality separately.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the

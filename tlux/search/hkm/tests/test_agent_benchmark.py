@@ -5,6 +5,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     DeterministicToolAgent,
     LMStudioToolAgent,
     StubQueryGenerator,
+    _parse_tool_query,
     _keyword_query,
     evaluate_agent,
     evaluate_tool_agent,
@@ -51,6 +52,13 @@ def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('{"query": "dragon wardstone"}') == "dragon wardstone"
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
     assert _keyword_query("!") == "!"
+
+
+def test_tool_query_is_bounded_and_recovers_truncated_json() -> None:
+    assert _parse_tool_query('{"query":"one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen"}') == (
+        "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen"
+    )
+    assert _parse_tool_query('{"query":"alpha dragon') == "alpha dragon"
 
 
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:
@@ -138,3 +146,20 @@ def test_lmstudio_tool_protocol_executes_search_and_answer(tmp_path: Path, monke
     assert report["evidence"]["recall_at_k"] == 1.0
     assert report["grounded_source_match_rate"] == 1.0
     assert report["answer_source_match_rate"] == 1.0
+
+
+def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    agent = FakeToolAgent()
+    agent.final_answer = False
+    report = evaluate_tool_agent(str(tmp_path / "index"), agent=agent, samples=1, top_k=1)
+    assert report["answer_mode"] == "tool-only"
+    assert report["completion_calls_per_sample"] == 1.0
+    assert report["grounded_source_match_rate"] == 1.0

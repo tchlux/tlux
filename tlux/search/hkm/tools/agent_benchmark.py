@@ -29,6 +29,9 @@ STOP_WORDS = {
     "said", "some", "than", "that", "their", "there", "these", "they", "this",
     "through", "under", "what", "when", "where", "which", "while", "with", "would",
 }
+TOOL_QUERY_WORDS = 16
+TOOL_FALLBACK_SCORE = 0.7
+TOOL_EXPANSION_FACTOR = 3
 
 
 # One sampled raw passage and its exact indexed document target.
@@ -227,33 +230,76 @@ def _tool_result_payload(result: Any, limit: int) -> Dict[str, Any]:
     }
 
 
+# Search cheaply first, then add semantic and lexical lanes for low-confidence queries.
+def _adaptive_tool_search(
+    searcher: Searcher,
+    query: str,
+    top_k: int,
+    probe_count: int,
+    mode: str,
+) -> tuple[Any, float, int]:
+    result, elapsed = _search(searcher, query, top_k, probe_count, mode)
+    fallback_calls = 0
+    if mode != "token" or (
+        result.docs
+        and float(result.docs[0].score) >= TOOL_FALLBACK_SCORE
+        and len(query.split()) > 5
+    ):
+        return result, elapsed, fallback_calls
+    docs = list(result.docs)
+    seen = {(int(hit.doc_id), tuple(hit.span)) for hit in docs}
+    semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
+    elapsed += semantic_ms
+    fallback_calls += 1
+    sources = [semantic]
+    for alternate in _fallback_queries(query)[:4]:
+        if alternate == query:
+            continue
+        lexical, lexical_ms = _search(searcher, alternate, top_k, probe_count, "token")
+        sources.append(lexical)
+        elapsed += lexical_ms
+        fallback_calls += 1
+    for source in sources:
+        for hit in source.docs:
+            key = (int(hit.doc_id), tuple(hit.span))
+            if key not in seen:
+                docs.append(hit)
+                seen.add(key)
+    result.docs = docs[:top_k * TOOL_EXPANSION_FACTOR]
+    return result, elapsed, fallback_calls
+
+
 # Recover a query when a small local model truncates its JSON arguments.
 def _parse_tool_query(arguments: Any) -> str:
+    def bounded(value: Any) -> str:
+        query = parse_query(json.dumps({"query": value}))
+        return " ".join(query.split()[:TOOL_QUERY_WORDS])
+
     if isinstance(arguments, dict):
-        value = arguments.get("query", "")
-        return parse_query(json.dumps({"query": value}))
+        return bounded(arguments.get("query", ""))
     text = str(arguments)
     try:
         value = json.loads(text)
         if isinstance(value, dict):
-            return parse_query(json.dumps({"query": value.get("query", "")}))
+            return bounded(value.get("query", ""))
     except json.JSONDecodeError:
         pass
     match = re.search(r'"query"\s*:\s*"((?:\\.|[^"\\])*)', text, re.DOTALL)
     if not match:
         raise ValueError("tool call did not contain a query")
     value = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
-    return parse_query(json.dumps({"query": value}))
+    return bounded(value)
 
 
 # Run one model/tool/model turn against the HKM search index.
 class LMStudioToolAgent:
     name = "lmstudio_tool_agent"
 
-    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid"):
+    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid", final_answer: bool = True):
         self.client = client
         self.model = client.model
         self.mode = mode
+        self.final_answer = final_answer
 
     def _request(self, path: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return self.client._request(path, payload)
@@ -303,8 +349,23 @@ class LMStudioToolAgent:
         call = calls[0]
         function = call.get("function", {})
         query = _parse_tool_query(function.get("arguments", {}))
-        result, search_ms = _search(searcher, query, top_k, probe_count, mode=getattr(self, "mode", "hybrid"))
+        result, search_ms, fallback_calls = _adaptive_tool_search(
+            searcher, query, top_k, probe_count, getattr(self, "mode", "hybrid")
+        )
         call_id = str(call.get("id", "tool-call"))
+        if not getattr(self, "final_answer", True):
+            return {
+                "tool_called": True,
+                "query": query,
+                "result": result,
+                "answer": "",
+                "answer_source_path": "",
+                "completion_calls": 1,
+                "search_ms": search_ms,
+                "fallback_calls": fallback_calls,
+                "expanded_docs": len(result.docs),
+                "agent_ms": (time.perf_counter() - started) * 1000.0,
+            }
         normalized_call = {
             "id": call_id,
             "type": "function",
@@ -319,7 +380,7 @@ class LMStudioToolAgent:
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": "search_index",
-                "content": json.dumps(_tool_result_payload(result, top_k)),
+                "content": json.dumps(_tool_result_payload(result, len(result.docs))),
             },
         ])
         final_response = self._request("chat/completions", {
@@ -339,6 +400,8 @@ class LMStudioToolAgent:
             "answer_source_path": _answer_source_path(answer),
             "completion_calls": 2,
             "search_ms": search_ms,
+            "fallback_calls": fallback_calls,
+            "expanded_docs": len(result.docs),
             "agent_ms": (time.perf_counter() - started) * 1000.0,
         }
 
@@ -354,7 +417,9 @@ class DeterministicToolAgent:
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
         started = time.perf_counter()
         query = _keyword_query(excerpt)
-        result, search_ms = _search(searcher, query, top_k, probe_count, mode=self.mode)
+        result, search_ms, fallback_calls = _adaptive_tool_search(
+            searcher, query, top_k, probe_count, self.mode
+        )
         answer_source_path = result.docs[0].source_path if result.docs else ""
         return {
             "tool_called": True,
@@ -364,6 +429,8 @@ class DeterministicToolAgent:
             "answer_source_path": answer_source_path,
             "completion_calls": 0,
             "search_ms": search_ms,
+            "fallback_calls": fallback_calls,
+            "expanded_docs": len(result.docs),
             "agent_ms": (time.perf_counter() - started) * 1000.0,
         }
 
@@ -761,6 +828,8 @@ def evaluate_tool_agent(
                 "completion_calls": 0,
                 "search_ms": 0.0,
                 "agent_ms": (time.perf_counter() - started) * 1000.0,
+                "fallback_calls": 0,
+                "expanded_docs": 0,
             }
             errors.append({"sample_id": sample.sample_id, "error": str(exc)})
         result = run.get("result")
@@ -788,6 +857,8 @@ def evaluate_tool_agent(
             "answer_source_match": answer_source_path == sample.source_path if answer_source_path else False,
             "grounded_source_match": grounded_source_path == sample.source_path if grounded_source_path else False,
             "completion_calls": int(run.get("completion_calls", 0)),
+            "fallback_calls": int(run.get("fallback_calls", 0)),
+            "expanded_docs": int(run.get("expanded_docs", 0)),
             "search_ms": float(run.get("search_ms", 0.0)),
             "agent_ms": float(run.get("agent_ms", 0.0)),
         })
@@ -800,9 +871,12 @@ def evaluate_tool_agent(
         "top_k": top_k,
         "probe_count": probe_count,
         "mode": mode,
+        "answer_mode": "model-answer" if getattr(agent, "final_answer", False) else "tool-only",
         "errors": errors,
         "tool_call_rate": sum(row["tool_called"] for row in rows) / len(rows) if rows else 0.0,
         "completion_calls_per_sample": sum(row["completion_calls"] for row in rows) / len(rows) if rows else 0.0,
+        "fallback_rate": sum(row["fallback_calls"] > 0 for row in rows) / len(rows) if rows else 0.0,
+        "expansion_rate": sum(row["expanded_docs"] > top_k for row in rows) / len(rows) if rows else 0.0,
         "target": _metrics(rows, "target_rank"),
         "evidence": _metrics(rows, "relevant_rank"),
         "answer_source_match_rate": sum(row["answer_source_match"] for row in rows) / len(rows) if rows else 0.0,
@@ -869,7 +943,10 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         f"- Agent: `{report['agent']}`",
         f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k/probe/mode: {report['samples']} / {report['seed']} / {report['top_k']} / {report['probe_count']} / `{report['mode']}`",
+        f"- Answer path: `{report['answer_mode']}`",
         f"- Tool-call rate: `{report['tool_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
+        f"- Low-confidence fallback rate: `{report['fallback_rate']:.3f}`",
+        f"- Expanded result-page rate: `{report['expansion_rate']:.3f}`",
         f"- Tool target-doc recall@k: `{target['recall_at_k']:.3f}`; precision@1: `{target['precision_at_1']:.3f}`; MRR: `{target['mrr']:.3f}`",
         f"- Tool evidence relevance@k: `{evidence['recall_at_k']:.3f}`; precision@1: `{evidence['precision_at_1']:.3f}`; MRR: `{evidence['mrr']:.3f}`",
         f"- Grounded tool source-path match: `{report['grounded_source_match_rate']:.3f}`; model citation match: `{report['answer_source_match_rate']:.3f}`",
@@ -878,13 +955,14 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         "",
         "## Samples",
         "",
-        "| ID | Target doc | Query | Relevant rank | Answer source | Tool |",
-        "|---:|---:|---|---:|---|:---:|",
+        "| ID | Target doc | Query | Relevant rank | Grounded source | Model source | Tool |",
+        "|---:|---:|---|---:|---|---|:---:|",
     ]
     for row in report["rows"]:
         lines.append(
             f"| {row['sample_id']} | {row['doc_id']} | {row['query'].replace('|', ' ')} | "
-            f"{row['relevant_rank'] or '-'} | {row['answer_source_path'] or '-'} | "
+            f"{row['relevant_rank'] or '-'} | {row['grounded_source_path'] or '-'} | "
+            f"{row['answer_source_path'] or '-'} | "
             f"{'yes' if row['tool_called'] else 'no'} |"
         )
     return "\n".join(lines)
@@ -905,6 +983,7 @@ def main() -> None:
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
     parser.add_argument("--tool-agent", action="store_true", help="Run a model/tool/model search conversation")
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="hybrid")
+    parser.add_argument("--tool-only", action="store_true", help="Return the grounded tool result after one model call")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
     parser.add_argument("--initial-probe", type=int, default=0, help="Use this probe budget before exhaustive escalation")
     parser.add_argument("--json-output", default=None)
@@ -917,7 +996,7 @@ def main() -> None:
             client = LMStudioQueryGenerator(args.base_url, args.model, args.timeout)
             try:
                 client._model_name()
-                agent = LMStudioToolAgent(client, args.tool_mode)
+                agent = LMStudioToolAgent(client, args.tool_mode, not args.tool_only)
             except (OSError, RuntimeError, urllib.error.URLError) as exc:
                 print(f"LM Studio unavailable; using deterministic tool agent: {exc}")
                 agent = DeterministicToolAgent(args.tool_mode)
