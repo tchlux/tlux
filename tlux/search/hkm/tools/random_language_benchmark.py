@@ -40,6 +40,16 @@ _QUERY_WORDS = {
     "for", "in", "is", "it", "of", "on", "or", "the", "to", "was", "were",
     "will", "you", "your", "us", "even", "find", "passage", "scene", "thing",
 }
+_CONTENT_STOP_WORDS = _QUERY_WORDS | {
+    "another", "answer", "around", "been", "beneath", "bond", "called",
+    "come", "doesn", "differ", "details", "even", "general", "get",
+    "going", "happens", "head", "keep", "know", "like", "looking", "maybe",
+    "mean", "much", "near", "need", "part", "please", "point", "present",
+    "right", "scene", "separate", "side", "something", "specifically", "start",
+    "started", "steady", "still", "than", "then", "think", "thoughts", "those",
+    "though", "topic", "toward", "trying", "under", "want", "without", "wording",
+    "wrong", "yourself",
+}
 _STYLE_TEMPLATES = {
     "vague": (
         "A scene involving {a} and {b} near {c}, without relying on the exact wording",
@@ -80,20 +90,28 @@ def _bounded_query(query: str) -> str:
 
 # Return distinctive source words in original order for a memory query.
 def _content_terms(text: str, limit: int = 4) -> List[str]:
-    words = re.findall(r"[A-Za-z][A-Za-z0-9'_-]*", text)
-    terms: List[str] = []
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]*", text.replace("\u2019", "'"))
+    terms: List[tuple[str, int, int]] = []
     seen = set()
-    for word in words:
+    for index, word in enumerate(words):
         normalized = word.lower()
-        if len(normalized) < 4 or normalized in _QUERY_WORDS:
+        if len(normalized) < 4 or normalized in _CONTENT_STOP_WORDS:
             continue
         if normalized not in seen:
-            terms.append(word)
+            specificity = len(normalized)
+            if word[:1].isupper() and index:
+                specificity += 3
+            if "-" in normalized:
+                specificity += 2
+            terms.append((word, index, specificity))
             seen.add(normalized)
-        if len(terms) == limit:
-            break
     if terms:
-        return terms
+        if len(terms) <= limit:
+            return [word for word, _, _ in terms]
+        early = terms[: min(3, limit)]
+        later = sorted(terms[len(early):], key=lambda item: (-item[2], item[1]))
+        selected = early + later[: limit - len(early)]
+        return [word for word, _, _ in selected]
     fallback = [word for word in words if word.lower() not in _QUERY_WORDS]
     return fallback[:limit] or words[:limit] or ["event"]
 

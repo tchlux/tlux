@@ -452,6 +452,10 @@ for vague requests, review the returned previews and query trace rather than
 treating non-empty output as a perfect relevance guarantee. The reviewed
 challenge set and concept-group gate live in
 `plan/benchmark_language_queries.md`.
+The language agent also keeps a bounded 256-entry cache of immutable HKM lane
+pages per index. In a repeated-query smoke, search time fell from 4.91 seconds
+to 0 ms and end-to-end time from 5.01 seconds to 89 ms on the same process;
+quality and returned document IDs were unchanged.
 Run `bin/hkm-language-benchmark INDEX --model-first --jsonl report.jsonl`
 to evaluate that gate and record per-case coverage plus latency.
 The grounded conditional fixture in
@@ -468,7 +472,9 @@ baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
 The current 40-case deterministic run reaches 0.850 evidence recall@5 and
-0.625 precision@1 (MRR 0.719). A latest eight-case Gemma 3 model-first smoke reaches
+0.675 precision@1 (MRR 0.743); vague and specific precision improved after
+contraction-aware, signal-ranked clue generation, while conditional and
+missing-entity recall remain open. A latest eight-case Gemma 3 model-first smoke reaches
 1.000 recall@5, 0.875 precision@1, and 0.938 MRR, including two rejected
 missing-entity generations recovered with three retained clues; larger random
 gates remain open.

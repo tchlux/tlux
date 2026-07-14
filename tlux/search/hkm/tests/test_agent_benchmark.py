@@ -243,6 +243,27 @@ def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None
     assert len(merged.docs) == 1
 
 
+def test_language_search_cache_reuses_index_lane(monkeypatch) -> None:
+    calls = []
+    hit = SimpleNamespace(doc_id=1)
+    result = SimpleNamespace(docs=[hit], count=1, limit=1, next_offset=None)
+
+    def fake_search(searcher, query, top_k, probe_count, mode):
+        calls.append((query, top_k, probe_count, mode))
+        return result, 12.0
+
+    monkeypatch.setattr(benchmark, "_search", fake_search)
+    agent = LanguageSearchAgent(None, "semantic")
+    searcher = SimpleNamespace(index_root="/tmp/index")
+    first, first_ms = agent._cached_search(searcher, "alpha", 3, 0, "semantic")
+    second, second_ms = agent._cached_search(searcher, "alpha", 3, 0, "semantic")
+    assert len(calls) == 1
+    assert first_ms == 12.0
+    assert second_ms == 0.0
+    assert first is not second
+    assert first.docs == second.docs
+
+
 def test_language_merge_keeps_stronger_focused_lane_over_repeated_decoy() -> None:
     def hit(doc_id: int, score: float, preview: str) -> SimpleNamespace:
         return SimpleNamespace(

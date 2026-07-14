@@ -18,6 +18,7 @@ import socket
 import statistics
 import time
 import urllib.error
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -52,6 +53,7 @@ LANGUAGE_MODEL_QUERY_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
+LANGUAGE_SEARCH_CACHE_SIZE = 256
 LANGUAGE_COVERAGE_WEIGHT = 0.10
 LANGUAGE_FIRST_PASS_BONUS = 0.05
 LANGUAGE_UNLESS_PENALTY = 0.12
@@ -1282,6 +1284,32 @@ class LanguageSearchAgent:
         self.model = client.model if client is not None else None
         self.mode = mode
         self.max_rounds = max_rounds
+        self._search_cache: OrderedDict[tuple[str, str, int, int, str], Any] = OrderedDict()
+
+    # Reuse immutable-index lane results across repeated service requests.
+    def _cached_search(
+        self,
+        searcher: Searcher,
+        query: str,
+        top_k: int,
+        probe_count: int,
+        mode: str,
+    ) -> tuple[Any, float]:
+        index_key = str(getattr(searcher, "index_root", f"id:{id(searcher)}"))
+        key = (index_key, query, top_k, probe_count, mode)
+        cached = self._search_cache.get(key)
+        if cached is not None:
+            self._search_cache.move_to_end(key)
+            result = copy.copy(cached)
+            result.docs = list(cached.docs)
+            return result, 0.0
+        result, elapsed = _search(searcher, query, top_k, probe_count, mode)
+        cached = copy.copy(result)
+        cached.docs = list(result.docs)
+        self._search_cache[key] = cached
+        if len(self._search_cache) > LANGUAGE_SEARCH_CACHE_SIZE:
+            self._search_cache.popitem(last=False)
+        return result, elapsed
 
     # Run bounded first-pass, refinement, and alternative-query searches.
     def run(self, query: str, searcher: Searcher, top_k: int = 10) -> Dict[str, Any]:
@@ -1321,7 +1349,7 @@ class LanguageSearchAgent:
                     )
                 ):
                     variant_mode = "token"
-                result, elapsed = _search(searcher, variant, top_k * 3, 0, variant_mode)
+                result, elapsed = self._cached_search(searcher, variant, top_k * 3, 0, variant_mode)
                 results.append(result)
                 search_ms += elapsed
                 trace.append({

@@ -5,6 +5,7 @@ import pytest
 from tlux.search.hkm.tools.random_language_benchmark import (
     _metrics,
     _evidence_gate_failed,
+    _content_terms,
     _missing_entity_query_is_valid,
     _parse_model_query,
     _query_overlaps_evidence,
@@ -26,6 +27,17 @@ def test_deterministic_queries_keep_evidence_terms_and_vary_style() -> None:
     assert "who or what" in queries[-1]
     assert "If " in queries[2]
     assert max(len(query.split()) for query in queries) <= 24
+
+
+def test_content_terms_skip_contraction_fragments_and_dialogue_glue() -> None:
+    excerpt = (
+        "right doesn\u2019t mean I want to be called unhealthy; his voice echoes"
+        " from the stone stairwell"
+    )
+    terms = _content_terms(excerpt)
+    assert "doesn" not in terms
+    assert terms[:3] == ["unhealthy", "voice", "echoes"]
+    assert "stairwell" in terms
 
 
 def test_build_cases_is_reproducible_and_rejects_unknown_style() -> None:

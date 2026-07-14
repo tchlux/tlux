@@ -21,13 +21,15 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
   --json-output /private/tmp/random_language.json
 ```
 
-On 10 Fourth Wing samples (40 cases), the current deterministic baseline
-reached evidence recall@5 0.850, precision@1 0.625, and MRR 0.719. By style,
-evidence recall was 0.900 vague, 0.800 specific, 0.700 conditional, and 1.000
-missing-entity; missing-entity precision@1 was 0.800. Median agent/search
-latency was 622/552 ms.
-This is a challenge baseline, not a production quality claim; improve the
-agent and rerun the same seed before changing the index or query templates.
+On 10 Fourth Wing samples (40 cases), the deterministic generator now reaches
+evidence recall@5 0.850, precision@1 0.675, and MRR 0.743. By style, evidence
+recall is 0.900 vague, 0.800 specific, 0.800 conditional, and 0.900
+missing-entity; missing-entity precision@1 is 0.500. Median agent/search
+latency is 548/466 ms (p95 894/766 ms). The generator normalizes contractions, drops common
+dialogue glue, and keeps three early clues plus one later distinctive clue;
+this improves ranking without changing the index.
+This remains a challenge baseline, not a production quality claim; the
+conditional and forgotten-entity styles still need larger quality gates.
 The deterministic templates intentionally retain lexical clues, so they test
 agent ranking and condition handling rather than claim human-level paraphrase
 generation. The LM mode is the stronger query-generation experiment.
