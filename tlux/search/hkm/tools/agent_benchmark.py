@@ -242,6 +242,9 @@ def _adaptive_tool_search(
 ) -> tuple[Any, float, int]:
     result, elapsed = _search(searcher, query, top_k, probe_count, mode)
     fallback_calls = 0
+    # Do not spend fallback work when the initial page already proves relevance.
+    if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) == 1:
+        return result, elapsed, fallback_calls
     if mode != "token" or (
         result.docs
         and float(result.docs[0].score) >= TOOL_FALLBACK_SCORE
@@ -351,7 +354,7 @@ class LMStudioToolAgent:
             "tools": [SEARCH_TOOL],
             "tool_choice": {"type": "function", "function": {"name": "search_index"}},
             "temperature": 0,
-            "max_tokens": 64,
+            "max_tokens": 32,
             "stream": False,
         })
         choices = response.get("choices", [])
