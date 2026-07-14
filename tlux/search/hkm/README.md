@@ -326,8 +326,10 @@ The report still records model citation quality separately.
 
 Add `--deterministic-first` to skip Gemma when a cheap lexical result already
 contains the raw passage. On the same 50-sample gates it reduced model calls
-to 2% on prose (median result latency about 361 ms) and 10% on the repository
-(about 165 ms), while keeping content-evidence recall at 1.000.
+to 0% on both prose and repository after evidence-aware reranking, with
+content-evidence recall and precision@1 at 1.000; median result latency was
+about 351 ms on prose and 163 ms on the repository. The model-assisted path
+remains available for low-confidence passages.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the

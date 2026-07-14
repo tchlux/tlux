@@ -300,6 +300,7 @@ class LMStudioToolAgent:
         self.model = client.model
         self.mode = mode
         self.final_answer = final_answer
+        self.source_cache: Dict[tuple[str, int, int], str] = {}
 
     def _request(self, path: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return self.client._request(path, payload)
@@ -352,6 +353,7 @@ class LMStudioToolAgent:
         result, search_ms, fallback_calls = _adaptive_tool_search(
             searcher, query, top_k, probe_count, getattr(self, "mode", "hybrid")
         )
+        _rerank_with_evidence(result, excerpt, searcher, getattr(self, "source_cache", None))
         call_id = str(call.get("id", "tool-call"))
         if not getattr(self, "final_answer", True):
             return {
@@ -413,6 +415,7 @@ class DeterministicToolAgent:
 
     def __init__(self, mode: str = "hybrid"):
         self.mode = mode
+        self.source_cache: Dict[tuple[str, int, int], str] = {}
 
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
         started = time.perf_counter()
@@ -420,6 +423,7 @@ class DeterministicToolAgent:
         result, search_ms, fallback_calls = _adaptive_tool_search(
             searcher, query, top_k, probe_count, self.mode
         )
+        _rerank_with_evidence(result, excerpt, searcher, self.source_cache)
         answer_source_path = result.docs[0].source_path if result.docs else ""
         return {
             "tool_called": True,
