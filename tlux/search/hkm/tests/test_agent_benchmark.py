@@ -18,6 +18,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _evidence_coverage,
     _parse_tool_query,
     _keyword_query,
+    _planner_excerpt,
     _rerank_with_evidence,
     evaluate_agent,
     evaluate_tool_agent,
@@ -99,6 +100,12 @@ def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
     assert parse_query('{"query":"truncated evidence') == "truncated evidence"
     assert _keyword_query("!") == "!"
+
+
+def test_planner_excerpt_bounds_long_raw_input() -> None:
+    words = [f"word{index}" for index in range(100)]
+    excerpt = _planner_excerpt(" ".join(words), limit=10)
+    assert excerpt.split() == words[:5] + words[-5:]
 
 
 def test_tool_query_is_bounded_and_recovers_truncated_json() -> None:
@@ -436,16 +443,19 @@ def test_evidence_guard_rejects_generic_overlap_when_source_exists(tmp_path: Pat
     )
     searcher = SimpleNamespace(source_root=str(tmp_path))
 
-    def hit(path: str, score: float = 0.0) -> SimpleNamespace:
+    def hit(path: str, score: float = 0.0, byte_end: int = 0) -> SimpleNamespace:
         return SimpleNamespace(
             preview_text="",
             score=score,
             token_score=score,
             doc_id=1 if path == "target.txt" else 2,
-            document=SimpleNamespace(source_path=path, byte_start=0, byte_end=0),
+            document=SimpleNamespace(source_path=path, byte_start=0, byte_end=byte_end),
         )
     assert _evidence_coverage(hit("target.txt"), target, searcher) == 1.0
     assert _evidence_coverage(hit("decoy.txt"), target, searcher) == 0.0
     result = SimpleNamespace(docs=[hit("decoy.txt", 1.0), hit("target.txt", 0.1)])
     _rerank_with_evidence(result, target, searcher)
     assert result.docs[0].document.source_path == "target.txt"
+    long_target = " ".join(f"term{index}" for index in range(80))
+    (tmp_path / "long.txt").write_text("prefix " + long_target + " suffix", encoding="utf-8")
+    assert _evidence_coverage(hit("long.txt", byte_end=6), long_target, searcher) == 1.0

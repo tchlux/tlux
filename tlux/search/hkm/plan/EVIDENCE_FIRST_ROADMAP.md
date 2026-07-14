@@ -129,6 +129,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Add `hkm-agent`, a persistent JSONL local-agent entry point that reuses one HKM searcher and LM Studio client; warm deterministic-first smoke requests complete in roughly 56-90 ms after startup.
 - [x] Tighten evidence acceptance to require the normalized raw passage in readable sources, then rank verified evidence before lexical score. All 395 prose and all 75 repository passages retain 1.000 evidence recall/precision@1/MRR; duplicate repository content still limits exact document identity.
 - [x] Add a bounded persistent planner-query cache for repeated raw passages; cache hits retain full HKM search and evidence validation while avoiding another LM Studio completion.
+- [x] Bound long planner prompts to 64 raw words while retaining the complete passage for fallback/evidence checks; a 2,048-word passage now remains exactly grounded instead of failing closed.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -191,3 +192,4 @@ before relying on direct Python serving.
 - 2026-07-14: Re-ran the full live Gemma 4 planner-to-tool gate after the precision fix on 50 random prose passages. Final target/evidence recall/precision@1/MRR remained 1.000 with zero errors and one planner completion per sample; recovery was 24%, fallback was 18%, and median/p95 agent latency was 609/1,179 ms.
 - 2026-07-14: Re-ran the same live 50-sample gate with deterministic-first routing. It made zero model calls while retaining 1.000 target/evidence recall, precision@1, and MRR; median/p95 agent latency was 252/326 ms.
 - 2026-07-14: Added a bounded 256-entry planner-query cache to the persistent agent. Repeated full raw passages stayed grounded while dropping from 578 ms on the first request to 35-39 ms on subsequent requests with no additional model calls.
+- 2026-07-14: Bounded LM Studio planner prompts to 64 words and added full-source validation for long passages spanning multiple HKM chunks. A 2,048-word raw passage now returns exact grounded evidence at 1,483 ms agent/422 ms search time after warmup.

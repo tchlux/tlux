@@ -402,6 +402,12 @@ raw passage. In a repeated-passage smoke test, the first grounded request took
 The cache stores only the generated query; HKM search and evidence validation
 still run for every request.
 
+Planner prompts are bounded to 64 words (head and tail) for long raw inputs;
+the complete passage still drives deterministic fallback and exact evidence
+validation. A 2,048-word source passage stayed exactly grounded after warmup at
+1,483 ms agent time and 422 ms search time, rather than timing out or exposing
+an ungrounded candidate.
+
 For the lowest result latency, add `--tool-only --tool-mode token`. This stops
 after one model function call and returns the grounded HKM result directly,
 avoiding a second model completion. On 50 random repository passages and 50

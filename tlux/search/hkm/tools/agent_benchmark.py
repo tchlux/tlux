@@ -32,6 +32,7 @@ STOP_WORDS = {
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
 PLANNER_MAX_TOKENS = 8
+PLANNER_INPUT_WORDS = 64
 PLANNER_QUERY_CACHE_SIZE = 256
 NATIVE_TOOL_MAX_TOKENS = 32
 TOOL_KEYWORD_WORDS = 6
@@ -81,6 +82,15 @@ def _phrase_query(excerpt: str, limit: int = 8) -> str:
     if len(excerpt.split()) <= limit:
         return excerpt.strip()
     return " ".join(excerpt.split()[:limit])
+
+
+# Bound model prompt size while preserving both ends of a raw passage.
+def _planner_excerpt(excerpt: str, limit: int = PLANNER_INPUT_WORDS) -> str:
+    words = excerpt.split()
+    if len(words) <= limit:
+        return excerpt
+    head = limit // 2
+    return " ".join(words[:head] + words[-(limit - head):])
 
 
 # Return several short raw phrases for evidence-assisted exact retrieval.
@@ -191,10 +201,13 @@ class LMStudioQueryGenerator:
         return self.model
 
     def generate(self, excerpt: str) -> str:
+        planner_excerpt = _planner_excerpt(excerpt)
+        if planner_excerpt != excerpt:
+            planner_excerpt += "\nCandidate terms from full passage: " + _keyword_query(excerpt)
         prompt = (
             "Extract a search query. Return only {\"query\":\"...\"}; copy 3-8 exact "
             "words from evidence, preferring rare names, identifiers, or numbers. No explanation.\n"
-            f"Evidence:\n{excerpt}"
+            f"Evidence:\n{planner_excerpt}"
         )
         response = self._request("chat/completions", {
             "model": self._model_name(),
@@ -790,6 +803,17 @@ def _evidence_coverage(
     if source_path and searcher is not None:
         source = Path(searcher.source_root) / source_path
         if source.exists():
+            if len(normalized_excerpt.split()) > PLANNER_INPUT_WORDS:
+                size = source.stat().st_size
+                key = (str(source), 0, size)
+                if source_cache is not None and key in source_cache:
+                    full_text = source_cache[key]
+                else:
+                    full_text = " ".join(source.read_text(encoding="utf-8", errors="ignore").split()).lower()
+                    if source_cache is not None:
+                        source_cache[key] = full_text
+                if normalized_excerpt in full_text:
+                    return 1.0
             return 0.0
     terms = set(re.findall(r"[A-Za-z0-9]+", normalized_excerpt))
     if len(terms) < 2:
