@@ -32,6 +32,7 @@ STOP_WORDS = {
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
 PLANNER_MAX_TOKENS = 8
+PLANNER_QUERY_CACHE_SIZE = 256
 NATIVE_TOOL_MAX_TOKENS = 32
 TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
@@ -571,17 +572,34 @@ class LMStudioPlannerToolAgent:
         self.native_tool = native_tool
         self.name = "lmstudio_planner_native_tool_agent" if native_tool else "lmstudio_planner_tool_agent"
         self.source_cache: Dict[tuple[str, int, int], str] = {}
+        self.query_cache: Dict[str, str] = {}
+
+    # Reuse a bounded planner result for repeated raw passages in one process.
+    def _plan_query(self, excerpt: str) -> tuple[str, bool]:
+        if excerpt in self.query_cache:
+            query = self.query_cache.pop(excerpt)
+            self.query_cache[excerpt] = query
+            return query, True
+        query = self.client.generate(excerpt)
+        if len(self.query_cache) >= PLANNER_QUERY_CACHE_SIZE:
+            self.query_cache.pop(next(iter(self.query_cache)))
+        self.query_cache[excerpt] = query
+        return query, False
 
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
         started = time.perf_counter()
         recovered = False
+        planner_cache_hit = False
         try:
-            query = self.client.generate(excerpt)
+            if self.native_tool:
+                query = self.client.generate(excerpt)
+            else:
+                query, planner_cache_hit = self._plan_query(excerpt)
         except (OSError, RuntimeError, ValueError, urllib.error.URLError):
             query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
             recovered = True
         model_tool_called = False
-        completion_calls = 1
+        completion_calls = 0 if planner_cache_hit else 1
         if self.native_tool:
             completion_calls += 1
             try:
@@ -618,6 +636,7 @@ class LMStudioPlannerToolAgent:
             "tool_called": True,
             "model_tool_called": model_tool_called,
             "recovered": recovered,
+            "planner_cache_hit": planner_cache_hit,
             "query": query,
             "result": result,
             "answer": "",
@@ -1069,7 +1088,7 @@ def evaluate_tool_agent(
                 run["agent_ms"] = float(run.get("agent_ms", 0.0)) + (
                     float(cheap.get("agent_ms", 0.0)) if cheap_agent is not None else 0.0
                 )
-                model_called = bool(getattr(agent, "model", None))
+                model_called = bool(getattr(agent, "model", None)) and not bool(run.get("planner_cache_hit"))
         except Exception as exc:
             run = {
                 "tool_called": False,
@@ -1114,6 +1133,7 @@ def evaluate_tool_agent(
                 if answer_source_path else False
             ),
             "grounded_source_match": grounded_source_path == sample.source_path if grounded_source_path else False,
+            "planner_cache_hit": bool(run.get("planner_cache_hit")),
             "model_tool_called": bool(run.get("model_tool_called", run.get("tool_called") and model_called)),
             "recovered": bool(run.get("recovered")),
             "completion_calls": int(run.get("completion_calls", 0)),
@@ -1138,6 +1158,7 @@ def evaluate_tool_agent(
         "model_tool_call_rate": sum(row["model_tool_called"] for row in rows) / len(rows) if rows else 0.0,
         "recovery_rate": sum(row["recovered"] for row in rows) / len(rows) if rows else 0.0,
         "model_call_rate": sum(row["model_called"] for row in rows) / len(rows) if rows else 0.0,
+        "planner_cache_hit_rate": sum(row["planner_cache_hit"] for row in rows) / len(rows) if rows else 0.0,
         "completion_calls_per_sample": sum(row["completion_calls"] for row in rows) / len(rows) if rows else 0.0,
         "fallback_rate": sum(row["fallback_calls"] > 0 for row in rows) / len(rows) if rows else 0.0,
         "expansion_rate": sum(row["expanded_docs"] > top_k for row in rows) / len(rows) if rows else 0.0,
@@ -1209,6 +1230,7 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         f"- Samples/seed/top-k/probe/mode: {report['samples']} / {report['seed']} / {report['top_k']} / {report['probe_count']} / `{report['mode']}`",
         f"- Answer path: `{report['answer_mode']}`",
         f"- Deterministic-first: `{report['deterministic_first']}`; tool-call rate: `{report['tool_call_rate']:.3f}`; model tool-call rate: `{report['model_tool_call_rate']:.3f}`; recovery rate: `{report['recovery_rate']:.3f}`; model-call rate: `{report['model_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
+        f"- Planner cache-hit rate: `{report['planner_cache_hit_rate']:.3f}`",
         f"- Low-confidence fallback rate: `{report['fallback_rate']:.3f}`",
         f"- Expanded result-page rate: `{report['expansion_rate']:.3f}`",
         f"- Tool target-doc recall@k: `{target['recall_at_k']:.3f}`; precision@1: `{target['precision_at_1']:.3f}`; MRR: `{target['mrr']:.3f}`",

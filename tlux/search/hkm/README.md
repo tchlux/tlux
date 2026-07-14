@@ -396,6 +396,12 @@ planner completion per request; median/p95 agent time was 536/1,013 ms and
 deterministic recovery handled 8.3% of responses. The p95 remains the main
 model-serving optimization target.
 
+The persistent planner also keeps a bounded 256-entry cache keyed by the full
+raw passage. In a repeated-passage smoke test, the first grounded request took
+578 ms and the next four took 35-39 ms each, with zero additional model calls.
+The cache stores only the generated query; HKM search and evidence validation
+still run for every request.
+
 For the lowest result latency, add `--tool-only --tool-mode token`. This stops
 after one model function call and returns the grounded HKM result directly,
 avoiding a second model completion. On 50 random repository passages and 50
