@@ -263,11 +263,13 @@ def _adaptive_tool_search(
         return result, elapsed, fallback_calls
     docs = list(result.docs)
     seen = {(int(hit.doc_id), tuple(hit.span)) for hit in docs}
-    semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
-    elapsed += semantic_ms
-    fallback_calls += 1
-    sources = [semantic]
+    sources = []
     alternates = _fallback_queries(fallback_text or query)
+    if mode != "token":
+        semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
+        elapsed += semantic_ms
+        fallback_calls += 1
+        sources.append(semantic)
     for alternate in alternates[:5]:
         if alternate == query:
             continue
@@ -284,6 +286,22 @@ def _adaptive_tool_search(
     result.docs = docs
     # Rank all first-pass lanes before truncating so later phrase hits survive.
     if fallback_text:
+        _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+        if mode == "token" and _evidence_rank(result, fallback_text, searcher, source_cache) == 1:
+            result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
+            return result, elapsed, fallback_calls
+    if mode == "token" and fallback_text and _evidence_rank(
+        result, fallback_text, searcher, source_cache
+    ) is None:
+        semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
+        elapsed += semantic_ms
+        fallback_calls += 1
+        for hit in semantic.docs:
+            key = (int(hit.doc_id), tuple(hit.span))
+            if key not in seen:
+                docs.append(hit)
+                seen.add(key)
+        result.docs = docs
         _rerank_with_evidence(result, fallback_text, searcher, source_cache)
     # Probe remaining distinctive terms only when the first lanes lack evidence.
     if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) is None:

@@ -366,6 +366,13 @@ document-id precision is
 lower on the repository because repeated boilerplate produces content-equivalent
 duplicate chunks; evidence relevance is the product gate.
 
+Token-mode fallback now tries up to five cheap lexical alternates before paying
+for semantic recovery, and returns immediately once the raw passage is
+evidence-ranked first. A fresh 50-sample live LM Studio deterministic-first
+repository gate kept 1.000 content-evidence recall/precision@1 with zero model
+calls at 112.73/1,561.82 ms median/p95 latency; semantic recovery remains the
+correctness path for the few misses.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:

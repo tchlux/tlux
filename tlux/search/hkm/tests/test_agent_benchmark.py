@@ -236,6 +236,6 @@ def test_high_score_without_evidence_still_escalates(monkeypatch) -> None:
         object(), "long model query with many words", 1, 0, "token", raw, {}
     )
     assert result.docs
-    assert elapsed == 7.0
-    assert fallback_calls == 6
-    assert len(searches) == 7
+    assert elapsed == 6.0
+    assert fallback_calls == 5
+    assert len(searches) == 6
