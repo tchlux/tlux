@@ -804,6 +804,7 @@ def evaluate_tool_agent(
     max_tokens: int = 48,
     probe_count: int = 0,
     mode: str = "hybrid",
+    deterministic_first: bool = False,
 ) -> Dict[str, Any]:
     if top_k < 1:
         raise ValueError("top_k must be positive")
@@ -814,10 +815,27 @@ def evaluate_tool_agent(
     source_cache: Dict[tuple[str, int, int], str] = {}
     rows = []
     errors = []
+    cheap_agent = DeterministicToolAgent(mode) if deterministic_first else None
     for sample in sampled:
         started = time.perf_counter()
+        model_called = bool(getattr(agent, "model", None))
         try:
-            run = agent.run(sample.excerpt, searcher, top_k, probe_count)
+            run = None
+            if cheap_agent is not None:
+                cheap = cheap_agent.run(sample.excerpt, searcher, top_k, probe_count)
+                cheap_rank = _evidence_rank(cheap["result"], sample.excerpt, searcher, source_cache)
+                if cheap_rank == 1:
+                    run = cheap
+                    model_called = False
+            if run is None:
+                run = agent.run(sample.excerpt, searcher, top_k, probe_count)
+                run["search_ms"] = float(run.get("search_ms", 0.0)) + (
+                    float(cheap.get("search_ms", 0.0)) if cheap_agent is not None else 0.0
+                )
+                run["agent_ms"] = float(run.get("agent_ms", 0.0)) + (
+                    float(cheap.get("agent_ms", 0.0)) if cheap_agent is not None else 0.0
+                )
+                model_called = bool(getattr(agent, "model", None))
         except Exception as exc:
             run = {
                 "tool_called": False,
@@ -850,11 +868,15 @@ def evaluate_tool_agent(
             "excerpt": sample.excerpt,
             "query": run.get("query", ""),
             "tool_called": bool(run.get("tool_called")),
+            "model_called": model_called,
             "target_rank": target_rank,
             "relevant_rank": relevant_rank,
             "grounded_source_path": grounded_source_path,
             "answer_source_path": answer_source_path,
-            "answer_source_match": answer_source_path == sample.source_path if answer_source_path else False,
+            "answer_source_match": (
+                model_called and answer_source_path == sample.source_path
+                if answer_source_path else False
+            ),
             "grounded_source_match": grounded_source_path == sample.source_path if grounded_source_path else False,
             "completion_calls": int(run.get("completion_calls", 0)),
             "fallback_calls": int(run.get("fallback_calls", 0)),
@@ -872,8 +894,10 @@ def evaluate_tool_agent(
         "probe_count": probe_count,
         "mode": mode,
         "answer_mode": "model-answer" if getattr(agent, "final_answer", False) else "tool-only",
+        "deterministic_first": deterministic_first,
         "errors": errors,
         "tool_call_rate": sum(row["tool_called"] for row in rows) / len(rows) if rows else 0.0,
+        "model_call_rate": sum(row["model_called"] for row in rows) / len(rows) if rows else 0.0,
         "completion_calls_per_sample": sum(row["completion_calls"] for row in rows) / len(rows) if rows else 0.0,
         "fallback_rate": sum(row["fallback_calls"] > 0 for row in rows) / len(rows) if rows else 0.0,
         "expansion_rate": sum(row["expanded_docs"] > top_k for row in rows) / len(rows) if rows else 0.0,
@@ -944,7 +968,7 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k/probe/mode: {report['samples']} / {report['seed']} / {report['top_k']} / {report['probe_count']} / `{report['mode']}`",
         f"- Answer path: `{report['answer_mode']}`",
-        f"- Tool-call rate: `{report['tool_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
+        f"- Deterministic-first: `{report['deterministic_first']}`; tool-call rate: `{report['tool_call_rate']:.3f}`; model-call rate: `{report['model_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
         f"- Low-confidence fallback rate: `{report['fallback_rate']:.3f}`",
         f"- Expanded result-page rate: `{report['expansion_rate']:.3f}`",
         f"- Tool target-doc recall@k: `{target['recall_at_k']:.3f}`; precision@1: `{target['precision_at_1']:.3f}`; MRR: `{target['mrr']:.3f}`",
@@ -1009,6 +1033,7 @@ def main() -> None:
             args.max_tokens,
             args.initial_probe,
             args.tool_mode,
+            args.deterministic_first,
         )
         markdown = render_tool_report(report)
         if args.json_output:

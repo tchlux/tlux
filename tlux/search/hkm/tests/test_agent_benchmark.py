@@ -163,3 +163,21 @@ def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
     assert report["answer_mode"] == "tool-only"
     assert report["completion_calls_per_sample"] == 1.0
     assert report["grounded_source_match_rate"] == 1.0
+
+
+def test_tool_deterministic_first_skips_model_on_exact_hit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    agent = FakeToolAgent()
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"), agent=agent, samples=1, top_k=1, deterministic_first=True
+    )
+    assert report["model_call_rate"] == 0.0
+    assert report["completion_calls_per_sample"] == 0.0
+    assert report["grounded_source_match_rate"] == 1.0

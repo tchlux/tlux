@@ -324,6 +324,11 @@ random prose passages, this path reached 1.000 content-evidence recall with
 zero tool errors; median one-completion agent latency was about 2.7-3.0 s.
 The report still records model citation quality separately.
 
+Add `--deterministic-first` to skip Gemma when a cheap lexical result already
+contains the raw passage. On the same 50-sample gates it reduced model calls
+to 2% on prose (median result latency about 361 ms) and 10% on the repository
+(about 165 ms), while keeping content-evidence recall at 1.000.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:
