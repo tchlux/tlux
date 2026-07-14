@@ -329,10 +329,10 @@ The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
 repository run both returned 1.000 evidence recall/precision@1/MRR with zero
 errors and one model call per sample. With the 16-token planner budget, the
-latest warmed Gemma 4 prose gate measured 1.001/1.329 seconds median/p95 with
+latest warmed Gemma 4 prose gate measured 0.880/1.055 seconds median/p95 with
 zero planner recovery and 28% bounded fallback. Planner output rejects generic
 instruction-word overlap, accepts truncated JSON arguments, and falls back
-after the bounded 1.5-second LM Studio timeout. If every bounded search lane misses
+after the bounded 1.0-second LM Studio timeout. If every bounded search lane misses
 the raw evidence, the tool fails closed with an empty result rather than
 returning an ungrounded candidate.
 
@@ -388,7 +388,7 @@ timings:
 The persistent CLI defaults to deterministic-first routing; pass `--model-first`
 when every passage must go through the LM Studio planner. Use `--warmup` to pay
 index and model initialization before the first request. Warmup uses a one-time
-15-second planner budget, then restores the bounded 1.5-second request timeout.
+15-second planner budget, then restores the bounded 1.0-second request timeout.
 Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
 known deterministic-first hits in roughly 56-90 ms; these are local reference
 measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
@@ -401,8 +401,8 @@ planner completion per request; median/p95 agent time was 536/1,013 ms and
 deterministic recovery handled 8.3% of responses. The p95 remains the main
 model-serving optimization target.
 
-The current warmed 50-sample Gemma 4 prose gate uses the 1.5-second timeout and
-returns 1.000 evidence recall/precision@1/MRR with zero errors at 1,001/1,329
+The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
+returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055
 ms median/p95 agent latency. The 16-token prompt asks for only 1-3 exact words,
 leaving enough room for complete JSON on both installed Gemma models; this run
 had zero planner recoveries and 28% bounded fallback.
