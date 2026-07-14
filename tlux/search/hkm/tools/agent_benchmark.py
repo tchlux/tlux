@@ -36,6 +36,7 @@ STOP_WORDS = {
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
 PLANNER_MAX_TOKENS = 16
+LANGUAGE_MEMORY_MAX_TOKENS = 32
 PLANNER_INPUT_WORDS = 64
 PLANNER_QUERY_CACHE_SIZE = 256
 NATIVE_TOOL_MAX_TOKENS = 32
@@ -48,7 +49,10 @@ LMSTUDIO_WARMUP_TIMEOUT = 15.0
 LANGUAGE_QUERY_MAX_WORDS = 24
 LANGUAGE_QUERY_MAX_VARIANTS = 7
 LANGUAGE_PLAN_MAX_VARIANTS = 4
+LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
+LANGUAGE_COVERAGE_WEIGHT = 0.10
+LANGUAGE_FIRST_PASS_BONUS = 0.05
 LANGUAGE_CONCEPT_GROUPS = (
     frozenset({"amusing", "funny", "humorous", "laugh", "laughter", "joke", "silly"}),
     frozenset({"enter", "entered", "enters", "door", "room", "office"}),
@@ -207,7 +211,10 @@ def _language_query_variants(query: str) -> List[str]:
         return []
     clauses = _language_query_clauses(normalized)
     variants = [normalized]
-    variants.extend(clauses)
+    variants.extend(
+        clause for clause in clauses
+        if len(_language_word_forms(clause)) >= 2
+    )
     variants.extend(_language_concept_queries(normalized))
     variants.extend(
         f"{clauses[index]} {clauses[index + 1]}"
@@ -295,6 +302,18 @@ def _language_full_concept_forms(text: str) -> set[str]:
         if forms.intersection(group):
             expanded.update(group)
     return expanded
+
+
+# Detect requests that explicitly omit a remembered subject or object.
+def _language_missing_entity_query(query: str) -> bool:
+    return bool(re.search(
+        r"(?:\b(?:cannot|can.?t)\s+(?:remember|recall)|\b(?:forgot|"
+        r"forgotten|forget|unknown|unnamed)\b|\b(?:not|no)\s+(?:who|"
+        r"what|person|object)\b|\bwho\s+or\s+what\b|\bperson\s+or\s+"
+        r"object\b|\b(?:don.?t|do not)\s+know|\bnot\s+sure)",
+        query,
+        flags=re.IGNORECASE,
+    ))
 
 
 # Decode a bounded language-query plan from a model response.
@@ -491,7 +510,12 @@ class LMStudioQueryGenerator:
             raise ValueError(f"unknown memory-query style: {style}")
         prompt = (
             "Write one natural-language memory search request from the evidence. "
-            f"{guidance[style]} Preserve the other details. Return only "
+            f"{guidance[style]} Preserve the other details. Include at least three "
+            "concrete words or short phrases copied exactly from the evidence, "
+            "especially names, numbers, and unusual nouns; do not replace all "
+            "distinctive clues with generic synonyms. Keep every named entity and "
+            "number for vague, specific, and conditional styles; missing_entity may "
+            "omit only one subject or object. Return only "
             '{"query":"..."}; do not answer or explain.\nEvidence:\n'
             f"{_planner_excerpt(excerpt, 160)}"
         )
@@ -499,7 +523,7 @@ class LMStudioQueryGenerator:
             "model": self._model_name(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": PLANNER_MAX_TOKENS,
+            "max_tokens": LANGUAGE_MEMORY_MAX_TOKENS,
             "reasoning_effort": "none",
             "response_format": QUERY_RESPONSE_FORMAT,
             "stream": False,
@@ -543,7 +567,7 @@ class LMStudioQueryGenerator:
             "model": self._model_name(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 64,
+            "max_tokens": LANGUAGE_PLAN_MAX_TOKENS,
             "reasoning_effort": "none",
             "response_format": LANGUAGE_PLAN_RESPONSE_FORMAT,
             "stream": False,
@@ -1079,28 +1103,34 @@ def _merge_language_results(
     query: str,
     exclude_terms: List[str],
     top_k: int,
+    protect_anchor: bool = False,
 ) -> Any:
     # Keep the full first-pass candidate page for later refinement rounds.
     base = copy.copy(results[0])
-    grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool]] = {}
+    grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool, int | None]] = {}
+    first_ranks = {
+        (int(hit.doc_id), tuple(hit.span)): rank
+        for rank, hit in enumerate(results[0].docs, 1)
+    }
     positive_clauses = _language_positive_clauses(query)
     query_terms = _language_word_forms(" ".join(positive_clauses))
     if not query_terms:
         query_terms = _language_word_forms(query)
     exclusions = set(term.lower() for term in exclude_terms)
     negative_clauses = _language_negative_clauses(query)
+    missing_entity = _language_missing_entity_query(query)
     for result in results:
         for hit in result.docs:
             key = (int(hit.doc_id), tuple(hit.span))
             if key not in grouped:
-                grouped[key] = (hit, 0, result is results[0])
-            best_hit, lanes, anchor = grouped[key]
+                grouped[key] = (hit, 0, result is results[0], first_ranks.get(key))
+            best_hit, lanes, anchor, first_rank = grouped[key]
             if float(hit.score) > float(best_hit.score):
                 best_hit = hit
-            grouped[key] = (best_hit, lanes + 1, anchor or result is results[0])
+            grouped[key] = (best_hit, lanes + 1, anchor or result is results[0], first_rank)
 
-    def rank_key(item: tuple[Any, int, bool]) -> tuple[float, float, int, str]:
-        hit, lanes, anchor = item
+    def rank_key(item: tuple[Any, int, bool, int | None]) -> tuple[float, float, int, str]:
+        hit, lanes, anchor, first_rank = item
         text = _language_hit_text(hit)
         local_terms = _language_word_forms(_language_local_hit_text(hit))
         terms = _language_word_forms(text)
@@ -1110,8 +1140,14 @@ def _merge_language_results(
             for clause in negative_clauses
         )
         penalty = 0 if anchor else sum(1 for term in exclusions if term in text)
+        first_pass_bonus = (
+            LANGUAGE_FIRST_PASS_BONUS * coverage / first_rank
+            if protect_anchor and first_rank and not negative_clauses and not missing_entity
+            else 0.0
+        )
         score = (
-            float(hit.score) + 0.04 * anchor + 0.005 * min(lanes, 2) + 0.03 * coverage
+            float(hit.score) + 0.04 * anchor + first_pass_bonus
+            + 0.005 * min(lanes, 2) + LANGUAGE_COVERAGE_WEIGHT * coverage
             - 0.14 * negative_penalty - 0.03 * penalty
         )
         return (-score, -coverage, int(hit.doc_id), hit.source_path)
@@ -1135,7 +1171,7 @@ def _merge_language_results(
         )
         for item in ranked
     }
-    selected: List[tuple[Any, int, bool]] = []
+    selected: List[tuple[Any, int, bool, int | None]] = []
     remaining = list(ranked)
     covered_mask = 0
     coherence_weight = 0.08 if contrast_query else 0.0
@@ -1155,7 +1191,7 @@ def _merge_language_results(
             choice = remaining.pop(choice_index)
         selected.append(choice)
         covered_mask |= masks[id(choice)]
-    base.docs = [hit for hit, _, _ in selected]
+    base.docs = [hit for hit, _, _, _ in selected]
     base.count = len(ranked)
     base.limit = top_k
     base.next_offset = top_k if len(ranked) > top_k else None
@@ -1219,7 +1255,13 @@ class LanguageSearchAgent:
                     "mode": variant_mode,
                     "hits": len(result.docs),
                 })
-            merged = _merge_language_results(results, query, exclude_terms, top_k)
+            merged = _merge_language_results(
+                results,
+                query,
+                exclude_terms,
+                top_k,
+                protect_anchor=self.client is not None,
+            )
             seen_exclusions = _language_antipatterns(query, merged.docs)
             exclude_terms = list(dict.fromkeys(exclude_terms + seen_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
             if self.client is None or round_index + 1 >= self.max_rounds:
@@ -1243,7 +1285,13 @@ class LanguageSearchAgent:
                 round_queries = base_variants[1:]
                 if not round_queries:
                     break
-        final = _merge_language_results(results, query, exclude_terms, top_k)
+        final = _merge_language_results(
+            results,
+            query,
+            exclude_terms,
+            top_k,
+            protect_anchor=self.client is not None,
+        )
         return {
             "tool_called": True,
             "query": query,

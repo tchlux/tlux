@@ -462,6 +462,8 @@ missing-entity requests against exact source evidence. The fixed Fourth Wing
 baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
+The current 40-case deterministic run reaches 0.725 evidence recall@5 and
+0.450 precision@1; a five-sample model-first run reaches 1.000 and 0.800.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055

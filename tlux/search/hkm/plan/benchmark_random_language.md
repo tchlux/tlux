@@ -21,9 +21,10 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
   --json-output /private/tmp/random_language.json
 ```
 
-On 10 Fourth Wing samples (40 cases), the current baseline reached evidence
-recall@5 0.675, precision@1 0.475, and MRR 0.550. By style, evidence recall
-was 0.800 vague, 0.800 specific, 0.700 conditional, and 0.400 missing-entity.
+On 10 Fourth Wing samples (40 cases), the current deterministic baseline
+reached evidence recall@5 0.725, precision@1 0.450, and MRR 0.571. By style,
+evidence recall was 0.900 vague, 0.800 specific, 0.700 conditional, and 0.500
+missing-entity. Median agent/search latency was 650/586 ms.
 This is a challenge baseline, not a production quality claim; improve the
 agent and rerun the same seed before changing the index or query templates.
 The deterministic templates intentionally retain lexical clues, so they test
@@ -32,9 +33,18 @@ generation. The LM mode is the stronger query-generation experiment.
 
 The merge keeps a small agreement bonus for repeated lanes but caps it, so a
 focused hit cannot be displaced solely because a decoy appeared in more
-paraphrase lanes. Missing-entity requests also send their compact lexical lane
-through token search, preserving rare remembered details without changing the
-semantic path for ordinary requests.
+paraphrase lanes. Model-backed refinement also protects a high-coverage first
+pass, while deterministic routing remains recall-first. One-word clause lanes
+are skipped as low-signal searches. Missing-entity requests send their compact
+lexical lane through token search, preserving rare remembered details without
+changing the semantic path for ordinary requests.
+
+A fresh five-sample LM Studio model-first run (20 cases, Gemma 3 4B, seed
+20260714, timeout 15 seconds) generated 20/20 queries without fallback and
+reached evidence recall@5 1.000, precision@1 0.800, and MRR 0.888. By style,
+precision@1 was 0.600 vague, 1.000 specific, 0.800 conditional, and 0.800
+missing-entity. Median agent/search latency was 3,437/872 ms; removing
+single-word clause lanes reduced p95 agent latency to 3,883 ms in this run.
 
 Use `--query-source lm --base-url URL --model MODEL` to ask LM Studio to write
 each request from the raw evidence. Generated requests must quote at least two

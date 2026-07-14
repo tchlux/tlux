@@ -23,6 +23,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _keyword_query,
     _language_query_variants,
     _language_negative_clauses,
+    _language_missing_entity_query,
     _language_positive_clauses,
     _language_word_forms,
     _merge_language_results,
@@ -133,21 +134,30 @@ def test_language_plan_bounds_variants_and_exclusions() -> None:
     assert _language_query_variants("A large wall stands over us while crowds watch in horror")
 
 
+def test_language_variants_skip_single_word_clause_lanes() -> None:
+    variants = _language_query_variants("Find the Scribe Quadrant, like, right now, if needed")
+    assert "like" not in variants
+    assert "right now" in variants
+
+
 def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
     class MemoryGenerator(LMStudioQueryGenerator):
         def __init__(self) -> None:
             self.model = "fake"
+            self.payload = None
 
         def _model_name(self) -> str:
             return self.model
 
         def _request(self, path, payload=None):
+            self.payload = payload
             return {"choices": [{"message": {"content": '{"query":"find the basalt bridge"}'}}]}
 
     generator = MemoryGenerator()
     assert generator.generate_memory_query("A basalt bridge crosses the ravine", "specific") == (
         "find the basalt bridge"
     )
+    assert generator.payload["max_tokens"] == 32
     with pytest.raises(ValueError, match="unknown memory-query style"):
         generator.generate_memory_query("A basalt bridge", "unknown")
 
@@ -284,6 +294,12 @@ def test_language_contrast_ignores_negative_document_context() -> None:
 def test_language_negative_parser_keeps_event_negation() -> None:
     query = "Tairn tells me not to leave the field while the crowd waits"
     assert _language_negative_clauses(query) == []
+
+
+def test_language_missing_entity_parser_covers_memory_phrasings() -> None:
+    assert _language_missing_entity_query("I cannot recall who climbed the tower")
+    assert _language_missing_entity_query("I remember the scene, but not who was there")
+    assert not _language_missing_entity_query("Xaden climbs the tower at night")
 
 
 def test_planner_excerpt_bounds_long_raw_input() -> None:
