@@ -48,11 +48,13 @@ LMSTUDIO_TIMEOUT = 1.0
 LMSTUDIO_WARMUP_TIMEOUT = 15.0
 LANGUAGE_QUERY_MAX_WORDS = 24
 LANGUAGE_QUERY_MAX_VARIANTS = 7
+LANGUAGE_MODEL_QUERY_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
 LANGUAGE_COVERAGE_WEIGHT = 0.10
 LANGUAGE_FIRST_PASS_BONUS = 0.05
+LANGUAGE_CONFIDENCE_COVERAGE = 0.70
 LANGUAGE_MEMORY_WORDS = {
     "called", "cannot", "find", "forgot", "forgotten", "forget", "involved",
     "near", "object", "part", "passage", "person", "recall", "remember", "scene",
@@ -197,7 +199,7 @@ def _language_query_clauses(query: str) -> List[str]:
     if not normalized:
         return []
     return [part.strip() for part in re.split(
-        r"\b(?:and|but|while|when|where|because|although|though|with|without|if|unless|despite|after|before|except|until)\b|[,;:]",
+        r"\b(?:(?:even|only)\s+(?:if|when)|provided(?:\s+(?:that|it\s+is))?|(?:as|so)\s+long\s+as|whether\s+or\s+not|regardless\s+of|in\s+case|as\s+soon\s+as|and|but|while|when|where|because|although|though|with|without|if|unless|despite|after|before|except|until|once|whenever)\b|[,;:]",
         normalized,
         flags=re.IGNORECASE,
     ) if part.strip()]
@@ -319,7 +321,9 @@ def _language_missing_entity_query(query: str) -> bool:
         r"(?:\b(?:cannot|can.?t)\s+(?:remember|recall)|\b(?:forgot|"
         r"forgotten|forget|unknown|unnamed)\b|\b(?:not|no)\s+(?:who|"
         r"what|person|object)\b|\bwho\s+or\s+what\b|\bperson\s+or\s+"
-        r"object\b|\b(?:don.?t|do not)\s+know|\bnot\s+sure)",
+        r"object\b|\b(?:don.?t|do not)\s+know|\bnot\s+sure|"
+        r"\b(?:(?:the|my|your|their|his|her)\s+)?name\s+"
+        r"(?:(?:has|have)\s+)?(?:escape[sd]?|elude[sd]?)\s+me\b)",
         query,
         flags=re.IGNORECASE,
     ))
@@ -1109,6 +1113,18 @@ def _language_local_hit_text(hit: Any) -> str:
     ).lower()
 
 
+# Return true when the first semantic hit covers most positive query terms.
+def _language_first_pass_confident(query: str, result: Any) -> bool:
+    if not result.docs or _language_negative_clauses(query):
+        return False
+    query_terms = _language_word_forms(" ".join(_language_positive_clauses(query)))
+    if not query_terms:
+        query_terms = _language_word_forms(query)
+    hit_terms = _language_word_forms(_language_hit_text(result.docs[0]))
+    coverage = len(query_terms.intersection(hit_terms)) / float(max(1, len(query_terms)))
+    return coverage >= LANGUAGE_CONFIDENCE_COVERAGE
+
+
 # Merge language-query result lanes and apply soft antipattern penalties.
 #
 # Arguments:
@@ -1254,8 +1270,14 @@ class LanguageSearchAgent:
         search_ms = 0.0
         recovered = False
         completion_calls = 0
+        variant_limit = LANGUAGE_MODEL_QUERY_MAX_VARIANTS if self.client is not None else LANGUAGE_QUERY_MAX_VARIANTS
         for round_index in range(self.max_rounds):
-            for variant in list(dict.fromkeys(round_queries))[:LANGUAGE_QUERY_MAX_VARIANTS]:
+            round_variant_limit = (
+                LANGUAGE_QUERY_MAX_VARIANTS
+                if recovered
+                else variant_limit
+            )
+            for variant in list(dict.fromkeys(round_queries))[:round_variant_limit]:
                 variant_mode = "semantic" if self.mode == "hybrid" else self.mode
                 if (
                     variant != query
@@ -1289,7 +1311,11 @@ class LanguageSearchAgent:
             )
             seen_exclusions = _language_antipatterns(query, merged.docs)
             exclude_terms = list(dict.fromkeys(exclude_terms + seen_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
-            if self.client is None or round_index + 1 >= self.max_rounds:
+            if (
+                self.client is None
+                or round_index + 1 >= self.max_rounds
+                or _language_first_pass_confident(query, merged)
+            ):
                 break
             snippets = json.dumps(_tool_result_payload(merged, min(8, len(merged.docs))))
             completion_calls += 1
@@ -1300,11 +1326,15 @@ class LanguageSearchAgent:
                     term for term in plan["exclude_terms"]
                     if not _language_word_forms(term).intersection(query_forms)
                 ]
-                exclude_terms = list(dict.fromkeys(exclude_terms + safe_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
-                deterministic_limit = max(0, LANGUAGE_QUERY_MAX_VARIANTS - 2)
-                deterministic_queries = base_variants[1:1 + deterministic_limit]
-                model_queries = plan["queries"][:max(0, LANGUAGE_QUERY_MAX_VARIANTS - len(deterministic_queries))]
-                round_queries = list(dict.fromkeys(model_queries + deterministic_queries))[:LANGUAGE_QUERY_MAX_VARIANTS]
+                exclude_terms = list(dict.fromkeys(exclude_terms + safe_exclusions))[:variant_limit]
+                deterministic_limit = max(0, variant_limit - 2)
+                deterministic_candidates = base_variants[1:]
+                if _language_missing_entity_query(query):
+                    memory_query = _language_memory_content_query(query)
+                    deterministic_candidates = [memory_query] + deterministic_candidates
+                deterministic_queries = list(dict.fromkeys(deterministic_candidates))[:deterministic_limit]
+                model_queries = plan["queries"][:max(0, variant_limit - len(deterministic_queries))]
+                round_queries = list(dict.fromkeys(model_queries + deterministic_queries))[:variant_limit]
             except (OSError, RuntimeError, ValueError, urllib.error.URLError):
                 recovered = True
                 round_queries = base_variants[1:]

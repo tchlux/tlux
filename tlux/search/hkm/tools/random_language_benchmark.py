@@ -54,8 +54,8 @@ _STYLE_TEMPLATES = {
         "Find where {a} occurs after {b}, unless {c} is a separate scene",
     ),
     "missing_entity": (
-        "I remember {b} near {c}, but not who or what was involved",
-        "I cannot recall the person or object; search for the part with {b} and {c}",
+        "I remember {b} near {c} and {d}, but not who or what was involved",
+        "I cannot recall the person or object; search for the part with {b}, {c}, and {d}",
     ),
 }
 _STYLES = tuple(_STYLE_TEMPLATES)
@@ -103,10 +103,10 @@ def deterministic_query(excerpt: str, style: str, variant: int = 0) -> str:
     if style not in _STYLE_TEMPLATES:
         raise ValueError(f"unknown query style: {style}")
     terms = _content_terms(excerpt, 4)
-    while len(terms) < 3:
+    while len(terms) < 4:
         terms.append(terms[-1])
     template = _STYLE_TEMPLATES[style][variant % len(_STYLE_TEMPLATES[style])]
-    return _bounded_query(template.format(a=terms[0], b=terms[1], c=terms[2]))
+    return _bounded_query(template.format(a=terms[0], b=terms[1], c=terms[2], d=terms[3]))
 
 
 # Parse a bounded JSON query returned by a compatible language model.

@@ -21,6 +21,8 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _grounded_quality_failed,
     _parse_tool_query,
     _keyword_query,
+    _language_query_clauses,
+    _language_first_pass_confident,
     _language_query_variants,
     _language_negative_clauses,
     _language_missing_entity_query,
@@ -144,6 +146,22 @@ def test_language_variants_skip_single_word_clause_lanes() -> None:
     assert "pretty make" in missing
 
 
+def test_language_clauses_consume_multiword_condition_markers() -> None:
+    query = (
+        "Only if someone climbs the chimney as the crowd watches below, "
+        "and provided it is after dark, return the memory"
+    )
+    clauses = _language_query_clauses(query)
+    variants = _language_query_variants(query)
+    assert "someone climbs the chimney as the crowd watches below" in clauses
+    assert "dark" in clauses
+    assert "Only" not in clauses
+    assert "provided it is" not in clauses
+    assert "provided it is" not in variants
+    assert "crowd people below" in variants
+    assert "night dark" in variants
+
+
 def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
     class MemoryGenerator(LMStudioQueryGenerator):
         def __init__(self) -> None:
@@ -190,6 +208,17 @@ def test_language_ranking_uses_document_preview_for_condition_coverage() -> None
     merged = _merge_language_results([result], "A large wall stands over us", [], 1)
     assert merged.docs[0].doc_id == 2
     assert "a" not in _language_word_forms("A large wall stands over us")
+
+
+def test_language_first_pass_confidence_requires_positive_coverage() -> None:
+    hit = SimpleNamespace(
+        preview_text="A crowd watches in horror.",
+        anchor_preview_text="",
+        document=SimpleNamespace(document_preview=""),
+    )
+    result = SimpleNamespace(docs=[hit])
+    assert _language_first_pass_confident("A crowd watches in horror", result)
+    assert not _language_first_pass_confident("A crowd watches in horror, not dragons", result)
 
 
 def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None:
@@ -303,6 +332,8 @@ def test_language_negative_parser_keeps_event_negation() -> None:
 def test_language_missing_entity_parser_covers_memory_phrasings() -> None:
     assert _language_missing_entity_query("I cannot recall who climbed the tower")
     assert _language_missing_entity_query("I remember the scene, but not who was there")
+    assert _language_missing_entity_query("The name escapes me; search the chimney climb")
+    assert _language_missing_entity_query("My name has escaped me; search the chimney climb")
     assert not _language_missing_entity_query("Xaden climbs the tower at night")
 
 
@@ -877,6 +908,31 @@ def test_language_agent_refines_after_first_search(tmp_path: Path, monkeypatch) 
     assert run["antipatterns"]
     assert "nighttime climbing gathered crowd horror" in run["queries"]
     assert run["result"].docs[0].source_path == "target.txt"
+
+
+def test_language_model_cap_keeps_deterministic_recovery_budget(monkeypatch) -> None:
+    empty = SimpleNamespace(docs=[], count=0, limit=1, next_offset=None)
+    monkeypatch.setattr(benchmark, "_search", lambda *args, **kwargs: (empty, 0.0))
+    query = "The person is forgotten, but at night something climbs a large structure while crowds watch in horror"
+
+    run = LanguageSearchAgent(FakeLanguageClient(), mode="hybrid").run(query, None, top_k=1)
+    assert len(run["queries"]) == 4
+    assert "structure climbs crowds horror night large watch" in run["queries"]
+    missing = LanguageSearchAgent(FakeLanguageClient(), mode="hybrid").run(
+        "I cannot recall the person or object; search for the part with Quadrant and right",
+        None,
+        top_k=1,
+    )
+    assert "Quadrant right" in missing["queries"]
+
+    class FailingLanguageClient(FakeLanguageClient):
+        def plan_language_query(self, query: str, snippets: str):
+            raise ValueError("planner unavailable")
+
+    recovered = LanguageSearchAgent(FailingLanguageClient(), mode="hybrid").run(
+        query, None, top_k=1
+    )
+    assert len(recovered["queries"]) == 7
 
 
 def test_deterministic_tool_agent_fails_closed_for_unindexed_evidence(tmp_path: Path, monkeypatch) -> None:
