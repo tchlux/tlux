@@ -361,6 +361,7 @@ def test_language_unless_penalty_reorders_only_selected_page() -> None:
         2,
     )
     assert merged.docs[0].doc_id == 2
+    assert {hit.doc_id for hit in merged.docs} == {1, 2}
 
 
 def test_language_missing_entity_parser_covers_memory_phrasings() -> None:
