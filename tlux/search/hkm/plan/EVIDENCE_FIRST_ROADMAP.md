@@ -18,7 +18,7 @@ data and 118 MB of embedding cache. Several old bug reports describe behavior
 that now has regression tests; the remaining actionable reports are the
 non-positive file-size flag and macOS resource sampling.
 
-Current implementation status: 51 tests pass; the quality harness, retrieval
+Current implementation status: 105 tests pass; the quality harness, retrieval
 contract, scaling evidence, inspection commands, local wheel packaging, and
 atomic generation publication are complete. A clean wheel build/install also
 passes outside the repository tree.
@@ -145,6 +145,8 @@ long-running executor sample remains an environment-level verification item.
 - [x] Collapse multi-term lexical candidate scans into one HKM traversal and cache bounded source snapshots for previews; all 395 prose chunks retain 1.000 evidence recall/precision@1/MRR with zero model calls at 77/104 ms median/p95.
 - [x] Validate an independent corpus: a real-drama index of 64 FineWeb files (101 passages) retained 1.000 target/evidence recall, precision@1, and MRR both deterministically at 19/56 ms median/p95 and with 101/101 genuine Gemma 4 planner queries at 795/1,017 ms using a diagnostic five-second timeout.
 - [x] Gate a larger independent corpus: a real-drama index of 512 FineWeb files (785 passages) audited cleanly; all 512 deterministic-first token-tool samples retained 1.000 target/evidence recall, precision@1, and MRR with zero errors at 157/494 ms median/p95 and 0.2% bounded fallback.
+- [x] Add a reproducible random language-query audit with vague, specific, conditional, and missing-entity styles; reports raw-evidence ranks, query origin, previews, and latency, with LM Studio generation plus per-case deterministic fallback.
+- [ ] Close the random language gate. The fixed 40-case Fourth Wing baseline now reaches evidence recall@5/precision@1/MRR of 0.675/0.475/0.550; a two-sample LM smoke generated 8/8 queries but model-first refinement remains a separate quality experiment.
 - [ ] Reduce the remaining tail latency. The deterministic path is now below 120 ms p95 on the prose corpus; the latest warmed 50-sample Gemma 4 planner gate measures 0.880/1.055 s median/p95, so local model generation remains the main tail.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -230,6 +232,7 @@ before relying on direct Python serving.
 - 2026-07-14: Hardened readable-source evidence matching for punctuation/word-order-normalized requests while preserving partial-decoy rejection; the live persistent Gemma 3 smoke returned the correct source at rank 1 with a grounded JSONL response.
 - 2026-07-14: Cached bounded immutable source snapshots for search and evidence previews. The all-395 deterministic gate retained perfect evidence metrics while improving agent latency to 77/104 ms median/p95.
 - 2026-07-14: Added an independent FineWeb validation gate: deterministic and model-backed paths retained perfect grounded metrics across 64 source files; the model path generated 101/101 Gemma 4 queries at 795/1,017 ms median/p95 with a diagnostic five-second timeout.
+- 2026-07-14: Added the random language-query audit and public LM memory-query planner. The fixed 40-case Fourth Wing challenge now reports 0.675 evidence recall@5, 0.475 precision@1, and 0.550 MRR; capped lane agreement and a token rescue for explicit forgotten-entity requests improve ranking while preserving the existing six-case language coverage gate.
 - 2026-07-14: Reused a lazy persistent HTTP/1.1 connection for LM Studio requests with one reconnect on dropped sockets; a 20-sample independent Gemma 4 gate retained perfect evidence metrics at 646/938 ms median/p95.
 - 2026-07-14: Kept timeout failures fail-fast in the persistent transport instead of retrying model work; a live one-second independent Gemma 4 gate recovered 20/20 calls while retaining perfect grounded metrics at 1,033/1,069 ms median/p95.
 - 2026-07-14: Ran the persistent JSONL agent over 101 independent FineWeb passages: every response was grounded with zero errors at 20.8/60.2 ms median/p95 per request, including evidence validation.

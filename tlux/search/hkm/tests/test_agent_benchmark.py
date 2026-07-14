@@ -133,6 +133,25 @@ def test_language_plan_bounds_variants_and_exclusions() -> None:
     assert _language_query_variants("A large wall stands over us while crowds watch in horror")
 
 
+def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
+    class MemoryGenerator(LMStudioQueryGenerator):
+        def __init__(self) -> None:
+            self.model = "fake"
+
+        def _model_name(self) -> str:
+            return self.model
+
+        def _request(self, path, payload=None):
+            return {"choices": [{"message": {"content": '{"query":"find the basalt bridge"}'}}]}
+
+    generator = MemoryGenerator()
+    assert generator.generate_memory_query("A basalt bridge crosses the ravine", "specific") == (
+        "find the basalt bridge"
+    )
+    with pytest.raises(ValueError, match="unknown memory-query style"):
+        generator.generate_memory_query("A basalt bridge", "unknown")
+
+
 def test_language_ranking_uses_document_preview_for_condition_coverage() -> None:
     document = lambda text: SimpleNamespace(document_preview=text)
     weak = SimpleNamespace(
@@ -176,6 +195,32 @@ def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None
     merged = _merge_language_results([first], "candidate", [], 1)
     assert len(first.docs) == 2
     assert len(merged.docs) == 1
+
+
+def test_language_merge_keeps_stronger_focused_lane_over_repeated_decoy() -> None:
+    def hit(doc_id: int, score: float, preview: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            doc_id=doc_id,
+            span=(0, 1),
+            score=score,
+            source_path=f"{doc_id}.txt",
+            preview_text=preview,
+            anchor_preview_text="",
+            document=SimpleNamespace(document_preview=preview),
+        )
+
+    target = hit(1, 0.60, "Dain enters the Scribe Quadrant")
+    decoy = hit(2, 0.57, "Dain enters the Scribe Quadrant with another detail")
+    first = SimpleNamespace(docs=[target, decoy], count=2, limit=2, next_offset=None)
+    second = SimpleNamespace(docs=[target], count=1, limit=1, next_offset=None)
+    third = SimpleNamespace(docs=[decoy], count=1, limit=1, next_offset=None)
+    merged = _merge_language_results(
+        [first, second, third, third],
+        "Dain enters the Scribe Quadrant",
+        [],
+        1,
+    )
+    assert merged.docs[0].doc_id == 1
 
 
 def test_language_negative_clause_demotes_matching_anchor() -> None:
@@ -234,6 +279,11 @@ def test_language_contrast_ignores_negative_document_context() -> None:
     assert _language_positive_clauses("Find a funny remark without old Archives research") == [
         "Find a funny remark",
     ]
+
+
+def test_language_negative_parser_keeps_event_negation() -> None:
+    query = "Tairn tells me not to leave the field while the crowd waits"
+    assert _language_negative_clauses(query) == []
 
 
 def test_planner_excerpt_bounds_long_raw_input() -> None:

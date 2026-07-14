@@ -1,0 +1,93 @@
+{
+  "command": "bin/hkm-random-language-benchmark data/fourth_wing_hkm_index --samples 2 --seed 20260714 --styles vague,specific,conditional,missing_entity --query-source lm --model-first --base-url http://192.168.8.222:1234/v1 --model google/gemma-3-4b --timeout 15 --top-k 5",
+  "corpus": "Fourth Wing",
+  "samples": 2,
+  "cases": 8,
+  "model_query_successes": 8,
+  "model_query_fallbacks": 0,
+  "target": {
+    "recall_at_5": 0.375,
+    "precision_at_1": 0.25,
+    "mrr": 0.3125
+  },
+  "evidence": {
+    "recall_at_5": 0.375,
+    "precision_at_1": 0.25,
+    "mrr": 0.3125
+  },
+  "latency_ms": {
+    "agent_median": 3735.08,
+    "agent_p95": 8247.26,
+    "search_median": 955.10,
+    "search_p95": 2667.26
+  },
+  "failures": [
+    {
+      "sample_id": 0,
+      "doc_id": 36,
+      "style": "vague",
+      "query": "Why can't I go to the Scribe Quadrant? Someone is stopping me, and it involves Dain.",
+      "queries": [
+        "Why can't I go to the Scribe Quadrant?",
+        "Dain is involved in preventing my access",
+        "Fear regarding the Scribe Quadrant",
+        "it involves Dain.",
+        "Quadrant stopping involves Someone Scribe can't Dain"
+      ],
+      "top_docs": [106, 80, 109, 33, 95]
+    },
+    {
+      "sample_id": 0,
+      "doc_id": 36,
+      "style": "specific",
+      "query": "Dain can't go to the Scribe Quadrant because someone--she--is preventing him, and he's reacting with clenched fists.",
+      "queries": [
+        "Dain cannot enter the Scribe Quadrant",
+        "Dain can't go to the Scribe Quadrant",
+        "someone--she--is preventing him",
+        "he's reacting",
+        "clenched fists."
+      ],
+      "top_docs": [109, 211, 33, 66, 331]
+    },
+    {
+      "sample_id": 0,
+      "doc_id": 36,
+      "style": "conditional",
+      "query": "Dain can't go to the Scribe Quadrant because someone won't allow it.",
+      "queries": [
+        "Dain cannot enter the Scribe Quadrant",
+        "Dain can't go to the Scribe Quadrant",
+        "someone won't allow it.",
+        "Quadrant someone Scribe can't allow Dain"
+      ],
+      "top_docs": [33, 109, 106, 95, 80]
+    },
+    {
+      "sample_id": 0,
+      "doc_id": 36,
+      "style": "missing_entity",
+      "query": "Dain can't go to the Scribe Quadrant because someone won't allow it.",
+      "queries": [
+        "Dain cannot enter the Scribe Quadrant",
+        "Dain can't go to the Scribe Quadrant",
+        "someone won't allow it.",
+        "Quadrant someone Scribe can't allow Dain"
+      ],
+      "top_docs": [33, 109, 106, 95, 80]
+    },
+    {
+      "sample_id": 1,
+      "doc_id": 44,
+      "style": "missing_entity",
+      "query": "Where did their souls go to Malek?",
+      "queries": [
+        "Where did Mushin Vedie's soul go?",
+        "What is Malek?",
+        "Who commends souls to Malek?",
+        "souls Malek"
+      ],
+      "top_docs": [236, 356, 111, 189, 106]
+    }
+  ]
+}

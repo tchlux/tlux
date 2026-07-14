@@ -238,12 +238,23 @@ def _language_word_forms(text: str) -> set[str]:
 # Extract lexical clauses introduced by an explicit negative condition.
 def _language_negative_clauses(query: str) -> List[set[str]]:
     clauses: List[set[str]] = []
+    event_negation = {
+        "to", "be", "being", "been", "have", "has", "had", "do", "does",
+        "did", "leave", "leaving", "go", "going", "remember", "remembered",
+        "forget", "forgot", "want", "need", "like", "know", "stand", "say",
+        "said", "see", "seen", "take", "taking",
+    }
     match_pattern = (
         r"\b(?:not|without|except|excluding|rather than|instead of|no)\b"
         r"(.+?)(?=\b(?:and|but|while|when|where|because|although|though)\b|[,;:.]|$)"
     )
     for match in re.finditer(match_pattern, query, flags=re.IGNORECASE):
-        terms = _language_word_forms(match.group(1))
+        remainder = match.group(1).strip()
+        marker = match.group(0).split(None, 1)[0].lower()
+        first_word = remainder.split(None, 1)[0].lower() if remainder else ""
+        if marker == "not" and first_word in event_negation:
+            continue
+        terms = _language_word_forms(remainder)
         if terms:
             clauses.append(terms)
     return clauses
@@ -466,6 +477,43 @@ class LMStudioQueryGenerator:
         evidence_terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower())) - QUERY_GUARD_WORDS
         if not query_terms.intersection(evidence_terms):
             raise ValueError("LM Studio query did not quote the supplied evidence")
+        return query
+
+    # Turn raw evidence into a bounded natural-language memory request.
+    def generate_memory_query(self, excerpt: str, style: str = "specific") -> str:
+        guidance = {
+            "vague": "Use an imprecise conversational description while retaining concrete clues.",
+            "specific": "State the concrete event and relevant entities clearly.",
+            "conditional": "Use an if, after, unless, or while condition.",
+            "missing_entity": "Omit one named subject or object and say it is forgotten.",
+        }
+        if style not in guidance:
+            raise ValueError(f"unknown memory-query style: {style}")
+        prompt = (
+            "Write one natural-language memory search request from the evidence. "
+            f"{guidance[style]} Preserve the other details. Return only "
+            '{"query":"..."}; do not answer or explain.\nEvidence:\n'
+            f"{_planner_excerpt(excerpt, 160)}"
+        )
+        response = self._request("chat/completions", {
+            "model": self._model_name(),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": PLANNER_MAX_TOKENS,
+            "reasoning_effort": "none",
+            "response_format": QUERY_RESPONSE_FORMAT,
+            "stream": False,
+        })
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("LM Studio returned no memory-query choices")
+        message = choices[0].get("message", {})
+        content = message.get("content") or message.get("reasoning_content", "")
+        query = " ".join(parse_query(str(content)).split()[:LANGUAGE_QUERY_MAX_WORDS])
+        query_terms = set(re.findall(r"[A-Za-z0-9]+", query.lower())) - QUERY_GUARD_WORDS
+        evidence_terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower())) - QUERY_GUARD_WORDS
+        if not query_terms.intersection(evidence_terms):
+            raise ValueError("LM Studio memory query did not quote the supplied evidence")
         return query
 
     # Propose paraphrases and soft exclusions after inspecting search results.
@@ -1063,7 +1111,7 @@ def _merge_language_results(
         )
         penalty = 0 if anchor else sum(1 for term in exclusions if term in text)
         score = (
-            float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.03 * coverage
+            float(hit.score) + 0.04 * anchor + 0.005 * min(lanes, 2) + 0.03 * coverage
             - 0.14 * negative_penalty - 0.03 * penalty
         )
         return (-score, -coverage, int(hit.doc_id), hit.source_path)
@@ -1151,6 +1199,17 @@ class LanguageSearchAgent:
         for round_index in range(self.max_rounds):
             for variant in list(dict.fromkeys(round_queries))[:LANGUAGE_QUERY_MAX_VARIANTS]:
                 variant_mode = "semantic" if self.mode == "hybrid" else self.mode
+                if (
+                    variant != query
+                    and variant == _keyword_query(query, limit=12)
+                    and variant_mode == "semantic"
+                    and re.search(
+                        r"\b(?:forgot|forgotten|forget|remember|recall|unknown)\b",
+                        query,
+                        flags=re.IGNORECASE,
+                    )
+                ):
+                    variant_mode = "token"
                 result, elapsed = _search(searcher, variant, top_k * 3, 0, variant_mode)
                 results.append(result)
                 search_ms += elapsed
