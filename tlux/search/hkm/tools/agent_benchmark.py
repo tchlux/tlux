@@ -590,14 +590,15 @@ class LMStudioPlannerToolAgent:
 
     # Reuse a bounded planner result for repeated raw passages in one process.
     def _plan_query(self, excerpt: str) -> tuple[str, bool]:
-        if excerpt in self.query_cache:
-            query = self.query_cache.pop(excerpt)
-            self.query_cache[excerpt] = query
+        cache_key = " ".join(excerpt.split())
+        if cache_key in self.query_cache:
+            query = self.query_cache.pop(cache_key)
+            self.query_cache[cache_key] = query
             return query, True
         query = self.client.generate(excerpt)
         if len(self.query_cache) >= PLANNER_QUERY_CACHE_SIZE:
             self.query_cache.pop(next(iter(self.query_cache)))
-        self.query_cache[excerpt] = query
+        self.query_cache[cache_key] = query
         return query, False
 
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:

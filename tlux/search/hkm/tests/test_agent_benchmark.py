@@ -297,7 +297,7 @@ def test_structured_planner_caches_repeated_raw_passage(tmp_path: Path, monkeypa
     agent = LMStudioPlannerToolAgent(client, mode="token")
     searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
     first = agent.run("alpha dragon fortress", searcher, top_k=1)
-    second = agent.run("alpha dragon fortress", searcher, top_k=1)
+    second = agent.run("  alpha\n dragon   fortress ", searcher, top_k=1)
     assert client.calls == 1
     assert first["completion_calls"] == 1
     assert second["completion_calls"] == 0

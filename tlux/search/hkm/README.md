@@ -422,8 +422,8 @@ requests while retaining 1.000 evidence recall/precision@1/MRR.
 The persistent five-request smoke also emitted the native call on 5/5 requests
 and grounded every result at 2,091 ms median agent latency.
 
-The persistent planner also keeps a bounded 256-entry cache keyed by the full
-raw passage. In a repeated-passage smoke test, the first grounded request took
+The persistent planner also keeps a bounded 256-entry cache keyed by normalized
+raw passage text. In a repeated-passage smoke test, the first grounded request took
 578 ms and the next four took 35-39 ms each, with zero additional model calls.
 The cache stores only the generated query; HKM search and evidence validation
 still run for every request.
