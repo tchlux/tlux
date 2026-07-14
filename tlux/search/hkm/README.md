@@ -454,6 +454,11 @@ challenge set and concept-group gate live in
 `plan/benchmark_language_queries.md`.
 Run `bin/hkm-language-benchmark INDEX --model-first --jsonl report.jsonl`
 to evaluate that gate and record per-case coverage plus latency.
+The grounded conditional fixture in
+`plan/benchmark_language_conditionals.md` adds seven increasingly conditional
+requests with forgotten-name phrasing; its latest deterministic run passes
+7/7 coverage/coherence checks; the latest labeled sample is 0.929 precision,
+with unknown-hit precision still open.
 
 For a reproducible harder audit, run
 `bin/hkm-random-language-benchmark INDEX --samples 10 --top-k 5`. It samples
@@ -463,9 +468,10 @@ baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
 The current 40-case deterministic run reaches 0.850 evidence recall@5 and
-0.600 precision@1. A current eight-case Gemma 3 model-first smoke reaches
-1.000 recall/precision/MRR, including two rejected missing-entity generations
-recovered with three retained clues; larger random gates remain open.
+0.625 precision@1 (MRR 0.719). A latest eight-case Gemma 3 model-first smoke reaches
+1.000 recall@5, 0.875 precision@1, and 0.938 MRR, including two rejected
+missing-entity generations recovered with three retained clues; larger random
+gates remain open.
 The valid 512-file FineWeb profile index passes a 32-case model-first language
 gate at 1.000 recall/precision/MRR across all four styles, with one validated
 deterministic rescue.

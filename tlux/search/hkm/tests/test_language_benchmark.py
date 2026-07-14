@@ -27,6 +27,17 @@ def test_load_judgements_and_attach_to_cases() -> None:
     assert {"all": ["funny", "archives", "research"]} in cases[5]["judgements"]["negative"]
 
 
+def test_parse_conditional_language_fixture() -> None:
+    root = Path(__file__).parents[1]
+    cases = parse_cases(
+        (root / "plan" / "benchmark_language_conditionals.md").read_text(encoding="utf-8"),
+        load_judgements(root / "plan" / "benchmark_language_conditionals_judgements.json"),
+    )
+    assert [case["id"] for case in cases] == [f"LQ-{index:02d}" for index in range(11, 18)]
+    assert cases[1]["judgements"]["relevant"] == [{"all": ["climb", "chimney", "rope"]}]
+    assert cases[6]["judgements"]["negative"] == [{"all": ["spectators", "dragons"]}]
+
+
 def test_evaluate_case_matches_aliases_and_reports_antipattern_rank() -> None:
     case = {
         "id": "LQ-test",

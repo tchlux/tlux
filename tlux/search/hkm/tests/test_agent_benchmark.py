@@ -25,6 +25,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _language_first_pass_confident,
     _language_query_variants,
     _language_negative_clauses,
+    _language_unless_clauses,
     _language_missing_entity_query,
     _language_positive_clauses,
     _language_word_forms,
@@ -158,8 +159,10 @@ def test_language_clauses_consume_multiword_condition_markers() -> None:
     assert "Only" not in clauses
     assert "provided it is" not in clauses
     assert "provided it is" not in variants
+    assert "dark" not in variants
     assert "crowd people below" in variants
     assert "night dark" in variants
+    assert "night dark" in _language_query_variants("after darkness or nightfall")
 
 
 def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
@@ -327,6 +330,37 @@ def test_language_contrast_ignores_negative_document_context() -> None:
 def test_language_negative_parser_keeps_event_negation() -> None:
     query = "Tairn tells me not to leave the field while the crowd waits"
     assert _language_negative_clauses(query) == []
+
+
+def test_language_unless_parser_extracts_soft_exclusion() -> None:
+    clauses = _language_unless_clauses(
+        "Find the office joke unless this is the Archives research discussion"
+    )
+    assert any("archive" in clause and "research" in clause for clause in clauses)
+
+
+def test_language_unless_penalty_reorders_only_selected_page() -> None:
+    def hit(doc_id: int, score: float, preview: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            doc_id=doc_id,
+            span=(0, 1),
+            score=score,
+            source_path=f"{doc_id}.txt",
+            preview_text=preview,
+            anchor_preview_text="",
+            document=SimpleNamespace(document_preview=preview),
+        )
+
+    bad = hit(1, 0.60, "A funny Archives research remark")
+    good = hit(2, 0.55, "A funny remark in an office")
+    result = SimpleNamespace(docs=[bad, good], count=2, limit=2, next_offset=None)
+    merged = _merge_language_results(
+        [result],
+        "A funny remark in an office unless this is the Archives research passage",
+        [],
+        2,
+    )
+    assert merged.docs[0].doc_id == 2
 
 
 def test_language_missing_entity_parser_covers_memory_phrasings() -> None:

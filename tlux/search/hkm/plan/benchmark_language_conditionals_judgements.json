@@ -1,0 +1,38 @@
+{
+  "cases": {
+    "LQ-11": {
+      "relevant": [{"all": ["climb", "chimney", "rope"]}],
+      "negative": []
+    },
+    "LQ-12": {
+      "relevant": [{"all": ["climb", "chimney", "rope"]}],
+      "negative": []
+    },
+    "LQ-13": {
+      "relevant": [
+        {"all": ["climb", "chimney", "rope"]},
+        {"all": ["watch", "chimney"]}
+      ],
+      "negative": []
+    },
+    "LQ-14": {
+      "relevant": [{"all": ["crowd", "circle", "scream"]}],
+      "negative": []
+    },
+    "LQ-15": {
+      "relevant": [
+        {"all": ["watch", "horror"]},
+        {"all": ["darkness", "tall"]}
+      ],
+      "negative": []
+    },
+    "LQ-16": {
+      "relevant": [{"all": ["office", "funny"]}],
+      "negative": [{"all": ["archives", "research"]}]
+    },
+    "LQ-17": {
+      "relevant": [{"all": ["crowd", "circle", "scream"]}],
+      "negative": [{"all": ["spectators", "dragons"]}]
+    }
+  }
+}

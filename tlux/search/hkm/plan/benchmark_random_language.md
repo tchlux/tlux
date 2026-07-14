@@ -22,10 +22,10 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
 ```
 
 On 10 Fourth Wing samples (40 cases), the current deterministic baseline
-reached evidence recall@5 0.850, precision@1 0.600, and MRR 0.708. By style,
+reached evidence recall@5 0.850, precision@1 0.625, and MRR 0.719. By style,
 evidence recall was 0.900 vague, 0.800 specific, 0.700 conditional, and 1.000
 missing-entity; missing-entity precision@1 was 0.800. Median agent/search
-latency was 707/621 ms.
+latency was 622/552 ms.
 This is a challenge baseline, not a production quality claim; improve the
 agent and rerun the same seed before changing the index or query templates.
 The deterministic templates intentionally retain lexical clues, so they test
@@ -40,11 +40,12 @@ are skipped as low-signal searches. Missing-entity requests send their compact
 lexical lane through token search, preserving rare remembered details without
 changing the semantic path for ordinary requests.
 
-A current two-sample LM Studio model-first run (8 cases, Gemma 3 4B, seed
-20260714, timeout 15 seconds) reached evidence recall@5, precision@1, and MRR
-of 1.000/1.000/1.000. Six requests used model-generated queries; two invalid
-missing-entity generations used deterministic fallback and still ranked the
-evidence first. Median agent/search latency was 657/381 ms.
+A latest two-sample LM Studio model-first run (8 cases, Gemma 3 4B, seed
+20260714, timeout 15 seconds) reached evidence recall@5/precision@1/MRR of
+1.000/0.875/0.938. Six requests used model-generated queries; two invalid
+missing-entity generations used deterministic fallback and still recovered the
+target evidence. Median agent/search latency was 2,266/599 ms; LM Studio load
+causes substantial warm-run variance.
 
 The heterogeneous FineWeb profile index at `/tmp/hkm_fineweb_profile_drama`
 now passes an eight-sample model-first slice (32 cases) at 1.000 recall@5,

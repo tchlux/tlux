@@ -54,6 +54,7 @@ LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
 LANGUAGE_COVERAGE_WEIGHT = 0.10
 LANGUAGE_FIRST_PASS_BONUS = 0.05
+LANGUAGE_UNLESS_PENALTY = 0.12
 LANGUAGE_CONFIDENCE_COVERAGE = 0.70
 LANGUAGE_MEMORY_WORDS = {
     "called", "cannot", "find", "forgot", "forgotten", "forget", "involved",
@@ -64,7 +65,7 @@ LANGUAGE_CONCEPT_GROUPS = (
     frozenset({"amusing", "funny", "humorous", "laugh", "laughter", "joke", "silly"}),
     frozenset({"enter", "entered", "enters", "door", "room", "office"}),
     frozenset({"climb", "climbs", "climbing", "ascending", "scaling"}),
-    frozenset({"night", "nighttime", "midnight", "dark", "dusk"}),
+    frozenset({"night", "nighttime", "midnight", "dark", "dusk", "darkness", "nightfall"}),
     frozenset({"wall", "tower", "structure", "cliff", "chimney", "parapet"}),
     frozenset({"crowd", "crowds", "people", "gather", "gathers", "below"}),
     frozenset({"watch", "watched", "watching", "spectators", "horror", "horrified", "fear", "scream"}),
@@ -217,21 +218,22 @@ def _language_query_variants(query: str) -> List[str]:
     if not normalized:
         return []
     clauses = _language_query_clauses(normalized)
+    concept_queries = _language_concept_queries(normalized)
     variants = [normalized]
     variants.extend(
         clause for clause in clauses
-        if len(_language_word_forms(clause)) >= 2
+        if len(clause.split()) >= 2
     )
     if _language_missing_entity_query(normalized):
         content = _language_memory_content_query(normalized)
         if len(_language_word_forms(content)) >= 2:
             variants.append(content)
-    variants.extend(_language_concept_queries(normalized))
+    variants.extend(concept_queries)
     variants.extend(
         f"{clauses[index]} {clauses[index + 1]}"
         for index in range(len(clauses) - 1)
-        if len(_language_word_forms(clauses[index])) >= 2
-        and len(_language_word_forms(clauses[index + 1])) >= 2
+        if len(clauses[index].split()) >= 2
+        and len(clauses[index + 1].split()) >= 2
     )
     variants.append(_keyword_query(normalized, limit=12))
     return list(dict.fromkeys(
@@ -276,6 +278,18 @@ def _language_negative_clauses(query: str) -> List[set[str]]:
         if terms:
             clauses.append(terms)
     return clauses
+
+
+# Extract soft exclusions introduced by an unless clause.
+def _language_unless_clauses(query: str) -> List[set[str]]:
+    return [
+        terms for match in re.finditer(
+            r"\bunless\b(.+?)(?=[,;:.]|$)",
+            query,
+            flags=re.IGNORECASE,
+        )
+        if (terms := _language_word_forms(match.group(1)))
+    ]
 
 
 # Keep explicit negative clauses out of positive condition scoring.
@@ -1156,6 +1170,7 @@ def _merge_language_results(
         query_terms = _language_word_forms(query)
     exclusions = set(term.lower() for term in exclude_terms)
     negative_clauses = _language_negative_clauses(query)
+    unless_clauses = _language_unless_clauses(query)
     missing_entity = _language_missing_entity_query(query)
     for result in results:
         for hit in result.docs:
@@ -1229,6 +1244,19 @@ def _merge_language_results(
             choice = remaining.pop(choice_index)
         selected.append(choice)
         covered_mask |= masks[id(choice)]
+    if unless_clauses:
+        # Reorder only the selected page so exclusion penalties cannot erase
+        # condition coverage gathered from the other lanes.
+        selected.sort(
+            key=lambda item: (
+                rank_key(item)[0] + LANGUAGE_UNLESS_PENALTY * sum(
+                    len(clause.intersection(_language_word_forms(_language_local_hit_text(item[0]))))
+                    >= min(2, len(clause))
+                    for clause in unless_clauses
+                ),
+                rank_key(item)[1:],
+            )
+        )
     base.docs = [hit for hit, _, _, _ in selected]
     base.count = len(ranked)
     base.limit = top_k
