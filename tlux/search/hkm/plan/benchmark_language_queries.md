@@ -43,6 +43,13 @@ For each case and `k=5`, report:
   filter, so recall cannot be lost just because a useful passage contains a
   common term.
 
+The optional `plan/benchmark_language_judgements.json` sidecar adds
+conservative all-term clauses for known relevant and negative evidence. The
+evaluator reports `judged_precision@5` using only labeled hits; unknown hits
+are counted separately and excluded from its denominator. Use
+`--require-precision` to apply this separate gate after the sidecar grows to
+cover the cases being compared. The existing coverage gate is unchanged.
+
 The initial quality gate is `group_coverage@5 == 1.0` for every case and
 `coherent_hit@5` true for every case. `top_hit_groups` and `anti_rank` are
 reported rather than gated until a larger judged set exists. A result that is
@@ -145,6 +152,17 @@ is a repeatable quality gate for the reviewed corpus, not yet a universal
 precision or service-level guarantee; repeat the command after changing the
 model, index, or ranking policy.
 
+## Latest rerun: 2026-07-14
+
+After adding explicit negative-clause filtering to contrast reranking, the
+warmed Gemma 3 model-first run (`--timeout 5`, semantic mode) again passed all
+six coverage/coherence cases. It measured 0.75 macro judged precision over 13
+labeled hits, with a 3.53 second median wall time (5.17 second p95) and 0.86
+second median search time (2.12 second p95). The separate four-case contrast
+diagnostic passed 4/4 and reached 0.92 macro judged precision over six labeled
+hits. These are useful regression measurements, not a claim that all unknown
+hits are relevant.
+
 The executable evaluator was added to make this gate repeatable. A warmed
 Gemma 3 run on 2026-07-14 (`--model-first --tool-mode semantic --timeout 10`)
 passed LQ-01 through LQ-03, but only 3/6 cases overall: mean group coverage
@@ -171,6 +189,6 @@ index, or ranking change.
 
 The current language runner uses a bounded two-round plan and soft penalties.
 It does not yet synthesize a final natural-language answer or prove that every
-returned hit is relevant. This benchmark is deliberately a recall-oriented
-gate for remembered conditions. Add judged negatives and a precision@k review
-before using it as a B2B service-level target.
+returned hit is relevant. The sidecar is an initial conservative precision
+sample, not a B2B service-level target; expand it with manually reviewed
+negative snippets before treating `--require-precision` as a broad guarantee.

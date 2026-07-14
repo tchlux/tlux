@@ -1,0 +1,34 @@
+{
+  "cases": {
+    "LQ-07": {
+      "relevant": [
+        {"all": ["xaden", "climbing"]},
+        {"all": ["climb", "cliff"]},
+        {"all": ["climb", "chimney"]}
+      ],
+      "negative": [{"all": ["xaden", "smoking"]}]
+    },
+    "LQ-08": {
+      "relevant": [
+        {"all": ["climb", "chimney", "rope"]},
+        {"all": ["people", "below"]},
+        {"all": ["watch", "horror"]}
+      ],
+      "negative": []
+    },
+    "LQ-09": {
+      "relevant": [{"all": ["office", "funny"]}],
+      "negative": [
+        {"all": ["archives", "research"]},
+        {"all": ["archives", "door"]}
+      ]
+    },
+    "LQ-10": {
+      "relevant": [
+        {"all": ["crowd", "circle", "scream"]},
+        {"all": ["watch", "horror"]}
+      ],
+      "negative": [{"all": ["spectators", "dragons"]}]
+    }
+  }
+}

@@ -58,6 +58,15 @@ LANGUAGE_CONCEPT_GROUPS = (
     frozenset({"crowd", "crowds", "people", "gather", "gathers", "below"}),
     frozenset({"watch", "watched", "watching", "spectators", "horror", "horrified", "fear", "scream"}),
 )
+LANGUAGE_CONCEPT_LANES = (
+    (LANGUAGE_CONCEPT_GROUPS[0], "funny humorous joke"),
+    (LANGUAGE_CONCEPT_GROUPS[1], "door room office"),
+    (LANGUAGE_CONCEPT_GROUPS[2], "climb chimney"),
+    (LANGUAGE_CONCEPT_GROUPS[3], "night dark"),
+    (LANGUAGE_CONCEPT_GROUPS[4], "large wall structure"),
+    (LANGUAGE_CONCEPT_GROUPS[5], "crowd people below"),
+    (LANGUAGE_CONCEPT_GROUPS[6], "watch horror"),
+)
 QUERY_GUARD_WORDS = STOP_WORDS | {
     "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
     "on", "or", "the", "to", "was", "were", "will", "you", "your",
@@ -179,10 +188,16 @@ def _language_query_clauses(query: str) -> List[str]:
     if not normalized:
         return []
     return [part.strip() for part in re.split(
-        r"\b(?:and|but|while|when|where|because|although|though|with|without)\b|[,;:]",
+        r"\b(?:and|but|while|when|where|because|although|though|with|without|if|unless|despite|after|before|except|until)\b|[,;:]",
         normalized,
         flags=re.IGNORECASE,
     ) if part.strip()]
+
+
+# Add compact synonym lanes for concepts explicitly present in a request.
+def _language_concept_queries(query: str) -> List[str]:
+    forms = _language_word_forms(query)
+    return [phrase for group, phrase in LANGUAGE_CONCEPT_LANES if forms.intersection(group)]
 
 
 # Return short language-query variants while preserving content words.
@@ -193,6 +208,7 @@ def _language_query_variants(query: str) -> List[str]:
     clauses = _language_query_clauses(normalized)
     variants = [normalized]
     variants.extend(clauses)
+    variants.extend(_language_concept_queries(normalized))
     variants.extend(
         f"{clauses[index]} {clauses[index + 1]}"
         for index in range(len(clauses) - 1)
@@ -219,11 +235,52 @@ def _language_word_forms(text: str) -> set[str]:
     return forms
 
 
+# Extract lexical clauses introduced by an explicit negative condition.
+def _language_negative_clauses(query: str) -> List[set[str]]:
+    clauses: List[set[str]] = []
+    match_pattern = (
+        r"\b(?:not|without|except|excluding|rather than|instead of|no)\b"
+        r"(.+?)(?=\b(?:and|but|while|when|where|because|although|though)\b|[,;:.]|$)"
+    )
+    for match in re.finditer(match_pattern, query, flags=re.IGNORECASE):
+        terms = _language_word_forms(match.group(1))
+        if terms:
+            clauses.append(terms)
+    return clauses
+
+
+# Keep explicit negative clauses out of positive condition scoring.
+def _language_positive_clauses(query: str) -> List[str]:
+    negative_marker = re.compile(
+        r"\b(?:not|without|except|excluding|rather than|instead of|no)\b",
+        flags=re.IGNORECASE,
+    )
+    negative_terms = _language_negative_clauses(query)
+    return [
+        clause for clause in _language_query_clauses(query)
+        if not negative_marker.search(clause)
+        and not any(
+            len(_language_word_forms(clause).intersection(terms)) >= min(2, len(terms))
+            for terms in negative_terms
+        )
+    ]
+
+
 # Expand lexical forms into a small set of condition concepts for reranking.
 def _language_concept_forms(text: str) -> set[str]:
     forms = _language_word_forms(text)
     expanded = set(forms)
     for group in LANGUAGE_CONCEPT_GROUPS[:2]:
+        if forms.intersection(group):
+            expanded.update(group)
+    return expanded
+
+
+# Expand every known condition group when a query contains an explicit contrast.
+def _language_full_concept_forms(text: str) -> set[str]:
+    forms = _language_word_forms(text)
+    expanded = set(forms)
+    for group in LANGUAGE_CONCEPT_GROUPS:
         if forms.intersection(group):
             expanded.update(group)
     return expanded
@@ -424,6 +481,11 @@ class LMStudioQueryGenerator:
         prompt = (
             "Plan a grounded search. Return only {\"queries\":[...],\"exclude_terms\":[...]}. "
             "Rewrite the request in several short ways, preserving every condition. "
+            "Give each positive condition at least one synonym lane (for example, "
+            "watch in horror may become horrified spectators). If the request says "
+            "not, without, or excluding, keep the positive target in a separate lane "
+            "and use the negative scene only as an exclusion; never spend every lane "
+            "on the excluded scene. "
             "A subject or object may be unknown; do not invent one. Exclusions are soft "
             "antipatterns seen in the results, not facts. Use at most four queries and four "
             "short exclusion terms.\nRequest:\n"
@@ -943,6 +1005,16 @@ def _language_hit_text(hit: Any) -> str:
     ).lower()
 
 
+# Return the local snippet text used for explicit contrast checks.
+def _language_local_hit_text(hit: Any) -> str:
+    return " ".join(
+        value for value in (
+            getattr(hit, "preview_text", ""),
+            getattr(hit, "anchor_preview_text", ""),
+        ) if value
+    ).lower()
+
+
 # Merge language-query result lanes and apply soft antipattern penalties.
 #
 # Arguments:
@@ -963,8 +1035,12 @@ def _merge_language_results(
     # Keep the full first-pass candidate page for later refinement rounds.
     base = copy.copy(results[0])
     grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool]] = {}
-    query_terms = _language_word_forms(query)
+    positive_clauses = _language_positive_clauses(query)
+    query_terms = _language_word_forms(" ".join(positive_clauses))
+    if not query_terms:
+        query_terms = _language_word_forms(query)
     exclusions = set(term.lower() for term in exclude_terms)
+    negative_clauses = _language_negative_clauses(query)
     for result in results:
         for hit in result.docs:
             key = (int(hit.doc_id), tuple(hit.span))
@@ -978,30 +1054,43 @@ def _merge_language_results(
     def rank_key(item: tuple[Any, int, bool]) -> tuple[float, float, int, str]:
         hit, lanes, anchor = item
         text = _language_hit_text(hit)
+        local_terms = _language_word_forms(_language_local_hit_text(hit))
         terms = _language_word_forms(text)
         coverage = len(query_terms.intersection(terms)) / float(max(1, len(query_terms)))
+        negative_penalty = sum(
+            len(clause.intersection(local_terms)) >= min(2, len(clause))
+            for clause in negative_clauses
+        )
         penalty = 0 if anchor else sum(1 for term in exclusions if term in text)
-        score = float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.03 * coverage - 0.03 * penalty
+        score = (
+            float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.03 * coverage
+            - 0.14 * negative_penalty - 0.03 * penalty
+        )
         return (-score, -coverage, int(hit.doc_id), hit.source_path)
 
     ranked = sorted(grouped.values(), key=rank_key)
+    contrast_query = bool(negative_clauses)
     condition_terms = [
-        _language_concept_forms(clause)
-        for clause in _language_query_clauses(query)
+        (_language_full_concept_forms if contrast_query else _language_concept_forms)(clause)
+        for clause in positive_clauses
     ]
     condition_terms = [terms for terms in condition_terms if terms]
     masks = {
         id(item): sum(
             1 << index
             for index, terms in enumerate(condition_terms)
-            if len(_language_concept_forms(_language_hit_text(item[0])).intersection(terms))
-            >= (2 if len(terms) >= 2 else 1)
+            if len((
+                _language_word_forms(_language_local_hit_text(item[0]))
+                if contrast_query else _language_concept_forms(_language_hit_text(item[0]))
+            ).intersection(terms))
+            >= (1 if contrast_query else (2 if len(terms) >= 2 else 1))
         )
         for item in ranked
     }
     selected: List[tuple[Any, int, bool]] = []
     remaining = list(ranked)
     covered_mask = 0
+    coherence_weight = 0.08 if contrast_query else 0.0
     while remaining and len(selected) < top_k:
         if not selected:
             choice = remaining.pop(0)
@@ -1010,7 +1099,8 @@ def _merge_language_results(
                 range(len(remaining)),
                 key=lambda index: (
                     -rank_key(remaining[index])[0]
-                    + 0.15 * (masks[id(remaining[index])] & ~covered_mask).bit_count(),
+                    + 0.15 * (masks[id(remaining[index])] & ~covered_mask).bit_count()
+                    + coherence_weight * masks[id(remaining[index])].bit_count(),
                     -rank_key(remaining[index])[0],
                 ),
             )

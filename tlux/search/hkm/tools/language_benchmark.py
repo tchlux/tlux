@@ -66,9 +66,44 @@ def _aliases(cell: str) -> List[str]:
     return [part.strip() for part in cleaned.split(",") if part.strip()]
 
 
+# Load optional stable text-pattern judgements keyed by benchmark case ID.
+def load_judgements(path: Path | None) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entries = payload.get("cases", payload)
+    if not isinstance(entries, dict):
+        raise ValueError("judgements must be an object keyed by case ID")
+    judgements: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for case_id, entry in entries.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"judgement for {case_id} must be an object")
+        parsed: Dict[str, List[Dict[str, Any]]] = {}
+        for label in ("relevant", "negative"):
+            clauses = entry.get(label, [])
+            if not isinstance(clauses, list):
+                raise ValueError(f"{case_id}.{label} must be a list")
+            parsed[label] = []
+            for clause in clauses:
+                if not isinstance(clause, dict) or not clause.get("all"):
+                    raise ValueError(f"{case_id}.{label} clauses require a non-empty all list")
+                aliases = clause["all"]
+                if not isinstance(aliases, list) or not all(
+                    isinstance(alias, str) and alias.strip() for alias in aliases
+                ):
+                    raise ValueError(f"{case_id}.{label}.all must contain non-empty strings")
+                parsed[label].append({"all": [alias.strip() for alias in aliases]})
+        judgements[str(case_id)] = parsed
+    return judgements
+
+
 # Parse the benchmark table into ID, query, required groups, and antipatterns.
-def parse_cases(markdown: str) -> List[Dict[str, Any]]:
+def parse_cases(
+    markdown: str,
+    judgements: Dict[str, Dict[str, List[Dict[str, Any]]]] | None = None,
+) -> List[Dict[str, Any]]:
     cases: List[Dict[str, Any]] = []
+    judgements = judgements or {}
     for line in markdown.splitlines():
         match = _CASE_ROW.match(line)
         if match is None or match.group(1) == "ID":
@@ -80,6 +115,7 @@ def parse_cases(markdown: str) -> List[Dict[str, Any]]:
             "query": query,
             "groups": [group for group in groups if group],
             "antipatterns": _aliases(antipatterns),
+            "judgements": judgements.get(case_id, {"relevant": [], "negative": []}),
         })
     if not cases:
         raise ValueError("benchmark contains no LQ table rows")
@@ -103,6 +139,21 @@ def _hit_groups(hit: Dict[str, Any], groups: Sequence[Sequence[str]]) -> List[in
         index for index, aliases in enumerate(groups)
         if any(_contains_alias(text, alias) for alias in aliases)
     ]
+
+
+# Return true when every alias in a conservative judgement clause is present.
+def _clause_matches(text: str, clause: Dict[str, Any]) -> bool:
+    return all(_contains_alias(text, alias) for alias in clause.get("all", []))
+
+
+# Label one hit, preferring an explicit negative when clauses overlap.
+def _judged_label(hit: Dict[str, Any], judgements: Dict[str, Any]) -> str | None:
+    text = _hit_text(hit)
+    if any(_clause_matches(text, clause) for clause in judgements.get("negative", [])):
+        return "negative"
+    if any(_clause_matches(text, clause) for clause in judgements.get("relevant", [])):
+        return "relevant"
+    return None
 
 
 # Return the nearest-rank p95 value used by the other HKM benchmarks.
@@ -130,6 +181,10 @@ def evaluate_case(case: Dict[str, Any], response: Dict[str, Any], top_k: int = 5
         if any(_contains_alias(_hit_text(hit), alias) for alias in case["antipatterns"]):
             anti_rank = rank
             break
+    judged_labels = [_judged_label(hit, case.get("judgements", {})) for hit in hits]
+    relevant_count = judged_labels.count("relevant")
+    negative_count = judged_labels.count("negative")
+    judged_count = relevant_count + negative_count
     return {
         "id": case["id"],
         "query": case["query"],
@@ -137,6 +192,14 @@ def evaluate_case(case: Dict[str, Any], response: Dict[str, Any], top_k: int = 5
         "coherent_hit_at_5": coherent,
         "top_hit_groups": len(hit_groups[0]) if hit_groups else 0,
         "anti_rank": anti_rank,
+        "judged_precision_at_5": (
+            relevant_count / judged_count if judged_count else None
+        ),
+        "judged_count_at_5": judged_count,
+        "relevant_count_at_5": relevant_count,
+        "negative_count_at_5": negative_count,
+        "unjudged_count_at_5": len(hits) - judged_count,
+        "judged_labels": judged_labels,
         "grounded": bool(response.get("grounded")) and bool(hits),
         "doc_count": len(hits),
         "agent_ms": float(response.get("agent_ms", 0.0)),
@@ -154,6 +217,14 @@ def summarize(results: Sequence[Dict[str, Any]], wall_ms: Sequence[float]) -> Di
     coverage = [float(result["group_coverage_at_5"]) for result in results]
     coherent = sum(bool(result["coherent_hit_at_5"]) for result in results)
     wall = list(wall_ms)
+    precisions = [
+        float(result["judged_precision_at_5"])
+        for result in results
+        if result.get("judged_precision_at_5") is not None
+    ]
+    relevant_count = sum(int(result.get("relevant_count_at_5", 0)) for result in results)
+    negative_count = sum(int(result.get("negative_count_at_5", 0)) for result in results)
+    judged_count = relevant_count + negative_count
     return {
         "cases": len(results),
         "passed": sum(
@@ -167,6 +238,16 @@ def summarize(results: Sequence[Dict[str, Any]], wall_ms: Sequence[float]) -> Di
         "mean_group_coverage_at_5": statistics.fmean(coverage) if coverage else 0.0,
         "min_group_coverage_at_5": min(coverage) if coverage else 0.0,
         "coherent_hits": coherent,
+        "macro_judged_precision_at_5": statistics.fmean(precisions) if precisions else None,
+        "judged_cases": len(precisions),
+        "judged_count_at_5": judged_count,
+        "relevant_count_at_5": relevant_count,
+        "negative_count_at_5": negative_count,
+        "precision_gate_passed": bool(precisions) and all(
+            result.get("judged_precision_at_5") == 1.0
+            and result.get("judged_count_at_5", 0) > 0
+            for result in results
+        ),
         "wall_ms": {
             "median": statistics.median(wall) if wall else 0.0,
             "p95": _p95(wall),
@@ -210,6 +291,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate language-query concept groups.")
     parser.add_argument("index_root")
     parser.add_argument("--benchmark", default="plan/benchmark_language_queries.md")
+    parser.add_argument(
+        "--judgements",
+        default="plan/benchmark_language_judgements.json",
+        help="optional stable relevant/negative clause sidecar",
+    )
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
@@ -223,8 +309,19 @@ def main() -> None:
         action="store_true",
         help="exit nonzero when the all-case gate fails",
     )
+    parser.add_argument(
+        "--require-precision",
+        action="store_true",
+        help="exit nonzero when judged precision is not perfect",
+    )
     args = parser.parse_args()
-    cases = parse_cases(Path(args.benchmark).read_text(encoding="utf-8"))
+    judgement_path = Path(args.judgements) if args.judgements else None
+    judgements = (
+        load_judgements(judgement_path)
+        if judgement_path is not None and judgement_path.exists()
+        else {}
+    )
+    cases = parse_cases(Path(args.benchmark).read_text(encoding="utf-8"), judgements)
     agent = LocalSearchAgent(
         args.index_root,
         base_url=args.base_url,
@@ -244,6 +341,8 @@ def main() -> None:
     json.dump(report, sys.stdout, ensure_ascii=True, indent=2)
     sys.stdout.write("\n")
     if args.require_gate and not report["summary"]["gate_passed"]:
+        raise SystemExit(1)
+    if args.require_precision and not report["summary"]["precision_gate_passed"]:
         raise SystemExit(1)
 
 

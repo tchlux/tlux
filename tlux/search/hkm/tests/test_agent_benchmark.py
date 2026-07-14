@@ -22,6 +22,8 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _parse_tool_query,
     _keyword_query,
     _language_query_variants,
+    _language_negative_clauses,
+    _language_positive_clauses,
     _language_word_forms,
     _merge_language_results,
     _parse_language_plan,
@@ -174,6 +176,64 @@ def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None
     merged = _merge_language_results([first], "candidate", [], 1)
     assert len(first.docs) == 2
     assert len(merged.docs) == 1
+
+
+def test_language_negative_clause_demotes_matching_anchor() -> None:
+    bad = SimpleNamespace(
+        doc_id=1,
+        span=(0, 1),
+        score=0.60,
+        source_path="bad.txt",
+        preview_text="A funny Archives research remark.",
+        anchor_preview_text="",
+        document=SimpleNamespace(document_preview=""),
+    )
+    good = SimpleNamespace(
+        doc_id=2,
+        span=(0, 1),
+        score=0.55,
+        source_path="good.txt",
+        preview_text="A funny remark in an office.",
+        anchor_preview_text="",
+        document=SimpleNamespace(document_preview=""),
+    )
+    result = SimpleNamespace(docs=[bad, good], count=2, limit=2, next_offset=None)
+    query = "A funny remark in an office, not the Archives research passage"
+    merged = _merge_language_results([result], query, [], 1)
+    assert _language_negative_clauses(query)
+    assert merged.docs[0].doc_id == 2
+
+
+def test_language_contrast_ignores_negative_document_context() -> None:
+    bad = SimpleNamespace(
+        doc_id=1,
+        span=(0, 1),
+        score=0.56,
+        source_path="bad.txt",
+        preview_text="A funny remark.",
+        anchor_preview_text="",
+        document=SimpleNamespace(document_preview="Archives research passage"),
+    )
+    good = SimpleNamespace(
+        doc_id=2,
+        span=(0, 1),
+        score=0.55,
+        source_path="good.txt",
+        preview_text="A funny remark in an office.",
+        anchor_preview_text="",
+        document=SimpleNamespace(document_preview=""),
+    )
+    result = SimpleNamespace(docs=[bad, good], count=2, limit=2, next_offset=None)
+    merged = _merge_language_results(
+        [result],
+        "A funny remark in an office, not the Archives research passage",
+        [],
+        1,
+    )
+    assert merged.docs[0].doc_id == 2
+    assert _language_positive_clauses("Find a funny remark without old Archives research") == [
+        "Find a funny remark",
+    ]
 
 
 def test_planner_excerpt_bounds_long_raw_input() -> None:

@@ -1,0 +1,48 @@
+{
+  "cases": {
+    "LQ-01": {
+      "relevant": [{"all": ["funny", "office"]}],
+      "negative": []
+    },
+    "LQ-02": {
+      "relevant": [
+        {"all": ["giant", "wall"]},
+        {"all": ["structure", "crowd"]}
+      ],
+      "negative": [
+        {"all": ["walls", "behind"]},
+        {"all": ["climb", "cliff", "wall"]},
+        {"all": ["wall", "beside"]}
+      ]
+    },
+    "LQ-03": {
+      "relevant": [
+        {"all": ["crowd", "circle", "scream"]},
+        {"all": ["watch", "horror"]}
+      ],
+      "negative": [{"all": ["spectators", "dragons"]}]
+    },
+    "LQ-04": {
+      "relevant": [
+        {"all": ["climb", "chimney", "structure", "rope"]},
+        {"all": ["watch", "horror"]},
+        {"all": ["crowd", "scream"]}
+      ],
+      "negative": [{"all": ["night", "archives"]}]
+    },
+    "LQ-05": {
+      "relevant": [
+        {"all": ["climb", "chimney", "structure", "rope"]},
+        {"all": ["climb", "horrified"]}
+      ],
+      "negative": []
+    },
+    "LQ-06": {
+      "relevant": [{"all": ["office", "funny"]}],
+      "negative": [
+        {"all": ["funny", "archives", "research"]},
+        {"all": ["archives", "door"]}
+      ]
+    }
+  }
+}
