@@ -122,7 +122,10 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="token")
     parser.add_argument("--top-k", type=int, default=10)
-    parser.add_argument("--deterministic-first", action="store_true")
+    routing = parser.add_mutually_exclusive_group()
+    routing.add_argument("--deterministic-first", dest="deterministic_first", action="store_true")
+    routing.add_argument("--model-first", dest="deterministic_first", action="store_false")
+    parser.set_defaults(deterministic_first=True)
     parser.add_argument("--warmup", action="store_true")
     args = parser.parse_args()
     agent = LocalSearchAgent(

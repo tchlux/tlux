@@ -381,13 +381,13 @@ timings:
         --base-url http://192.168.8.222:1234/v1 --model google/gemma-4-e4b \
         --deterministic-first --warmup --top-k 5
 
-Use `--warmup` to pay index and model initialization before the first request.
+The persistent CLI defaults to deterministic-first routing; pass `--model-first`
+when every passage must go through the LM Studio planner. Use `--warmup` to pay
+index and model initialization before the first request.
 Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
 known deterministic-first hits in roughly 56-90 ms; these are local reference
-measurements, not a service-level guarantee. Omit
-`--deterministic-first` to use the structured LM Studio planner for every
-passage, or use the smaller `google/gemma-3-4b` model for a lower warm model
-latency.
+measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
+model remains available for a lower warm model latency through `--model-first`.
 
 A persistent model-first smoke gate through the active LM Studio server sent 12
 random repository passages through one warmed Gemma 4 process. The planner-shaped

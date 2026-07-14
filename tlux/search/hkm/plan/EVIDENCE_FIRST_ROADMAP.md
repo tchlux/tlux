@@ -130,6 +130,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Tighten evidence acceptance to require the normalized raw passage in readable sources, then rank verified evidence before lexical score. All 395 prose and all 75 repository passages retain 1.000 evidence recall/precision@1/MRR; duplicate repository content still limits exact document identity.
 - [x] Add a bounded persistent planner-query cache for repeated raw passages; cache hits retain full HKM search and evidence validation while avoiding another LM Studio completion.
 - [x] Bound long planner prompts to 64 raw words while retaining the complete passage for fallback/evidence checks; a 2,048-word passage now remains exactly grounded instead of failing closed.
+- [x] Default the persistent `hkm-agent` CLI to deterministic-first routing and add an explicit `--model-first` override; the live 50-sample low-compute gate makes zero model calls at 252/326 ms median/p95.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -193,3 +194,4 @@ before relying on direct Python serving.
 - 2026-07-14: Re-ran the same live 50-sample gate with deterministic-first routing. It made zero model calls while retaining 1.000 target/evidence recall, precision@1, and MRR; median/p95 agent latency was 252/326 ms.
 - 2026-07-14: Added a bounded 256-entry planner-query cache to the persistent agent. Repeated full raw passages stayed grounded while dropping from 578 ms on the first request to 35-39 ms on subsequent requests with no additional model calls.
 - 2026-07-14: Bounded LM Studio planner prompts to 64 words and added full-source validation for long passages spanning multiple HKM chunks. A 2,048-word raw passage now returns exact grounded evidence at 1,483 ms agent/422 ms search time after warmup.
+- 2026-07-14: Made the persistent `hkm-agent` CLI deterministic-first by default, with `--model-first` as the explicit LM Studio override, matching the measured zero-model-call low-compute gate.
