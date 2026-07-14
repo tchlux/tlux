@@ -8,6 +8,7 @@ model first-pass quality separately from an evidence-grounded tool result.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import random
@@ -15,11 +16,11 @@ import re
 import statistics
 import time
 import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Protocol
+from urllib.parse import urlsplit
 
 from ..search.searcher import Searcher
 
@@ -167,31 +168,73 @@ class LMStudioQueryGenerator:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        parts = urlsplit(self.base_url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            raise ValueError("base_url must be an http(s) URL")
+        self._http_parts = parts
+        self._connection: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
+
+    # Return a lazy persistent connection to the configured LM Studio server.
+    def _http_connection(self) -> http.client.HTTPConnection | http.client.HTTPSConnection:
+        if self._connection is None:
+            connection_type = http.client.HTTPSConnection if self._http_parts.scheme == "https" else http.client.HTTPConnection
+            self._connection = connection_type(
+                self._http_parts.hostname,
+                self._http_parts.port,
+                timeout=self.timeout,
+            )
+        self._connection.timeout = self.timeout
+        if self._connection.sock is not None:
+            self._connection.sock.settimeout(self.timeout)
+        return self._connection
+
+    # Close a broken persistent connection before the next request recreates it.
+    def _close_http_connection(self) -> None:
+        if self._connection is not None:
+            self._connection.close()
+            self._connection = None
 
     def _request(self, path: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url}/{path.lstrip('/')}",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST" if body is not None else "GET",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError:
-            if payload is None:
-                raise
-            retry = dict(payload)
-            removed = False
-            for option in ("reasoning_effort", "response_format"):
-                if option in retry:
-                    retry.pop(option)
-                    removed = True
-                    break
-            if not removed:
-                raise
-            return self._request(path, retry)
+        target = f"{self._http_parts.path.rstrip('/')}/{path.lstrip('/')}"
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        for attempt in range(2):
+            try:
+                connection = self._http_connection()
+                connection.request(
+                    "POST" if body is not None else "GET",
+                    target,
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                data = response.read()
+                if response.status >= 400:
+                    raise urllib.error.HTTPError(
+                        url,
+                        response.status,
+                        response.reason,
+                        response.headers,
+                        None,
+                    )
+                return json.loads(data.decode("utf-8"))
+            except urllib.error.HTTPError:
+                if payload is None:
+                    raise
+                retry = dict(payload)
+                removed = False
+                for option in ("reasoning_effort", "response_format"):
+                    if option in retry:
+                        retry.pop(option)
+                        removed = True
+                        break
+                if not removed:
+                    raise
+                return self._request(path, retry)
+            except (OSError, http.client.HTTPException):
+                self._close_http_connection()
+                if attempt:
+                    raise
 
     def _model_name(self) -> str:
         if self.model:

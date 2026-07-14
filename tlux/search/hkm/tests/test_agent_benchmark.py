@@ -152,6 +152,34 @@ def test_lmstudio_query_rejects_generic_instruction_overlap(monkeypatch) -> None
         client.generate("alpha dragon fortress")
 
 
+def test_lmstudio_reuses_one_http_connection() -> None:
+    class Connection:
+        sock = None
+
+        def __init__(self) -> None:
+            self.requests = []
+            self.timeout = None
+
+        def request(self, method, target, body=None, headers=None):
+            self.requests.append((method, target, body, headers))
+
+        def getresponse(self):
+            return SimpleNamespace(
+                status=200,
+                reason="OK",
+                headers={},
+                read=lambda: b'{"data": []}',
+            )
+
+    client = LMStudioQueryGenerator("http://localhost:1234/v1", model="fake")
+    connection = Connection()
+    client._connection = connection
+    assert client._request("models") == {"data": []}
+    assert client._request("models") == {"data": []}
+    assert len(connection.requests) == 2
+    assert all(request[0:2] == ("GET", "/v1/models") for request in connection.requests)
+
+
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     build_search_index_from_documents(

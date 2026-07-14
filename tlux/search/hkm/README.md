@@ -400,6 +400,8 @@ The persistent CLI defaults to deterministic-first routing; pass `--model-first`
 when every passage must go through the LM Studio planner. Use `--warmup` to pay
 index and model initialization before the first request. Warmup uses a one-time
 15-second planner budget, then restores the bounded 1.0-second request timeout.
+The LM Studio client lazily reuses one HTTP/1.1 connection and reconnects once
+after a dropped socket, avoiding connection setup on each planner request.
 Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
 known deterministic-first hits in roughly 56-90 ms; these are local reference
 measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
