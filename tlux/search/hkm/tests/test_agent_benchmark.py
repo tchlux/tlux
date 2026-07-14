@@ -180,6 +180,30 @@ def test_lmstudio_reuses_one_http_connection() -> None:
     assert all(request[0:2] == ("GET", "/v1/models") for request in connection.requests)
 
 
+def test_lmstudio_timeout_does_not_retry() -> None:
+    class TimeoutConnection:
+        sock = None
+
+        def __init__(self) -> None:
+            self.requests = 0
+            self.timeout = None
+
+        def request(self, *args, **kwargs):
+            self.requests += 1
+            raise TimeoutError("planner timeout")
+
+        def close(self) -> None:
+            pass
+
+    client = LMStudioQueryGenerator("http://localhost:1234/v1", model="fake")
+    connection = TimeoutConnection()
+    client._connection = connection
+    with pytest.raises(TimeoutError, match="planner timeout"):
+        client._request("models")
+    assert connection.requests == 1
+    assert client._connection is None
+
+
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     build_search_index_from_documents(

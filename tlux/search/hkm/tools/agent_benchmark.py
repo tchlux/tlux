@@ -13,6 +13,7 @@ import json
 import math
 import random
 import re
+import socket
 import statistics
 import time
 import urllib.error
@@ -231,6 +232,9 @@ class LMStudioQueryGenerator:
                 if not removed:
                     raise
                 return self._request(path, retry)
+            except (TimeoutError, socket.timeout):
+                self._close_http_connection()
+                raise
             except (OSError, http.client.HTTPException):
                 self._close_http_connection()
                 if attempt:
