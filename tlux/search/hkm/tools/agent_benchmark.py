@@ -369,6 +369,10 @@ def _adaptive_tool_search(
                 return result, elapsed, fallback_calls
         result.docs = docs
         _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+    # Never expose an ungrounded candidate as a successful tool result.
+    if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) is None:
+        result.docs = []
+        result.count = 0
     result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
     return result, elapsed, fallback_calls
 

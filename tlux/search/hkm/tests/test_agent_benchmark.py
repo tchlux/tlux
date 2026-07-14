@@ -290,3 +290,20 @@ def test_high_score_without_evidence_still_escalates(monkeypatch) -> None:
     assert elapsed == 2.0
     assert fallback_calls == 1
     assert len(searches) == 2
+
+
+def test_adaptive_tool_search_fails_closed_without_evidence(monkeypatch) -> None:
+    hit = SimpleNamespace(doc_id=1, span=(0, 1), score=0.99)
+
+    def fake_search(*args, **kwargs):
+        return SimpleNamespace(docs=[hit]), 1.0
+
+    monkeypatch.setattr(benchmark, "_search", fake_search)
+    monkeypatch.setattr(benchmark, "_fallback_queries", lambda text: [])
+    monkeypatch.setattr(benchmark, "_rerank_with_evidence", lambda result, *args: result)
+    monkeypatch.setattr(benchmark, "_evidence_rank", lambda *args: None)
+    result, _, _ = benchmark._adaptive_tool_search(
+        object(), "query", 1, 0, "token", "raw evidence", {}
+    )
+    assert result.docs == []
+    assert result.count == 0
