@@ -31,10 +31,16 @@ STOP_WORDS = {
 }
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
+PLANNER_MAX_TOKENS = 8
 TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
+LMSTUDIO_TIMEOUT = 5.0
+QUERY_GUARD_WORDS = STOP_WORDS | {
+    "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
+    "on", "or", "the", "to", "was", "were", "will", "you", "your",
+}
 QUERY_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -129,6 +135,10 @@ def parse_query(response: str) -> str:
                 text = str(value.get("query", ""))
             except json.JSONDecodeError:
                 pass
+    if text.startswith("{"):
+        match = re.search(r'"query"\s*:\s*"((?:\\.|[^"\\])*)', text, re.DOTALL)
+        if match:
+            text = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
     text = " ".join(text.split())
     if not text or text.lower().startswith("thinking process:"):
         raise ValueError("query planner returned an empty query")
@@ -139,7 +149,7 @@ def parse_query(response: str) -> str:
 class LMStudioQueryGenerator:
     name = "lmstudio"
 
-    def __init__(self, base_url: str = "http://127.0.0.1:1234/v1", model: str | None = None, timeout: float = 60.0):
+    def __init__(self, base_url: str = "http://127.0.0.1:1234/v1", model: str | None = None, timeout: float = LMSTUDIO_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -188,7 +198,7 @@ class LMStudioQueryGenerator:
             "model": self._model_name(),
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 24,
+            "max_tokens": PLANNER_MAX_TOKENS,
             "reasoning_effort": "none",
             "response_format": QUERY_RESPONSE_FORMAT,
             "stream": False,
@@ -198,12 +208,12 @@ class LMStudioQueryGenerator:
             raise RuntimeError("LM Studio returned no chat completion choices")
         message = choices[0].get("message", {})
         content = message.get("content") or message.get("reasoning_content", "")
-        query = parse_query(str(content))
-        query_terms = set(re.findall(r"[A-Za-z0-9]+", query.lower()))
-        evidence_terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower()))
+        query = " ".join(parse_query(str(content)).split()[:TOOL_QUERY_WORDS])
+        query_terms = set(re.findall(r"[A-Za-z0-9]+", query.lower())) - QUERY_GUARD_WORDS
+        evidence_terms = set(re.findall(r"[A-Za-z0-9]+", excerpt.lower())) - QUERY_GUARD_WORDS
         if not query_terms.intersection(evidence_terms):
             raise ValueError("LM Studio query did not quote the supplied evidence")
-        return " ".join(query.split()[:TOOL_QUERY_WORDS])
+        return query
 
 
 # Deterministic planner used for offline tests and endpoint recovery.
@@ -296,26 +306,39 @@ def _adaptive_tool_search(
         return result, elapsed, fallback_calls
     docs = list(result.docs)
     seen = {(int(hit.doc_id), tuple(hit.span)) for hit in docs}
-    sources = []
-    alternates = _fallback_queries(fallback_text or query)
-    if mode != "token":
-        semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
-        elapsed += semantic_ms
-        fallback_calls += 1
-        sources.append(semantic)
-    for alternate in alternates[:5]:
-        if alternate == query:
-            continue
-        lexical, lexical_ms = _search(searcher, alternate, top_k, probe_count, "token")
-        sources.append(lexical)
-        elapsed += lexical_ms
-        fallback_calls += 1
-    for source in sources:
+
+    # Merge one fallback page at a time so proven evidence stops further work.
+    def append(source: Any) -> None:
         for hit in source.docs:
             key = (int(hit.doc_id), tuple(hit.span))
             if key not in seen:
                 docs.append(hit)
                 seen.add(key)
+
+    def evidence_is_first() -> bool:
+        result.docs = docs
+        _rerank_with_evidence(result, fallback_text, searcher, source_cache)
+        return _evidence_rank(result, fallback_text, searcher, source_cache) == 1
+
+    alternates = _fallback_queries(fallback_text or query)
+    if mode != "token":
+        semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
+        elapsed += semantic_ms
+        fallback_calls += 1
+        append(semantic)
+        if fallback_text and evidence_is_first():
+            result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
+            return result, elapsed, fallback_calls
+    for alternate in alternates[:5]:
+        if alternate == query:
+            continue
+        lexical, lexical_ms = _search(searcher, alternate, top_k, probe_count, "token")
+        append(lexical)
+        elapsed += lexical_ms
+        fallback_calls += 1
+        if fallback_text and evidence_is_first():
+            result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
+            return result, elapsed, fallback_calls
     result.docs = docs
     # Rank all first-pass lanes before truncating so later phrase hits survive.
     if fallback_text:
@@ -329,29 +352,21 @@ def _adaptive_tool_search(
         semantic, semantic_ms = _search(searcher, query, top_k, probe_count, "semantic")
         elapsed += semantic_ms
         fallback_calls += 1
-        for hit in semantic.docs:
-            key = (int(hit.doc_id), tuple(hit.span))
-            if key not in seen:
-                docs.append(hit)
-                seen.add(key)
+        append(semantic)
         result.docs = docs
         _rerank_with_evidence(result, fallback_text, searcher, source_cache)
     # Probe remaining distinctive terms only when the first lanes lack evidence.
     if fallback_text and _evidence_rank(result, fallback_text, searcher, source_cache) is None:
-        rescue_sources = []
         for alternate in alternates[5:5 + TOOL_RESCUE_QUERIES]:
             if alternate == query:
                 continue
             rescue, rescue_ms = _search(searcher, alternate, top_k * 2, probe_count, "token")
-            rescue_sources.append(rescue)
+            append(rescue)
             elapsed += rescue_ms
             fallback_calls += 1
-        for source in rescue_sources:
-            for hit in source.docs:
-                key = (int(hit.doc_id), tuple(hit.span))
-                if key not in seen:
-                    docs.append(hit)
-                    seen.add(key)
+            if evidence_is_first():
+                result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
+                return result, elapsed, fallback_calls
         result.docs = docs
         _rerank_with_evidence(result, fallback_text, searcher, source_cache)
     result.docs = result.docs[:top_k * TOOL_EXPANSION_FACTOR]
@@ -1185,7 +1200,7 @@ def main() -> None:
     parser.add_argument("--probes", default="0,1,2,4")
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
     parser.add_argument("--model", default=None)
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
     parser.add_argument("--tool-agent", action="store_true", help="Run a model/tool/model search conversation")
     parser.add_argument("--planner-tool", action="store_true", help="Use structured model query output before the search tool")

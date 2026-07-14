@@ -320,6 +320,16 @@ model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
 at 92/954 ms median/p95; exact document identity remains limited by duplicate
 source content.
 
+The model-first planner-tool path is the correctness gate when a real model
+call is required: a post-parser 50-sample prose run and a 75-sample mixed
+repository run both returned 1.000 evidence recall/precision@1/MRR with zero
+errors and one model call per sample. With the 8-token planner budget, median
+/p95 agent latency was 0.953/1.281 seconds on prose and 0.958/1.368 seconds
+on the repository; wrapper recovery handled 22.0% and 17.3% of truncated
+planner responses respectively. Planner output rejects generic
+instruction-word overlap, accepts truncated JSON arguments, and falls back
+after a five-second LM Studio timeout.
+
 For short model-generated keyword queries, `--tool-mode token` avoids the
 embedding pass. The tool bounds model queries to a small 16-word budget and
 retained 1.000 tool evidence recall/precision on the live cross-corpus gate;

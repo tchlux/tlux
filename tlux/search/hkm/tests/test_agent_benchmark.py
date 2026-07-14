@@ -71,6 +71,7 @@ class NoToolAgent(LMStudioToolAgent):
 def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('{"query": "dragon wardstone"}') == "dragon wardstone"
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
+    assert parse_query('{"query":"truncated evidence') == "truncated evidence"
     assert _keyword_query("!") == "!"
 
 
@@ -87,6 +88,17 @@ def test_lmstudio_query_rejects_unquoted_planner_text(monkeypatch) -> None:
         client,
         "_request",
         lambda path, payload: {"choices": [{"message": {"content": "The user wants a query."}}]},
+    )
+    with pytest.raises(ValueError, match="did not quote"):
+        client.generate("alpha dragon fortress")
+
+
+def test_lmstudio_query_rejects_generic_instruction_overlap(monkeypatch) -> None:
+    client = LMStudioQueryGenerator(model="fake")
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda path, payload: {"choices": [{"message": {"content": '{"query":"exact words from"}'}}]},
     )
     with pytest.raises(ValueError, match="did not quote"):
         client.generate("alpha dragon fortress")
@@ -275,6 +287,6 @@ def test_high_score_without_evidence_still_escalates(monkeypatch) -> None:
         object(), "long model query with many words", 1, 0, "token", raw, {}
     )
     assert result.docs
-    assert elapsed == 6.0
-    assert fallback_calls == 5
-    assert len(searches) == 6
+    assert elapsed == 2.0
+    assert fallback_calls == 1
+    assert len(searches) == 2
