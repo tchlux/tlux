@@ -347,6 +347,11 @@ planner completion per request. The structured path recovered 24% of omitted
 model tool calls and used bounded fallback lanes on 18% of samples; median/p95
 agent latency was 609/1,179 ms and search latency was 208/553 ms.
 
+The same live gate with `--deterministic-first` made zero model calls while
+retaining 1.000 target/evidence recall, precision@1, and MRR with zero errors;
+median/p95 agent latency fell to 252/326 ms. This is the recommended low-compute
+path when indexed raw passages usually contain enough lexical evidence.
+
 For lower warm latency, pass `--model google/gemma-3-4b` with
 `--planner-tool`; this smaller installed model is not tool-trained, but its
 structured planner retained the same 1.000 evidence metrics at 0.728/1.107 s
