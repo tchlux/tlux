@@ -25,5 +25,6 @@ setup(
         "hkm-inspect=tlux.search.hkm.tools.inspect:main",
         "hkm-benchmark=tlux.search.hkm.tools.benchmark:main",
         "hkm-agent=tlux.search.hkm.tools.local_agent:main",
+        "hkm-language-benchmark=tlux.search.hkm.tools.language_benchmark:main",
     ]},
 )

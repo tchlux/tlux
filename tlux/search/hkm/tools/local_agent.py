@@ -55,6 +55,9 @@ class LocalSearchAgent:
         if runner is not None:
             self.client = None
             self.runner = runner
+        elif language_query and deterministic_first:
+            self.client = None
+            self.runner = LanguageSearchAgent(None, mode)
         else:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
             self.runner = (

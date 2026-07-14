@@ -73,6 +73,17 @@ live LM Studio planner:
         --model google/gemma-3-4b --model-first --tool-mode hybrid \
         --top-k 5 --warmup < queries.jsonl
 
+For an auditable gate, `bin/hkm-language-benchmark` reads the table above,
+reuses one persistent agent, and emits per-case group coverage, coherent-hit,
+antipattern rank, and wall/model/search latency. Add `--jsonl PATH` to retain
+the raw case reports and `--require-gate` for a nonzero exit when any case
+misses full coverage or coherence:
+
+    bin/hkm-language-benchmark data/fourth_wing_hkm_index \
+      --base-url http://192.168.8.222:1234/v1 --model google/gemma-3-4b \
+      --model-first --tool-mode semantic --top-k 5 --warmup \
+      --jsonl /tmp/language_queries.jsonl --require-gate
+
 The first run is a deterministic regression, not a quality claim for the
 language model. Save the JSONL output beside a dated report when recording a
 live run; do not treat model-generated antipatterns as labels without manual
@@ -119,6 +130,29 @@ corpus data. In particular, the current run used hybrid for the original
 natural-language query while direct semantic search is stronger for these
 paraphrases; model-generated one-word alternatives also need a lane/condition
 coverage penalty so they cannot outrank a coherent clause.
+
+## Current gate result: 2026-07-14
+
+After preserving the complete first-pass candidate page through refinement,
+the executable evaluator passed all six cases through the active Gemma 3
+LM Studio server (`--model-first --tool-mode semantic --timeout 20`): six of
+six had full group coverage and a coherent hit in the top five. Three fresh
+runs were identical, with median wall/agent latency of 2.94-3.02 seconds and
+p95 latency of 3.50-3.55 seconds; search itself was 0.96-1.04 seconds median
+and 2.03-2.09 seconds p95. LQ-06 recovered both the room-entry and
+funny-office evidence while the old-research antipattern was rank five. This
+is a repeatable quality gate for the reviewed corpus, not yet a universal
+precision or service-level guarantee; repeat the command after changing the
+model, index, or ranking policy.
+
+The executable evaluator was added to make this gate repeatable. A warmed
+Gemma 3 run on 2026-07-14 (`--model-first --tool-mode semantic --timeout 10`)
+passed LQ-01 through LQ-03, but only 3/6 cases overall: mean group coverage
+was 0.90, minimum coverage 0.60, and coherent-hit coverage was 5/6. Median
+wall/agent latency was 3.82 seconds (p95 4.57 seconds); search itself was
+1.04 seconds median (p95 1.23 seconds). LQ-04/LQ-05 missed night or
+watch/horror groups, and LQ-06 had an old-research passage at rank one despite
+the antipattern. The report was saved as `/tmp/language_eval_live.jsonl`.
 
 ## Post-fix smoke
 

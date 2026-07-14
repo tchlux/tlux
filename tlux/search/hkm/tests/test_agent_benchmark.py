@@ -22,6 +22,8 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _parse_tool_query,
     _keyword_query,
     _language_query_variants,
+    _language_word_forms,
+    _merge_language_results,
     _parse_language_plan,
     _planner_excerpt,
     _rerank_with_evidence,
@@ -127,6 +129,51 @@ def test_language_plan_bounds_variants_and_exclusions() -> None:
         "exclude_terms": ["wooden ladder"],
     }
     assert _language_query_variants("A large wall stands over us while crowds watch in horror")
+
+
+def test_language_ranking_uses_document_preview_for_condition_coverage() -> None:
+    document = lambda text: SimpleNamespace(document_preview=text)
+    weak = SimpleNamespace(
+        doc_id=1,
+        span=(0, 1),
+        score=0.55,
+        source_path="weak.txt",
+        preview_text="people stand over us",
+        anchor_preview_text="",
+        document=document("A gathering fills the room."),
+    )
+    strong = SimpleNamespace(
+        doc_id=2,
+        span=(0, 1),
+        score=0.54,
+        source_path="strong.txt",
+        preview_text="courtyard below",
+        anchor_preview_text="",
+        document=document("A large wall stands over the courtyard."),
+    )
+    result = SimpleNamespace(docs=[weak, strong], count=2, limit=2, next_offset=None)
+    merged = _merge_language_results([result], "A large wall stands over us", [], 1)
+    assert merged.docs[0].doc_id == 2
+    assert "a" not in _language_word_forms("A large wall stands over us")
+
+
+def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None:
+    hits = [
+        SimpleNamespace(
+            doc_id=index,
+            span=(0, 1),
+            score=1.0 - index / 100.0,
+            source_path=f"{index}.txt",
+            preview_text=f"candidate {index}",
+            anchor_preview_text="",
+            document=SimpleNamespace(document_preview=""),
+        )
+        for index in range(2)
+    ]
+    first = SimpleNamespace(docs=hits, count=2, limit=2, next_offset=None)
+    merged = _merge_language_results([first], "candidate", [], 1)
+    assert len(first.docs) == 2
+    assert len(merged.docs) == 1
 
 
 def test_planner_excerpt_bounds_long_raw_input() -> None:
@@ -542,6 +589,30 @@ def test_persistent_local_agent_supports_language_queries(tmp_path: Path, monkey
     assert response["agentic"] is True
     assert response["rounds"] == 1
     assert response["docs"][0]["source_path"] == "a.txt"
+
+
+def test_language_deterministic_first_avoids_model_client(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "A large wall stands over us.", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    monkeypatch.setattr(
+        local_agent,
+        "LMStudioQueryGenerator",
+        lambda *args: pytest.fail("deterministic language search created a model client"),
+    )
+    agent = LocalSearchAgent(
+        str(tmp_path / "index"),
+        mode="semantic",
+        deterministic_first=True,
+        language_query=True,
+    )
+    response = agent.run("A large wall stands over us", top_k=1)
+    assert response["agentic"] is True
+    assert response["grounded"] is True
 
 
 def test_persistent_local_agent_warmup_uses_planner(tmp_path: Path, monkeypatch) -> None:

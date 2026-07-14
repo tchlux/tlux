@@ -430,8 +430,9 @@ model-serving optimization target.
 
 Use `--language-query` for remembered, conversational requests rather than raw
 passages. The agent searches the original request, inspects bounded snippets,
-asks the local model for up to four paraphrase/antipattern lanes, then searches
-those alternatives in a second round. Natural-language lanes use semantic
+asks the local model for up to four paraphrase/antipattern lanes, adds bounded
+deterministic clause lanes, then searches those alternatives in a second round.
+Natural-language lanes use semantic
 search even when `--tool-mode hybrid` is selected; the first lane is anchored,
 and antipatterns are soft penalties so a useful hit is never hard-filtered:
 
@@ -449,6 +450,8 @@ for vague requests, review the returned previews and query trace rather than
 treating non-empty output as a perfect relevance guarantee. The reviewed
 challenge set and concept-group gate live in
 `plan/benchmark_language_queries.md`.
+Run `bin/hkm-language-benchmark INDEX --model-first --jsonl report.jsonl`
+to evaluate that gate and record per-case coverage plus latency.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055

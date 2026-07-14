@@ -8,6 +8,7 @@ model first-pass quality separately from an evidence-grounded tool result.
 from __future__ import annotations
 
 import argparse
+import copy
 import http.client
 import json
 import math
@@ -45,11 +46,22 @@ TOOL_EXPANSION_FACTOR = 3
 LMSTUDIO_TIMEOUT = 1.0
 LMSTUDIO_WARMUP_TIMEOUT = 15.0
 LANGUAGE_QUERY_MAX_WORDS = 24
-LANGUAGE_QUERY_MAX_VARIANTS = 4
+LANGUAGE_QUERY_MAX_VARIANTS = 7
+LANGUAGE_PLAN_MAX_VARIANTS = 4
 LANGUAGE_QUERY_MAX_ROUNDS = 2
+LANGUAGE_CONCEPT_GROUPS = (
+    frozenset({"amusing", "funny", "humorous", "laugh", "laughter", "joke", "silly"}),
+    frozenset({"enter", "entered", "enters", "door", "room", "office"}),
+    frozenset({"climb", "climbs", "climbing", "ascending", "scaling"}),
+    frozenset({"night", "nighttime", "midnight", "dark", "dusk"}),
+    frozenset({"wall", "tower", "structure", "cliff", "chimney", "parapet"}),
+    frozenset({"crowd", "crowds", "people", "gather", "gathers", "below"}),
+    frozenset({"watch", "watched", "watching", "spectators", "horror", "horrified", "fear", "scream"}),
+)
 QUERY_GUARD_WORDS = STOP_WORDS | {
     "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
     "on", "or", "the", "to", "was", "were", "will", "you", "your",
+    "us", "falls", "even",
 }
 QUERY_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -154,25 +166,40 @@ def _keyword_query(excerpt: str, limit: int = 8) -> str:
     return " ".join(word for _, word in selected) or _phrase_query(excerpt, limit)
 
 
-# Return short language-query variants while preserving content words.
+# Split a natural-language request into condition clauses.
 #
 # Arguments:
 #   query (str): Natural-language user query.
 #
 # Returns:
-#   (list[str]): Bounded original, clause, and keyword variants.
+#   (list[str]): Non-empty clauses in source order.
 #
-def _language_query_variants(query: str) -> List[str]:
+def _language_query_clauses(query: str) -> List[str]:
     normalized = " ".join(query.split())
     if not normalized:
         return []
-    clauses = [part.strip() for part in re.split(
+    return [part.strip() for part in re.split(
         r"\b(?:and|but|while|when|where|because|although|though|with|without)\b|[,;:]",
         normalized,
         flags=re.IGNORECASE,
     ) if part.strip()]
-    variants = [normalized, _keyword_query(normalized, limit=12)]
+
+
+# Return short language-query variants while preserving content words.
+def _language_query_variants(query: str) -> List[str]:
+    normalized = " ".join(query.split())
+    if not normalized:
+        return []
+    clauses = _language_query_clauses(normalized)
+    variants = [normalized]
     variants.extend(clauses)
+    variants.extend(
+        f"{clauses[index]} {clauses[index + 1]}"
+        for index in range(len(clauses) - 1)
+        if len(_language_word_forms(clauses[index])) >= 2
+        and len(_language_word_forms(clauses[index + 1])) >= 2
+    )
+    variants.append(_keyword_query(normalized, limit=12))
     return list(dict.fromkeys(
         " ".join(value.split()[:LANGUAGE_QUERY_MAX_WORDS])
         for value in variants
@@ -182,7 +209,7 @@ def _language_query_variants(query: str) -> List[str]:
 
 # Return simple lexical forms for language-query coverage and exclusions.
 def _language_word_forms(text: str) -> set[str]:
-    terms = set(re.findall(r"[A-Za-z0-9]+", text.lower()))
+    terms = set(re.findall(r"[A-Za-z0-9]+", text.lower())) - QUERY_GUARD_WORDS
     forms = set(terms)
     for term in terms:
         if len(term) > 5:
@@ -190,6 +217,16 @@ def _language_word_forms(text: str) -> set[str]:
                 if term.endswith(suffix) and len(term) - len(suffix) >= 4:
                     forms.add(term[:-len(suffix)])
     return forms
+
+
+# Expand lexical forms into a small set of condition concepts for reranking.
+def _language_concept_forms(text: str) -> set[str]:
+    forms = _language_word_forms(text)
+    expanded = set(forms)
+    for group in LANGUAGE_CONCEPT_GROUPS[:2]:
+        if forms.intersection(group):
+            expanded.update(group)
+    return expanded
 
 
 # Decode a bounded language-query plan from a model response.
@@ -222,8 +259,8 @@ def _parse_language_plan(response: str) -> Dict[str, List[str]]:
     if not queries:
         raise ValueError("language planner returned no queries")
     return {
-        "queries": list(dict.fromkeys(queries))[:LANGUAGE_QUERY_MAX_VARIANTS],
-        "exclude_terms": list(dict.fromkeys(exclude_terms))[:LANGUAGE_QUERY_MAX_VARIANTS],
+        "queries": list(dict.fromkeys(queries))[:LANGUAGE_PLAN_MAX_VARIANTS],
+        "exclude_terms": list(dict.fromkeys(exclude_terms))[:LANGUAGE_PLAN_MAX_VARIANTS],
     }
 
 
@@ -894,6 +931,18 @@ def _language_antipatterns(query: str, hits: List[Any]) -> List[str]:
     return [term for term, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])) if count > 1][:LANGUAGE_QUERY_MAX_VARIANTS]
 
 
+# Return visible hit text used to score remembered conditions.
+def _language_hit_text(hit: Any) -> str:
+    document = getattr(hit, "document", None)
+    return " ".join(
+        value for value in (
+            getattr(hit, "preview_text", ""),
+            getattr(document, "document_preview", ""),
+            getattr(hit, "anchor_preview_text", ""),
+        ) if value
+    ).lower()
+
+
 # Merge language-query result lanes and apply soft antipattern penalties.
 #
 # Arguments:
@@ -911,7 +960,8 @@ def _merge_language_results(
     exclude_terms: List[str],
     top_k: int,
 ) -> Any:
-    base = results[0]
+    # Keep the full first-pass candidate page for later refinement rounds.
+    base = copy.copy(results[0])
     grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool]] = {}
     query_terms = _language_word_forms(query)
     exclusions = set(term.lower() for term in exclude_terms)
@@ -927,15 +977,47 @@ def _merge_language_results(
 
     def rank_key(item: tuple[Any, int, bool]) -> tuple[float, float, int, str]:
         hit, lanes, anchor = item
-        text = f"{hit.preview_text} {getattr(hit.document, 'title', '')}".lower()
+        text = _language_hit_text(hit)
         terms = _language_word_forms(text)
         coverage = len(query_terms.intersection(terms)) / float(max(1, len(query_terms)))
         penalty = 0 if anchor else sum(1 for term in exclusions if term in text)
-        score = float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.01 * coverage - 0.03 * penalty
+        score = float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.03 * coverage - 0.03 * penalty
         return (-score, -coverage, int(hit.doc_id), hit.source_path)
 
     ranked = sorted(grouped.values(), key=rank_key)
-    base.docs = [hit for hit, _, _ in ranked[:top_k]]
+    condition_terms = [
+        _language_concept_forms(clause)
+        for clause in _language_query_clauses(query)
+    ]
+    condition_terms = [terms for terms in condition_terms if terms]
+    masks = {
+        id(item): sum(
+            1 << index
+            for index, terms in enumerate(condition_terms)
+            if len(_language_concept_forms(_language_hit_text(item[0])).intersection(terms))
+            >= (2 if len(terms) >= 2 else 1)
+        )
+        for item in ranked
+    }
+    selected: List[tuple[Any, int, bool]] = []
+    remaining = list(ranked)
+    covered_mask = 0
+    while remaining and len(selected) < top_k:
+        if not selected:
+            choice = remaining.pop(0)
+        else:
+            choice_index = max(
+                range(len(remaining)),
+                key=lambda index: (
+                    -rank_key(remaining[index])[0]
+                    + 0.15 * (masks[id(remaining[index])] & ~covered_mask).bit_count(),
+                    -rank_key(remaining[index])[0],
+                ),
+            )
+            choice = remaining.pop(choice_index)
+        selected.append(choice)
+        covered_mask |= masks[id(choice)]
+    base.docs = [hit for hit, _, _ in selected]
     base.count = len(ranked)
     base.limit = top_k
     base.next_offset = top_k if len(ranked) > top_k else None
@@ -1003,7 +1085,10 @@ class LanguageSearchAgent:
                     if not _language_word_forms(term).intersection(query_forms)
                 ]
                 exclude_terms = list(dict.fromkeys(exclude_terms + safe_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
-                round_queries = list(dict.fromkeys(plan["queries"] + base_variants[1:]))[:LANGUAGE_QUERY_MAX_VARIANTS]
+                deterministic_limit = max(0, LANGUAGE_QUERY_MAX_VARIANTS - 2)
+                deterministic_queries = base_variants[1:1 + deterministic_limit]
+                model_queries = plan["queries"][:max(0, LANGUAGE_QUERY_MAX_VARIANTS - len(deterministic_queries))]
+                round_queries = list(dict.fromkeys(model_queries + deterministic_queries))[:LANGUAGE_QUERY_MAX_VARIANTS]
             except (OSError, RuntimeError, ValueError, urllib.error.URLError):
                 recovered = True
                 round_queries = base_variants[1:]
