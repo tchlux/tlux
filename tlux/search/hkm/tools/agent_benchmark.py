@@ -32,6 +32,7 @@ STOP_WORDS = {
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
 PLANNER_MAX_TOKENS = 8
+NATIVE_TOOL_MAX_TOKENS = 32
 TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
@@ -563,10 +564,12 @@ class LMStudioPlannerToolAgent:
     name = "lmstudio_planner_tool_agent"
     final_answer = False
 
-    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid"):
+    def __init__(self, client: LMStudioQueryGenerator, mode: str = "hybrid", native_tool: bool = False):
         self.client = client
         self.model = client.model
         self.mode = mode
+        self.native_tool = native_tool
+        self.name = "lmstudio_planner_native_tool_agent" if native_tool else "lmstudio_planner_tool_agent"
         self.source_cache: Dict[tuple[str, int, int], str] = {}
 
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
@@ -577,19 +580,49 @@ class LMStudioPlannerToolAgent:
         except (OSError, RuntimeError, ValueError, urllib.error.URLError):
             query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
             recovered = True
+        model_tool_called = False
+        completion_calls = 1
+        if self.native_tool:
+            completion_calls += 1
+            try:
+                response = self.client._request("chat/completions", {
+                    "model": self.client._model_name(),
+                    "messages": [{
+                        "role": "user",
+                        "content": "Call search_index with this exact short query: " + query,
+                    }],
+                    "tools": [SEARCH_TOOL],
+                    "tool_choice": "required",
+                    "temperature": 0,
+                    "max_tokens": NATIVE_TOOL_MAX_TOKENS,
+                    "reasoning_effort": "none",
+                    "stream": False,
+                })
+                choices = response.get("choices", [])
+                assistant = choices[0].get("message", {}) if choices else {}
+                calls = assistant.get("tool_calls", [])
+                if not calls and assistant.get("function_call"):
+                    calls = [{"function": assistant["function_call"]}]
+                if calls:
+                    query = _parse_tool_query(calls[0].get("function", {}).get("arguments", {}))
+                    model_tool_called = True
+                else:
+                    recovered = True
+            except (OSError, RuntimeError, ValueError, urllib.error.URLError):
+                recovered = True
         result, search_ms, fallback_calls = _adaptive_tool_search(
             searcher, query, top_k, probe_count, self.mode, excerpt, self.source_cache
         )
         _rerank_with_evidence(result, excerpt, searcher, self.source_cache)
         return {
             "tool_called": True,
-            "model_tool_called": False,
+            "model_tool_called": model_tool_called,
             "recovered": recovered,
             "query": query,
             "result": result,
             "answer": "",
             "answer_source_path": "",
-            "completion_calls": 1,
+            "completion_calls": completion_calls,
             "search_ms": search_ms,
             "fallback_calls": fallback_calls,
             "expanded_docs": len(result.docs),
@@ -1208,6 +1241,7 @@ def main() -> None:
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")
     parser.add_argument("--tool-agent", action="store_true", help="Run a model/tool/model search conversation")
     parser.add_argument("--planner-tool", action="store_true", help="Use structured model query output before the search tool")
+    parser.add_argument("--native-planner-tool", action="store_true", help="Add a compact native search_index call after structured planning")
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="hybrid")
     parser.add_argument("--tool-only", action="store_true", help="Return the grounded tool result after one model call")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
@@ -1223,8 +1257,8 @@ def main() -> None:
             try:
                 client._model_name()
                 agent = (
-                    LMStudioPlannerToolAgent(client, args.tool_mode)
-                    if args.planner_tool
+                    LMStudioPlannerToolAgent(client, args.tool_mode, args.native_planner_tool)
+                    if args.planner_tool or args.native_planner_tool
                     else LMStudioToolAgent(client, args.tool_mode, not args.tool_only)
                 )
             except (OSError, RuntimeError, urllib.error.URLError) as exc:

@@ -68,6 +68,26 @@ class NoToolAgent(LMStudioToolAgent):
         return self.model
 
 
+class NativePlannerClient(StubQueryGenerator):
+    model = "fake"
+
+    def _model_name(self):
+        return self.model
+
+    def _request(self, path, payload=None):
+        return {
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "arguments": '{"query":"alpha dragon"}',
+                        },
+                    }],
+                },
+            }],
+        }
+
+
 def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('{"query": "dragon wardstone"}') == "dragon wardstone"
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
@@ -233,6 +253,27 @@ def test_structured_planner_runs_grounded_tool(tmp_path: Path, monkeypatch) -> N
     assert report["completion_calls_per_sample"] == 1.0
     assert report["evidence"]["precision_at_1"] == 1.0
     assert report["recovery_rate"] == 0.0
+
+
+def test_structured_planner_can_use_native_tool_call(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"),
+        agent=LMStudioPlannerToolAgent(NativePlannerClient(), mode="token", native_tool=True),
+        samples=1,
+        top_k=1,
+    )
+    assert report["agent"] == "lmstudio_planner_native_tool_agent"
+    assert report["model_tool_call_rate"] == 1.0
+    assert report["completion_calls_per_sample"] == 2.0
+    assert report["evidence"]["precision_at_1"] == 1.0
 
 
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:

@@ -344,6 +344,14 @@ retained 1.000 tool evidence recall/precision on the live cross-corpus gate;
 keep `hybrid` as the correctness default until a larger corpus gate supports
 switching it.
 
+Use `--native-planner-tool` when the model itself must emit the native
+`search_index` function call after planning. The compact two-completion bridge
+reached a 0.980 raw model tool-call rate on 50 prose passages and 0.907 on 75
+repository passages, while wrapper tool calls and evidence recall/precision@1/
+MRR stayed at 1.000 with zero errors. Its median/p95 latency was 1.904/2.282 s
+on prose and 1.897/2.690 s on the repository; use plain `--planner-tool` for
+the lower-latency one-completion path.
+
 For the lowest result latency, add `--tool-only --tool-mode token`. This stops
 after one model function call and returns the grounded HKM result directly,
 avoiding a second model completion. On 50 random repository passages and 50
