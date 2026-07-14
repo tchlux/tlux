@@ -35,6 +35,18 @@ TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
+QUERY_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "search_query",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+}
 
 
 # One sampled raw passage and its exact indexed document target.
@@ -140,8 +152,22 @@ class LMStudioQueryGenerator:
             headers={"Content-Type": "application/json"},
             method="POST" if body is not None else "GET",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            if payload is None:
+                raise
+            retry = dict(payload)
+            removed = False
+            for option in ("reasoning_effort", "response_format"):
+                if option in retry:
+                    retry.pop(option)
+                    removed = True
+                    break
+            if not removed:
+                raise
+            return self._request(path, retry)
 
     def _model_name(self) -> str:
         if self.model:
@@ -163,6 +189,8 @@ class LMStudioQueryGenerator:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "max_tokens": 24,
+            "reasoning_effort": "none",
+            "response_format": QUERY_RESPONSE_FORMAT,
             "stream": False,
         })
         choices = response.get("choices", [])
@@ -420,6 +448,7 @@ class LMStudioToolAgent:
             "tool_choice": "required",
             "temperature": 0,
             "max_tokens": TOOL_MAX_TOKENS,
+            "reasoning_effort": "none",
             "stream": False,
         })
         choices = response.get("choices", [])

@@ -350,6 +350,12 @@ The captured 50-sample Gemma query set that exposed the fallback bug now replays
 through the corrected tool path at 1.000 content-evidence recall and
 precision@1 with zero errors; this replay excludes new model-generation time.
 
+LM Studio query planning uses JSON-schema output and `reasoning_effort: none`,
+so the model returns an actual bounded query instead of hidden instruction text.
+Across all 395 random prose passages, model first-pass recall/precision@1 were
+0.924/0.830 with no planner errors; the evidence-aware fallback raised final
+recall and precision@1 to 1.000 with a 7.6% fallback rate.
+
 Add `--deterministic-first` to skip Gemma when a cheap lexical result already
 contains the raw passage. On the same 50-sample gates it reduced model calls
 to 0% on both prose and repository after evidence-aware reranking, with
@@ -380,6 +386,10 @@ recovery after one bounded LM Studio request per sample. Agent latency was
 1,485/1,603 ms median/p95; the deterministic-first path avoids that generation
 cost and measures 254/361 ms median/p95 on the same corpus after ranking
 candidates before constructing source previews.
+The 16-token tool cap intentionally treats a truncated Gemma tool response as
+recoverable; on this long-passage prompt the raw model tool-call rate was 0.0,
+while the wrapper recovery rate was 1.0. The separate structured planner above
+is the model-generated query path.
 
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
