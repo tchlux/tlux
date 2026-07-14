@@ -143,6 +143,17 @@ def _query_overlaps_evidence(query: str, excerpt: str, minimum: int = 2) -> bool
     return _query_evidence_overlap(query, excerpt) >= minimum
 
 
+# Return true when a missing-entity request omits its first distinctive clue.
+def _missing_entity_query_is_valid(query: str, excerpt: str) -> bool:
+    terms = _content_terms(excerpt, 4)
+    if len(terms) < 3:
+        return False
+    query_terms = {
+        word.lower() for word in re.findall(r"[A-Za-z0-9]+", query)
+    }
+    return terms[0].lower() not in query_terms and _query_overlaps_evidence(query, excerpt)
+
+
 # Ask LM Studio to turn raw evidence into a grounded memory-style request.
 def model_query(
     generator: LMStudioQueryGenerator,
@@ -158,6 +169,8 @@ def model_query(
     query = " ".join(str(value).split())
     if not _query_overlaps_evidence(query, excerpt):
         raise ValueError("memory-query planner did not quote supplied evidence")
+    if style == "missing_entity" and not _missing_entity_query_is_valid(query, excerpt):
+        raise ValueError("missing-entity planner restored the omitted clue")
     return _bounded_query(query)
 
 

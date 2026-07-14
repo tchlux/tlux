@@ -138,6 +138,10 @@ def test_language_variants_skip_single_word_clause_lanes() -> None:
     variants = _language_query_variants("Find the Scribe Quadrant, like, right now, if needed")
     assert "like" not in variants
     assert "right now" in variants
+    missing = _language_query_variants(
+        "I remember make near pretty, but not who or what was involved"
+    )
+    assert "pretty make" in missing
 
 
 def test_lm_memory_query_generation_is_structured_and_grounded() -> None:

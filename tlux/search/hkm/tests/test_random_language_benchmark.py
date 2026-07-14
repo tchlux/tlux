@@ -5,6 +5,7 @@ import pytest
 from tlux.search.hkm.tools.random_language_benchmark import (
     _metrics,
     _evidence_gate_failed,
+    _missing_entity_query_is_valid,
     _parse_model_query,
     _query_overlaps_evidence,
     build_cases,
@@ -56,12 +57,25 @@ def test_model_query_requires_an_evidence_term() -> None:
     assert not _query_overlaps_evidence("find the missing event", "A basalt bridge")
 
 
+def test_missing_entity_query_must_drop_first_clue() -> None:
+    excerpt = "The archivist crosses the basalt bridge beneath thunder."
+    assert _missing_entity_query_is_valid("find the basalt bridge", excerpt)
+    assert not _missing_entity_query_is_valid("find the archivist basalt bridge", excerpt)
+
+
 def test_model_query_uses_optional_generator_method() -> None:
     class Generator:
         def generate_memory_query(self, excerpt: str, style: str) -> str:
             return "find the basalt bridge"
 
     assert model_query(Generator(), "A basalt bridge", "specific") == "find the basalt bridge"
+
+    class RestoringGenerator:
+        def generate_memory_query(self, excerpt: str, style: str) -> str:
+            return "find the archivist basalt bridge"
+
+    with pytest.raises(ValueError, match="restored the omitted clue"):
+        model_query(RestoringGenerator(), "The archivist crosses the basalt bridge", "missing_entity")
 
 
 def test_metrics_report_recall_precision_and_mrr() -> None:

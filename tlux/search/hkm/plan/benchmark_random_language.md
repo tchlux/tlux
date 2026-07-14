@@ -22,9 +22,10 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
 ```
 
 On 10 Fourth Wing samples (40 cases), the current deterministic baseline
-reached evidence recall@5 0.725, precision@1 0.450, and MRR 0.571. By style,
-evidence recall was 0.900 vague, 0.800 specific, 0.700 conditional, and 0.500
-missing-entity. Median agent/search latency was 650/586 ms.
+reached evidence recall@5 0.775, precision@1 0.550, and MRR 0.646. By style,
+evidence recall was 0.900 vague, 0.800 specific, 0.700 conditional, and 0.700
+missing-entity; missing-entity precision@1 was 0.600. Median agent/search
+latency was 670/598 ms.
 This is a challenge baseline, not a production quality claim; improve the
 agent and rerun the same seed before changing the index or query templates.
 The deterministic templates intentionally retain lexical clues, so they test
@@ -45,11 +46,24 @@ reached evidence recall@5 1.000, precision@1 0.800, and MRR 0.888. By style,
 precision@1 was 0.600 vague, 1.000 specific, 0.800 conditional, and 0.800
 missing-entity. Median agent/search latency was 3,437/872 ms; removing
 single-word clause lanes reduced p95 agent latency to 3,883 ms in this run.
+That smoke predates the stricter missing-entity validity check. A post-check
+eight-case smoke generated 6/8 model queries, used two deterministic rescues,
+and reached 0.875 recall@5/precision@1/MRR overall; the six genuinely generated
+queries were all rank-one, while the two rescued missing-entity cases were not.
+
+The heterogeneous FineWeb profile index at `/tmp/hkm_fineweb_profile_drama`
+provides the next challenge corpus: an eight-sample deterministic slice (32
+cases) reached 0.906 recall@5, 0.750 precision@1, and 0.807 MRR at 1.97/2.98 s
+median/p95 agent latency. Its misses are generic terms such as `authors`,
+`reading`, and `Update`, so larger gates need rarity-stratified sampling.
 
 Use `--query-source lm --base-url URL --model MODEL` to ask LM Studio to write
 each request from the raw evidence. Generated requests must quote at least two
-evidence terms; timeout, malformed output, or unsupported endpoint responses
-fall back per case and are reported in `planner_errors` and `query_origin`.
+evidence terms. Missing-entity requests must also omit the first distinctive
+sampled clue; otherwise they are reported as planner failures and use
+deterministic fallback. Timeout, malformed output, or unsupported endpoint
+responses fall back per case and are reported in `planner_errors` and
+`query_origin`.
 Use `--model-first` to let the language-search agent perform its own LM Studio
 refinement after the generated request. Add `--require-evidence` when a run
 should exit nonzero unless recall@k, precision@1, and MRR are all 1.0.

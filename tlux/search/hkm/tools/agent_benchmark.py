@@ -53,6 +53,11 @@ LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
 LANGUAGE_COVERAGE_WEIGHT = 0.10
 LANGUAGE_FIRST_PASS_BONUS = 0.05
+LANGUAGE_MEMORY_WORDS = {
+    "called", "cannot", "find", "forgot", "forgotten", "forget", "involved",
+    "near", "object", "part", "passage", "person", "recall", "remember", "scene",
+    "search", "something", "then", "what", "who",
+}
 LANGUAGE_CONCEPT_GROUPS = (
     frozenset({"amusing", "funny", "humorous", "laugh", "laughter", "joke", "silly"}),
     frozenset({"enter", "entered", "enters", "door", "room", "office"}),
@@ -215,6 +220,10 @@ def _language_query_variants(query: str) -> List[str]:
         clause for clause in clauses
         if len(_language_word_forms(clause)) >= 2
     )
+    if _language_missing_entity_query(normalized):
+        content = _language_memory_content_query(normalized)
+        if len(_language_word_forms(content)) >= 2:
+            variants.append(content)
     variants.extend(_language_concept_queries(normalized))
     variants.extend(
         f"{clauses[index]} {clauses[index + 1]}"
@@ -314,6 +323,18 @@ def _language_missing_entity_query(query: str) -> bool:
         query,
         flags=re.IGNORECASE,
     ))
+
+
+# Keep remembered evidence terms while removing memory-request filler.
+def _language_memory_content_query(query: str) -> str:
+    content = " ".join(
+        word for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", query)
+        if word.lower() not in LANGUAGE_MEMORY_WORDS
+        and word.lower() not in QUERY_GUARD_WORDS
+    )
+    if len(_language_word_forms(content)) < 2:
+        return ""
+    return _keyword_query(content, limit=12)
 
 
 # Decode a bounded language-query plan from a model response.
@@ -514,8 +535,9 @@ class LMStudioQueryGenerator:
             "concrete words or short phrases copied exactly from the evidence, "
             "especially names, numbers, and unusual nouns; do not replace all "
             "distinctive clues with generic synonyms. Keep every named entity and "
-            "number for vague, specific, and conditional styles; missing_entity may "
-            "omit only one subject or object. Return only "
+            "number for vague, specific, and conditional styles; for missing_entity "
+            "omit the first distinctive subject or object clue while preserving at "
+            "least two other clues. Return only "
             '{"query":"..."}; do not answer or explain.\nEvidence:\n'
             f"{_planner_excerpt(excerpt, 160)}"
         )
@@ -1237,7 +1259,10 @@ class LanguageSearchAgent:
                 variant_mode = "semantic" if self.mode == "hybrid" else self.mode
                 if (
                     variant != query
-                    and variant == _keyword_query(query, limit=12)
+                    and variant in {
+                        _keyword_query(query, limit=12),
+                        _language_memory_content_query(query),
+                    }
                     and variant_mode == "semantic"
                     and re.search(
                         r"\b(?:forgot|forgotten|forget|remember|recall|unknown)\b",
