@@ -329,7 +329,7 @@ errors and one model call per sample. With the 8-token planner budget, median
 on the repository; wrapper recovery handled 22.0% and 17.3% of truncated
 planner responses respectively. Planner output rejects generic
 instruction-word overlap, accepts truncated JSON arguments, and falls back
-after a five-second LM Studio timeout. If every bounded search lane misses
+after a two-second LM Studio timeout. If every bounded search lane misses
 the raw evidence, the tool fails closed with an empty result rather than
 returning an ungrounded candidate.
 
