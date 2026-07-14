@@ -21,14 +21,14 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
   --json-output /private/tmp/random_language.json
 ```
 
-On 10 Fourth Wing samples (40 cases), the deterministic generator now reaches
-evidence recall@5 1.000, precision@1 0.775, and MRR 0.866. By style, evidence
-recall is 1.000 vague, 1.000 specific, 1.000 conditional, and 1.000
-missing-entity; conditional precision@1 is 0.500 and missing-entity precision@1
-is 0.700. Median agent/search latency is 545/458 ms (p95 892/767 ms). The
-generator normalizes contractions, drops common dialogue glue, and keeps four
-grounded clues for ordinary styles plus four later clues after omitting the first
-for missing-entity requests; this improves ranking without changing the index.
+On 10 Fourth Wing samples (40 cases), the deterministic generator reaches
+evidence recall@5 1.000, precision@1 0.900, and MRR 0.935. By style, evidence
+recall is 1.000 for every style; precision@1 is 1.000 vague, 0.900 specific,
+0.800 conditional, and 0.900 missing-entity. Median agent/search latency is
+552/464 ms (p95 906/781 ms). The generator normalizes contractions, drops
+common dialogue glue, and keeps four grounded clues for ordinary styles plus
+four later clues after omitting the first for missing-entity requests; the LM
+prompt redacts that omitted clue as `[unknown]`.
 This remains a challenge baseline, not a production quality claim; the
 conditional and forgotten-entity styles still need larger quality gates.
 The deterministic templates intentionally retain lexical clues, so they test
@@ -59,11 +59,16 @@ Its deterministic-only slice remains a useful hard gate at 0.906/0.750/0.807,
 where generic terms such as `authors`, `reading`, and `Update` expose the next
 rarity-stratified challenge.
 
-The current model-first language agent stops after a confident first semantic
-hit, caps model refinement at four lanes, and reserves a compact clue lane for
-missing-entity requests. A live eight-case Fourth Wing smoke (two sampled
-passages, Gemma 3, seed 20260714) reached 1.000 recall@5, precision@1, and MRR;
-both rejected missing-entity generations recovered rank-one evidence.
+The current adaptive model-first language agent stops after a confident first
+semantic hit, caps refinement at four lanes, and reserves a compact clue lane
+for missing-entity requests. `--always-refine` forces one inspection/refinement
+round for every request; this is useful for auditing the agentic trace but adds
+model latency and is not the default.
+
+The checked-in FineWeb challenge fixture uses 10 manually reviewed cases over
+the 512-file profile index. It passes 10/10 coverage/coherence and 1.000 judged
+precision over 20 labels with the deterministic agent; use it as the stable
+heterogeneous regression gate while expanding the broader random sample.
 
 Use `--query-source lm --base-url URL --model MODEL` to ask LM Studio to write
 each request from the raw evidence. Generated requests must quote at least two

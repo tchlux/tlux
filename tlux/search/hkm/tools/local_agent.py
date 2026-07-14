@@ -48,6 +48,7 @@ class LocalSearchAgent:
         runner: Any | None = None,
         native_tool: bool = False,
         language_query: bool = False,
+        always_refine: bool = False,
     ) -> None:
         self.searcher = Searcher.from_index_root(index_root)
         self.language_query = language_query
@@ -57,11 +58,11 @@ class LocalSearchAgent:
             self.runner = runner
         elif language_query and deterministic_first:
             self.client = None
-            self.runner = LanguageSearchAgent(None, mode)
+            self.runner = LanguageSearchAgent(None, mode, always_refine=always_refine)
         else:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
             self.runner = (
-                LanguageSearchAgent(self.client, mode)
+                LanguageSearchAgent(self.client, mode, always_refine=always_refine)
                 if language_query
                 else LMStudioPlannerToolAgent(self.client, mode, native_tool)
             )
@@ -155,6 +156,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--native-planner-tool", action="store_true", help="Require the model to emit search_index after planning")
     parser.add_argument("--language-query", action="store_true", help="Iteratively search natural-language queries and paraphrases")
+    parser.add_argument("--always-refine", action="store_true", help="Force one LM inspection/refinement round for every language query")
     routing = parser.add_mutually_exclusive_group()
     routing.add_argument("--deterministic-first", dest="deterministic_first", action="store_true")
     routing.add_argument("--model-first", dest="deterministic_first", action="store_false")
@@ -171,6 +173,7 @@ def main() -> None:
         args.deterministic_first,
         native_tool=args.native_planner_tool,
         language_query=args.language_query,
+        always_refine=args.always_refine,
     )
     if args.warmup:
         agent.warmup()

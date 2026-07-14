@@ -434,9 +434,8 @@ asks the local model for up to four paraphrase/antipattern lanes, adds bounded
 deterministic clause lanes, then searches those alternatives in a second round.
 Natural-language lanes use semantic
 search even when `--tool-mode hybrid` is selected; explicit forgotten-entity
-requests also get a compact token lane for rare remembered terms. The first
-lane is anchored,
-and antipatterns are soft penalties so a useful hit is never hard-filtered:
+requests also get a compact token lane for rare remembered terms. Antipatterns
+are soft penalties so a useful hit is never hard-filtered:
 
     printf '%s\n' \
       '{"text":"A scenario where something funny is said"}' \
@@ -461,8 +460,13 @@ to evaluate that gate and record per-case coverage plus latency.
 The grounded conditional fixture in
 `plan/benchmark_language_conditionals.md` adds seven increasingly conditional
 requests with forgotten-name phrasing; its latest deterministic run passes
-7/7 coverage/coherence checks; the latest labeled sample is 0.929 precision,
-with unknown-hit precision still open.
+7/7 coverage/coherence checks and 1.000 judged precision over 10 labeled hits.
+
+Adaptive language routing stops after a confident first pass for low latency.
+Pass `--always-refine` with `--model-first` to force one LM inspection round,
+which records generated alternative queries and antipatterns for an auditable
+agentic trace. This strict diagnostic mode adds model latency and is not yet
+the default quality gate.
 
 For a reproducible harder audit, run
 `bin/hkm-random-language-benchmark INDEX --samples 10 --top-k 5`. It samples
@@ -472,16 +476,13 @@ baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
 The current 40-case deterministic run reaches 1.000 evidence recall@5,
-0.775 precision@1, and 0.866 MRR; vague and specific requests now retain four
-grounded clues, while missing-entity requests retain four later clues after
-omitting the first. Conditional precision remains the main open challenge. A
-latest eight-case Gemma 3 model-first smoke reaches
-1.000 recall@5, 0.875 precision@1, and 0.938 MRR, including two rejected
-missing-entity generations recovered with four retained clues; larger random
-gates remain open.
-The valid 512-file FineWeb profile index passes a 32-case model-first language
-gate at 1.000 recall/precision/MRR across all four styles, with one validated
-deterministic rescue.
+0.900 precision@1, and 0.935 MRR; vague requests are perfect, while
+conditional precision@1 is 0.800 and missing-entity precision@1 is 0.900.
+Missing-entity requests omit the first distinctive clue and the LM prompt
+redacts that clue as `[unknown]`, so the model cannot simply copy it. A
+checked-in 10-case FineWeb challenge fixture passes 10/10 coverage/coherence
+and 1.000 judged precision over 20 labels; broader random-corpus gates remain
+open.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055

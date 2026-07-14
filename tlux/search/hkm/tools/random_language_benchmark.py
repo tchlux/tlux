@@ -336,6 +336,7 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--model-first", action="store_true")
+    parser.add_argument("--always-refine", action="store_true", help="force one LM inspection/refinement round per query")
     parser.add_argument("--warmup", action="store_true")
     parser.add_argument("--require-evidence", action="store_true", help="fail unless all evidence metrics are 1.0")
     parser.add_argument("--json-output")
@@ -377,6 +378,7 @@ def main() -> None:
         mode="semantic",
         deterministic_first=not args.model_first,
         language_query=True,
+        always_refine=args.always_refine,
     )
     if args.warmup:
         agent.warmup()

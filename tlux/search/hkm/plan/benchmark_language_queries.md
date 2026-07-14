@@ -174,8 +174,8 @@ the antipattern. The report was saved as `/tmp/language_eval_live.jsonl`.
 
 ## Post-fix smoke
 
-After semantic routing, first-lane anchoring, and morphology-aware antipattern
-filtering, a warmed Gemma 3 JSONL smoke (`--timeout 10`, `--model-first`,
+After semantic routing and morphology-aware antipattern filtering, a warmed
+Gemma 3 JSONL smoke (`--timeout 10`, `--model-first`,
 `--tool-mode semantic`) recovered the reviewed anchors in the top five for the
 four short examples: doc 248 (funny office scene) at rank 1, doc 174 (crowd
 circle and screaming student) at rank 1, doc 38 (large outer wall) at rank 3,
@@ -184,6 +184,17 @@ agent still spent roughly 4.7-15.3 seconds per request on this server and one
 planner call used deterministic recovery. This is a smoke result, not the
 six-case acceptance gate; run the full JSONL command above after every model,
 index, or ranking change.
+
+## Strict agentic trace: 2026-07-14
+
+The opt-in `--always-refine` mode forces the planner/refinement round even when
+the first semantic pass is already confident. A live six-case Gemma 3 run
+used two rounds and five recorded query lanes for every case, proving the
+inspect-then-search loop. It reached 5/6 group-coverage cases, 0.933 mean
+coverage, and 0.750 judged precision over eight labeled hits. Median agent and
+search latency were 3.31/0.66 seconds (p95 4.71/1.71 seconds). The strict
+trace is therefore an autonomy diagnostic, not yet the default quality gate;
+adaptive routing remains the lower-latency production path.
 
 ## Known limitation
 

@@ -302,6 +302,7 @@ def main() -> None:
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="semantic")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--model-first", action="store_true")
+    parser.add_argument("--always-refine", action="store_true", help="force one LM inspection/refinement round per query")
     parser.add_argument("--warmup", action="store_true")
     parser.add_argument("--jsonl", help="write one raw case result per line")
     parser.add_argument(
@@ -330,6 +331,7 @@ def main() -> None:
         mode=args.tool_mode,
         deterministic_first=not args.model_first,
         language_query=True,
+        always_refine=args.always_refine,
     )
     if args.warmup:
         agent.warmup()

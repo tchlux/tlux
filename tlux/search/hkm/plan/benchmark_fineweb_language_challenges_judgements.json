@@ -1,0 +1,44 @@
+{
+  "cases": {
+    "LQ-21": {
+      "relevant": [{"all": ["coverings", "disagreement", "translation"]}],
+      "negative": []
+    },
+    "LQ-22": {
+      "relevant": [{"all": ["Geewa", "platform", "attracted"]}],
+      "negative": []
+    },
+    "LQ-23": {
+      "relevant": [{"all": ["platform", "players", "attracted"]}],
+      "negative": []
+    },
+    "LQ-24": {
+      "relevant": [{"all": ["executive", "intelligence", "fraud"]}],
+      "negative": []
+    },
+    "LQ-25": {
+      "relevant": [{"all": ["copies", "book", "Bookseller"]}],
+      "negative": []
+    },
+    "LQ-26": {
+      "relevant": [{"all": ["golds", "Spoiler", "Skill Points"]}],
+      "negative": []
+    },
+    "LQ-27": {
+      "relevant": [{"all": ["Gavroche", "perfection", "standards"]}],
+      "negative": []
+    },
+    "LQ-28": {
+      "relevant": [{"all": ["guardians", "quests", "tribulations"]}],
+      "negative": []
+    },
+    "LQ-29": {
+      "relevant": [{"all": ["meeting", "farmland", "preservation"]}],
+      "negative": []
+    },
+    "LQ-30": {
+      "relevant": [{"all": ["software", "vendors", "Internet"]}],
+      "negative": []
+    }
+  }
+}

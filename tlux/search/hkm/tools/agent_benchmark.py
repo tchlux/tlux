@@ -54,7 +54,7 @@ LANGUAGE_PLAN_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
 LANGUAGE_SEARCH_CACHE_SIZE = 256
-LANGUAGE_COVERAGE_WEIGHT = 0.10
+LANGUAGE_COVERAGE_WEIGHT = 0.50
 LANGUAGE_FIRST_PASS_BONUS = 0.05
 LANGUAGE_UNLESS_PENALTY = 0.12
 LANGUAGE_CONFIDENCE_COVERAGE = 0.70
@@ -279,6 +279,16 @@ def _language_negative_clauses(query: str) -> List[set[str]]:
         terms = _language_word_forms(remainder)
         if terms:
             clauses.append(terms)
+    # Treat an explicit contrast as negative while leaving open-ended unless clauses soft.
+    for match in re.finditer(
+        r"\bunless\s+this\s+is\s+(.+?)(?=[,;:.]|$)",
+        query,
+        flags=re.IGNORECASE,
+    ):
+        remainder = re.sub(r"^not\s+", "", match.group(1), flags=re.IGNORECASE)
+        terms = _language_word_forms(remainder)
+        if terms and terms not in clauses:
+            clauses.append(terms)
     return clauses
 
 
@@ -334,7 +344,8 @@ def _language_full_concept_forms(text: str) -> set[str]:
 # Detect requests that explicitly omit a remembered subject or object.
 def _language_missing_entity_query(query: str) -> bool:
     return bool(re.search(
-        r"(?:\b(?:cannot|can.?t)\s+(?:remember|recall)|\b(?:forgot|"
+        r"(?:\b(?:cannot|can.?t|don.?t|do not)\s+(?:remember|recall)|"
+        r"\bno\s+memory\s+of\b|\b(?:forgot|"
         r"forgotten|forget|unknown|unnamed)\b|\b(?:not|no)\s+(?:who|"
         r"what|person|object)\b|\bwho\s+or\s+what\b|\bperson\s+or\s+"
         r"object\b|\b(?:don.?t|do not)\s+know|\bnot\s+sure|"
@@ -355,6 +366,20 @@ def _language_memory_content_query(query: str) -> str:
     if len(_language_word_forms(content)) < 2:
         return ""
     return _keyword_query(content, limit=12)
+
+
+# Return the first distinctive clue that a missing-entity request should omit.
+def _language_missing_entity_clue(excerpt: str) -> str:
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9'-]*", excerpt):
+        normalized = word.lower()
+        if (
+            len(normalized) >= 4
+            and normalized not in STOP_WORDS
+            and normalized not in QUERY_GUARD_WORDS
+            and normalized not in LANGUAGE_MEMORY_WORDS
+        ):
+            return word
+    return ""
 
 
 # Decode a bounded language-query plan from a model response.
@@ -549,6 +574,17 @@ class LMStudioQueryGenerator:
         }
         if style not in guidance:
             raise ValueError(f"unknown memory-query style: {style}")
+        model_excerpt = excerpt
+        if style == "missing_entity":
+            omitted = _language_missing_entity_clue(excerpt)
+            if omitted:
+                model_excerpt = re.sub(
+                    rf"\b{re.escape(omitted)}\b",
+                    "[unknown]",
+                    excerpt,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
         prompt = (
             "Write one natural-language memory search request from the evidence. "
             f"{guidance[style]} Preserve the other details. Include at least three "
@@ -559,7 +595,7 @@ class LMStudioQueryGenerator:
             "omit the first distinctive subject or object clue while preserving at "
             "least two other clues. Return only "
             '{"query":"..."}; do not answer or explain.\nEvidence:\n'
-            f"{_planner_excerpt(excerpt, 160)}"
+            f"{_planner_excerpt(model_excerpt, 160)}"
         )
         response = self._request("chat/completions", {
             "model": self._model_name(),
@@ -1275,6 +1311,7 @@ class LanguageSearchAgent:
         client: LMStudioQueryGenerator | None = None,
         mode: str = "hybrid",
         max_rounds: int = LANGUAGE_QUERY_MAX_ROUNDS,
+        always_refine: bool = False,
     ) -> None:
         if mode not in {"hybrid", "semantic", "token"}:
             raise ValueError("mode must be hybrid, semantic, or token")
@@ -1284,6 +1321,7 @@ class LanguageSearchAgent:
         self.model = client.model if client is not None else None
         self.mode = mode
         self.max_rounds = max_rounds
+        self.always_refine = always_refine
         self._search_cache: OrderedDict[tuple[str, str, int, int, str], Any] = OrderedDict()
 
     # Reuse immutable-index lane results across repeated service requests.
@@ -1370,7 +1408,10 @@ class LanguageSearchAgent:
             if (
                 self.client is None
                 or round_index + 1 >= self.max_rounds
-                or _language_first_pass_confident(query, merged)
+                or (
+                    _language_first_pass_confident(query, merged)
+                    and not self.always_refine
+                )
             ):
                 break
             snippets = json.dumps(_tool_result_payload(merged, min(8, len(merged.docs))))

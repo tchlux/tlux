@@ -27,6 +27,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _language_negative_clauses,
     _language_unless_clauses,
     _language_missing_entity_query,
+    _language_missing_entity_clue,
     _language_positive_clauses,
     _language_word_forms,
     _merge_language_results,
@@ -185,6 +186,27 @@ def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
     assert generator.payload["max_tokens"] == 32
     with pytest.raises(ValueError, match="unknown memory-query style"):
         generator.generate_memory_query("A basalt bridge", "unknown")
+
+
+def test_lm_missing_entity_prompt_redacts_first_clue() -> None:
+    class MissingGenerator(LMStudioQueryGenerator):
+        def __init__(self) -> None:
+            self.model = "fake"
+            self.payload = None
+
+        def _model_name(self) -> str:
+            return self.model
+
+        def _request(self, path, payload=None):
+            self.payload = payload
+            return {"choices": [{"message": {"content": '{"query":"Quadrant Dain eyebrows"}'}}]}
+
+    assert _language_missing_entity_clue("Scribe Quadrant Dain eyebrows") == "Scribe"
+    generator = MissingGenerator()
+    assert generator.generate_memory_query(
+        "Scribe Quadrant Dain eyebrows", "missing_entity"
+    ) == "Quadrant Dain eyebrows"
+    assert "Scribe" not in generator.payload["messages"][0]["content"]
 
 
 def test_language_ranking_uses_document_preview_for_condition_coverage() -> None:
@@ -360,6 +382,19 @@ def test_language_unless_parser_extracts_soft_exclusion() -> None:
     assert any("archive" in clause and "research" in clause for clause in clauses)
 
 
+def test_language_negative_parser_targets_explicit_unless_contrast() -> None:
+    clauses = _language_negative_clauses(
+        "Find the office joke unless this is Archives research"
+    )
+    assert any("archive" in clause and "research" in clause for clause in clauses)
+    assert _language_negative_clauses(
+        "Find it unless this is not dragon spectators"
+    ) == [{"dragon", "spectator", "spectators"}]
+    assert not _language_negative_clauses(
+        "Find the office joke unless Archives is a separate scene"
+    )
+
+
 def test_language_unless_penalty_reorders_only_selected_page() -> None:
     def hit(doc_id: int, score: float, preview: str) -> SimpleNamespace:
         return SimpleNamespace(
@@ -387,6 +422,9 @@ def test_language_unless_penalty_reorders_only_selected_page() -> None:
 
 def test_language_missing_entity_parser_covers_memory_phrasings() -> None:
     assert _language_missing_entity_query("I cannot recall who climbed the tower")
+    assert _language_missing_entity_query("I don't remember who climbed the tower")
+    assert _language_missing_entity_query("I do not recall what happened near the tower")
+    assert _language_missing_entity_query("I have no memory of who climbed the tower")
     assert _language_missing_entity_query("I remember the scene, but not who was there")
     assert _language_missing_entity_query("The name escapes me; search the chimney climb")
     assert _language_missing_entity_query("My name has escaped me; search the chimney climb")
@@ -964,6 +1002,26 @@ def test_language_agent_refines_after_first_search(tmp_path: Path, monkeypatch) 
     assert run["antipatterns"]
     assert "nighttime climbing gathered crowd horror" in run["queries"]
     assert run["result"].docs[0].source_path == "target.txt"
+
+
+def test_language_agent_can_force_refinement_after_confident_first_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "nighttime climbing gathered crowd horror", "metadata": {"source_path": "target.txt"}}],
+        max_k=1,
+    )
+    searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
+    monkeypatch.setattr(benchmark, "_language_first_pass_confident", lambda *_: True)
+    client = FakeLanguageClient()
+    run = LanguageSearchAgent(client, mode="hybrid", always_refine=True).run(
+        "A scenario where a crowd watches in horror", searcher, top_k=1
+    )
+    assert run["rounds"] == 2
+    assert len(client.calls) == 1
 
 
 def test_language_model_cap_keeps_deterministic_recovery_budget(monkeypatch) -> None:
