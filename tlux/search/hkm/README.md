@@ -398,9 +398,11 @@ model-serving optimization target.
 
 The current 50-sample repository gate uses the 1.5-second timeout and still
 returns 1.000 evidence recall/precision@1/MRR with zero errors; observed
-model-first agent latency was 903/1,411 ms median/p95. The timeout is a bounded
-failure budget, not a quality shortcut: failed planner calls use the same
-evidence-checked deterministic rescue path.
+model-first agent latency was 897/1,542 ms median/p95. The 8-token prompt now
+asks for only 1-3 exact words, matching the output budget: this gate had zero
+planner recoveries, 36% bounded fallback, and 6% repeated-passage cache hits.
+The timeout is a bounded failure budget, not a quality shortcut: failed planner
+calls use the same evidence-checked deterministic rescue path.
 
 The persistent planner also keeps a bounded 256-entry cache keyed by the full
 raw passage. In a repeated-passage smoke test, the first grounded request took

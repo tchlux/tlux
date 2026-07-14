@@ -205,7 +205,7 @@ class LMStudioQueryGenerator:
         if planner_excerpt != excerpt:
             planner_excerpt += "\nCandidate terms from full passage: " + _keyword_query(excerpt)
         prompt = (
-            "Extract a search query. Return only {\"query\":\"...\"}; copy 3-8 exact "
+            "Extract a search query. Return only {\"query\":\"...\"}; copy 1-3 exact "
             "words from evidence, preferring rare names, identifiers, or numbers. No explanation.\n"
             f"Evidence:\n{planner_excerpt}"
         )
