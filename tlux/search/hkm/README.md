@@ -330,6 +330,13 @@ median agent latency was 1.70 s (p95 2.90 s). The tool query response is
 bounded to 32 output tokens, and this expensive model lane should be reserved
 for passages that fail the cheap first pass.
 
+A fresh 50-sample repository gate against the installed llama.cpp 2.24 server
+with `--reasoning off` made one tool call for every sample and reached 1.000
+content-evidence recall@5/precision@1 with zero errors; target-document
+recall@5 was 0.980 and median/p95 one-completion latency was 1.57/2.85 s.
+Disable Gemma reasoning for direct llama.cpp serving: otherwise hidden
+reasoning can consume the bounded completion before the tool call is emitted.
+
 The captured 50-sample Gemma query set that exposed the fallback bug now replays
 through the corrected tool path at 1.000 content-evidence recall and
 precision@1 with zero errors; this replay excludes new model-generation time.

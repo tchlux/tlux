@@ -30,6 +30,7 @@ STOP_WORDS = {
     "through", "under", "what", "when", "where", "which", "while", "with", "would",
 }
 TOOL_QUERY_WORDS = 16
+TOOL_MAX_TOKENS = 32
 TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
@@ -361,9 +362,9 @@ class LMStudioToolAgent:
             "model": self._model_name(),
             "messages": messages,
             "tools": [SEARCH_TOOL],
-            "tool_choice": {"type": "function", "function": {"name": "search_index"}},
+            "tool_choice": "required",
             "temperature": 0,
-            "max_tokens": 32,
+            "max_tokens": TOOL_MAX_TOKENS,
             "stream": False,
         })
         choices = response.get("choices", [])
