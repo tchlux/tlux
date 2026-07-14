@@ -330,6 +330,12 @@ planner responses respectively. Planner output rejects generic
 instruction-word overlap, accepts truncated JSON arguments, and falls back
 after a five-second LM Studio timeout.
 
+For lower warm latency, pass `--model google/gemma-3-4b` with
+`--planner-tool`; this smaller installed model is not tool-trained, but its
+structured planner retained the same 1.000 evidence metrics at 0.728/1.107 s
+median/p95 on prose and 0.765/1.427 s on the repository. Keep Gemma 4 E4B for
+the native-tool experiment; use the structured wrapper for Gemma 3.
+
 For short model-generated keyword queries, `--tool-mode token` avoids the
 embedding pass. The tool bounds model queries to a small 16-word budget and
 retained 1.000 tool evidence recall/precision on the live cross-corpus gate;
