@@ -415,6 +415,13 @@ model-first run grounded all 20 requests; 17 used model-generated queries and
 3 used deterministic rescue. Request latency was 1,067 ms median and 1,306 ms
 maximum after warmup.
 
+Pass `--native-planner-tool` with `--model-first` when the model itself must
+emit the `search_index` call. This explicit two-completion bridge is slower,
+but a live 10-sample Gemma 4 gate emitted the native tool call on 10/10
+requests while retaining 1.000 evidence recall/precision@1/MRR.
+The persistent five-request smoke also emitted the native call on 5/5 requests
+and grounded every result at 2,091 ms median agent latency.
+
 The persistent planner also keeps a bounded 256-entry cache keyed by the full
 raw passage. In a repeated-passage smoke test, the first grounded request took
 578 ms and the next four took 35-39 ms each, with zero additional model calls.

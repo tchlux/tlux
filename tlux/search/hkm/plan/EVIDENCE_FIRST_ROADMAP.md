@@ -136,6 +136,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Order deterministic rare-term fallback before phrase lanes; the live 50-sample gate retained perfect evidence metrics while reducing model-first agent latency to 578/1,227 ms median/p95 and search latency to 42/384 ms.
 - [x] Add a `--require-grounded` benchmark gate that exits nonzero unless final evidence recall, precision@1, and MRR are all 1.000.
 - [x] Separate persistent startup from request latency with a one-time 15-second planner warmup budget; a live 20-request model-first run grounded 20/20 requests, with 17 model queries and 3 deterministic rescues.
+- [x] Expose the native planner/tool bridge through persistent `hkm-agent --native-planner-tool`; a live 10-sample gate emitted `search_index` on 10/10 requests with perfect evidence metrics.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -205,3 +206,5 @@ before relying on direct Python serving.
 - 2026-07-14: Ordered the deterministic rare-term fallback before phrase lanes. The same live 50-sample gate retained perfect evidence metrics while reducing model-first agent latency to 0.578/1.227 seconds median/p95 and search latency to 42/384 ms.
 - 2026-07-14: Added `--require-grounded` to make the benchmark fail closed when final evidence recall, precision@1, or MRR drops below 1.000; the 75-sample deterministic repository gate passes this check.
 - 2026-07-14: Added a one-time 15-second persistent-agent planner warmup that restores the 1.5-second request timeout. A live 20-request Gemma 4 run grounded every request, using 17 model queries and 3 deterministic rescues at 1,067 ms median/1,306 ms maximum request latency.
+- 2026-07-14: Exposed the native planner/tool bridge through persistent `hkm-agent --native-planner-tool`. A live 10-sample Gemma 4 gate emitted `search_index` on every request while retaining perfect evidence metrics; the faster wrapper remains the default.
+- 2026-07-14: Verified the persistent native mode with five warmed requests: 5/5 model-emitted `search_index` calls, 5/5 grounded results, two completions per request, and 2,091 ms median agent latency.

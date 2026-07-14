@@ -45,6 +45,7 @@ class LocalSearchAgent:
         mode: str = "token",
         deterministic_first: bool = False,
         runner: Any | None = None,
+        native_tool: bool = False,
     ) -> None:
         self.searcher = Searcher.from_index_root(index_root)
         self.deterministic = DeterministicToolAgent(mode) if deterministic_first else None
@@ -53,7 +54,7 @@ class LocalSearchAgent:
             self.runner = runner
         else:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
-            self.runner = LMStudioPlannerToolAgent(self.client, mode)
+            self.runner = LMStudioPlannerToolAgent(self.client, mode, native_tool)
 
     # Warm HKM search and the structured planner with representative requests.
     def warmup(self) -> bool:
@@ -129,6 +130,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="token")
     parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--native-planner-tool", action="store_true", help="Require the model to emit search_index after planning")
     routing = parser.add_mutually_exclusive_group()
     routing.add_argument("--deterministic-first", dest="deterministic_first", action="store_true")
     routing.add_argument("--model-first", dest="deterministic_first", action="store_false")
@@ -142,6 +144,7 @@ def main() -> None:
         args.timeout,
         args.tool_mode,
         args.deterministic_first,
+        native_tool=args.native_planner_tool,
     )
     if args.warmup:
         agent.warmup()

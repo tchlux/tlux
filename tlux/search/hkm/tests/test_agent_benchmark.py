@@ -374,6 +374,19 @@ def test_persistent_local_agent_warmup_uses_planner(tmp_path: Path, monkeypatch)
     assert client.timeout == 1.5
 
 
+def test_persistent_local_agent_can_require_native_tool_call(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    agent = LocalSearchAgent(str(tmp_path / "index"), native_tool=True)
+    assert agent.runner.native_tool is True
+
+
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     (tmp_path / "index").mkdir()
