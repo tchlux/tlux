@@ -12,6 +12,7 @@ import re
 import struct
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -202,6 +203,20 @@ def _snippet(text: str, start: int, end: int, radius: int = 120) -> str:
     lo = max(0, start - radius)
     hi = min(len(text), max(end, start) + radius)
     return " ".join(text[lo:hi].split()).strip()
+
+
+# Read small immutable source snapshots once while their size and mtime remain unchanged.
+@lru_cache(maxsize=16)
+def _cached_source_bytes(path: str, size: int, mtime_ns: int) -> bytes:
+    return Path(path).read_bytes()
+
+
+# Read a source file without retaining unexpectedly large documents in the cache.
+def _source_bytes(path: Path) -> bytes:
+    stat = path.stat()
+    if stat.st_size > 16 * 1024 * 1024:
+        return path.read_bytes()
+    return _cached_source_bytes(str(path), stat.st_size, stat.st_mtime_ns)
 
 
 # Return lowercase word terms used for snippets and short-query guards.
@@ -472,10 +487,10 @@ class Searcher:
         source_file = Path(self.source_root) / source_path if source_path else None
         if source_file and source_file.exists():
             if document is not None and document.byte_end > document.byte_start:
-                raw = source_file.read_bytes()[document.byte_start : document.byte_end]
+                raw = _source_bytes(source_file)[document.byte_start : document.byte_end]
                 text = raw.decode("utf-8", errors="ignore")
             else:
-                text = source_file.read_text(encoding="utf-8", errors="ignore")
+                text = _source_bytes(source_file).decode("utf-8", errors="ignore")
             if needle:
                 idx = text.lower().find(needle.lower())
                 if idx >= 0:

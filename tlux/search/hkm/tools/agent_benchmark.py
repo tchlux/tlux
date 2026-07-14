@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Protocol
 
@@ -762,6 +763,19 @@ def _target_rank(result: Any, doc_id: int) -> int | None:
     return None
 
 
+# Read one immutable source snapshot while its size and mtime remain unchanged.
+@lru_cache(maxsize=64)
+def _cached_source_bytes(path: str, size: int, mtime_ns: int) -> bytes:
+    return Path(path).read_bytes()
+
+
+# Read large sources without retaining their full contents in the process cache.
+def _source_bytes(path: str, size: int, mtime_ns: int) -> bytes:
+    if size > 16 * 1024 * 1024:
+        return Path(path).read_bytes()
+    return _cached_source_bytes(path, size, mtime_ns)
+
+
 # Return lower-case evidence text for a hit, including its canonical source file.
 def _hit_evidence_text(
     hit: Any,
@@ -778,7 +792,8 @@ def _hit_evidence_text(
             if source_cache is not None and key in source_cache:
                 decoded = source_cache[key]
             else:
-                raw = source.read_bytes()
+                stat = source.stat()
+                raw = _source_bytes(str(source), stat.st_size, stat.st_mtime_ns)
                 decoded = raw[start:end].decode("utf-8", errors="ignore")
                 if source_cache is not None:
                     source_cache[key] = decoded
@@ -812,7 +827,12 @@ def _evidence_coverage(
                 if source_cache is not None and key in source_cache:
                     full_text = source_cache[key]
                 else:
-                    full_text = " ".join(source.read_text(encoding="utf-8", errors="ignore").split()).lower()
+                    stat = source.stat()
+                    full_text = " ".join(
+                        _source_bytes(str(source), stat.st_size, stat.st_mtime_ns)
+                        .decode("utf-8", errors="ignore")
+                        .split()
+                    ).lower()
                     if source_cache is not None:
                         source_cache[key] = full_text
                 if normalized_excerpt in full_text:
