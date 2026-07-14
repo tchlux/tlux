@@ -408,6 +408,10 @@ known deterministic-first hits in roughly 56-90 ms; these are local reference
 measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
 model remains available for a lower warm model latency through `--model-first`.
 
+A fresh persistent JSONL run over 101 random FineWeb passages returned 101/101
+grounded responses with zero errors at 20.8/60.2 ms median/p95 per request;
+the process completed in 6.96 seconds including startup.
+
 A persistent model-first smoke gate through the active LM Studio server sent 12
 random repository passages through one warmed Gemma 4 process. The planner-shaped
 warmup returned grounded, exact-source evidence for every request with one

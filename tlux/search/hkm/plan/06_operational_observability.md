@@ -1,6 +1,6 @@
 # Operational Observability
 
-Status: next.
+Status: complete.
 
 Goal: make long builds and searches inspectable.
 
