@@ -138,6 +138,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Separate persistent startup from request latency with a one-time 15-second planner warmup budget; a live 20-request model-first run grounded 20/20 requests, with 17 model queries and 3 deterministic rescues.
 - [x] Expose the native planner/tool bridge through persistent `hkm-agent --native-planner-tool`; a live 10-sample gate emitted `search_index` on 10/10 requests with perfect evidence metrics.
 - [x] Reuse the bounded planner cache in native mode while retaining a fresh `search_index` completion; repeated native requests drop from two completions to one without skipping evidence validation.
+- [x] Re-measure the smaller Gemma 3 planner-only path: a warmed 50-request random-passage run grounded 50/50 requests with 48 model queries and 917/1,124 ms median/p95 latency; Gemma 4 remains the native-tool choice.
 - [x] Normalize whitespace in planner-cache keys so equivalent raw passages reuse one query without changing evidence validation.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
@@ -212,3 +213,4 @@ before relying on direct Python serving.
 - 2026-07-14: Verified the persistent native mode with five warmed requests: 5/5 model-emitted `search_index` calls, 5/5 grounded results, two completions per request, and 2,091 ms median agent latency.
 - 2026-07-14: Extended the planner cache to native mode. A repeated native request retained a fresh model tool call and grounding while dropping from 1,579 ms/two completions to 674 ms/one completion.
 - 2026-07-14: Normalized whitespace in planner-cache keys; equivalent raw passages now reuse one bounded query while search and evidence checks still receive the original text.
+- 2026-07-14: Re-measured warmed Gemma 3 as the lower-cost planner-only option: 50/50 grounded requests, 48 model-generated queries, 2 rescues, and 0.917/1.124 seconds median/p95 latency; native mode remains on Gemma 4.

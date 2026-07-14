@@ -415,6 +415,11 @@ model-first run grounded all 20 requests; 17 used model-generated queries and
 3 used deterministic rescue. Request latency was 1,067 ms median and 1,306 ms
 maximum after warmup.
 
+For the planner-only path, the smaller `google/gemma-3-4b` is a lower-cost
+option: a warmed 50-request random-passage run grounded 50/50 requests, used
+48 model-generated queries and 2 rescues, and measured 917/1,124 ms median/p95.
+Use Gemma 4 when native model-emitted tool calls are required.
+
 Pass `--native-planner-tool` with `--model-first` when the model itself must
 emit the `search_index` call. This explicit two-completion bridge is slower,
 but a live 10-sample Gemma 4 gate emitted the native tool call on 10/10
