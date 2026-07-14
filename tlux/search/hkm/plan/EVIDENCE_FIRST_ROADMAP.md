@@ -141,6 +141,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Re-measure the smaller Gemma 3 planner-only path: a warmed all-395-passage run grounded 395/395 requests with 390 model queries, 5 rescues, and 734/891 ms median/p95 latency under the 16-token, 1.0-second budget; Gemma 4 remains the native-tool choice.
 - [x] Normalize whitespace in planner-cache keys so equivalent raw passages reuse one query without changing evidence validation.
 - [x] Collapse multi-term lexical candidate scans into one HKM traversal and cache bounded source snapshots for previews; all 395 prose chunks retain 1.000 evidence recall/precision@1/MRR with zero model calls at 77/104 ms median/p95.
+- [x] Validate an independent corpus: a real-drama index of 64 FineWeb files (101 passages) retained 1.000 target/evidence recall, precision@1, and MRR both deterministically at 19/56 ms median/p95 and with 101/101 genuine Gemma 4 planner queries at 795/1,017 ms using a diagnostic five-second timeout.
 - [ ] Reduce the remaining tail latency. The deterministic path is now below 120 ms p95 on the prose corpus; the latest warmed 50-sample Gemma 4 planner gate measures 0.880/1.055 s median/p95, so local model generation remains the main tail.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -225,3 +226,4 @@ before relying on direct Python serving.
 - 2026-07-14: Extended the lower-cost Gemma 3 gate to all 395 prose chunks: 395/395 grounded with 390 model queries, 5 rescues, and 734/891 ms median/p95 latency.
 - 2026-07-14: Hardened readable-source evidence matching for punctuation/word-order-normalized requests while preserving partial-decoy rejection; the live persistent Gemma 3 smoke returned the correct source at rank 1 with a grounded JSONL response.
 - 2026-07-14: Cached bounded immutable source snapshots for search and evidence previews. The all-395 deterministic gate retained perfect evidence metrics while improving agent latency to 77/104 ms median/p95.
+- 2026-07-14: Added an independent FineWeb validation gate: deterministic and model-backed paths retained perfect grounded metrics across 64 source files; the model path generated 101/101 Gemma 4 queries at 795/1,017 ms median/p95 with a diagnostic five-second timeout.

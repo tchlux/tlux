@@ -325,6 +325,16 @@ model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
 at 90/466 ms median/p95; exact document identity remains limited by duplicate
 source content.
 
+The independent `data/fineweb_sample` corpus provides a second grounded gate
+across 64 source files and 101 indexed passages. Built with the real drama
+backend, its deterministic token tool path returned 1.000 target/evidence
+recall, precision@1, and MRR at 19/56 ms median/p95. A live all-101 Gemma 4
+planner-tool run generated a query for every passage and retained the same
+perfect metrics with zero recovery at 795/1,017 ms median/p95 using a
+diagnostic five-second planner timeout. The normal one-second budget remains
+the production fail-fast setting and uses the same grounded deterministic
+rescue when model generation misses the budget.
+
 The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
 repository run both returned 1.000 evidence recall/precision@1/MRR with zero
