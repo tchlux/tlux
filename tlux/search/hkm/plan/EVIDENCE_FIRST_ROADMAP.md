@@ -131,6 +131,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Add a bounded persistent planner-query cache for repeated raw passages; cache hits retain full HKM search and evidence validation while avoiding another LM Studio completion.
 - [x] Bound long planner prompts to 64 raw words while retaining the complete passage for fallback/evidence checks; a 2,048-word passage now remains exactly grounded instead of failing closed.
 - [x] Default the persistent `hkm-agent` CLI to deterministic-first routing and add an explicit `--model-first` override; the live 50-sample low-compute gate makes zero model calls at 252/326 ms median/p95.
+- [x] Bound the default LM Studio planner timeout to 1.5 seconds; a live 50-sample repository gate retained 1.000 evidence recall/precision@1/MRR with zero errors at 903/1,411 ms median/p95 model-first agent latency.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -195,3 +196,4 @@ before relying on direct Python serving.
 - 2026-07-14: Added a bounded 256-entry planner-query cache to the persistent agent. Repeated full raw passages stayed grounded while dropping from 578 ms on the first request to 35-39 ms on subsequent requests with no additional model calls.
 - 2026-07-14: Bounded LM Studio planner prompts to 64 words and added full-source validation for long passages spanning multiple HKM chunks. A 2,048-word raw passage now returns exact grounded evidence at 1,483 ms agent/422 ms search time after warmup.
 - 2026-07-14: Made the persistent `hkm-agent` CLI deterministic-first by default, with `--model-first` as the explicit LM Studio override, matching the measured zero-model-call low-compute gate.
+- 2026-07-14: Reduced the default LM Studio planner timeout from 2.0 to 1.5 seconds. A live 50-sample repository gate retained perfect evidence metrics at 0.903/1.411 seconds median/p95; timeout failures still use evidence-checked deterministic rescue.

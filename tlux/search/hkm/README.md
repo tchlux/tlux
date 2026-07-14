@@ -329,7 +329,7 @@ errors and one model call per sample. With the 8-token planner budget, median
 on the repository; wrapper recovery handled 22.0% and 17.3% of truncated
 planner responses respectively. Planner output rejects generic
 instruction-word overlap, accepts truncated JSON arguments, and falls back
-after a two-second LM Studio timeout. If every bounded search lane misses
+after the bounded 1.5-second LM Studio timeout. If every bounded search lane misses
 the raw evidence, the tool fails closed with an empty result rather than
 returning an ungrounded candidate.
 
@@ -395,6 +395,12 @@ warmup returned grounded, exact-source evidence for every request with one
 planner completion per request; median/p95 agent time was 536/1,013 ms and
 deterministic recovery handled 8.3% of responses. The p95 remains the main
 model-serving optimization target.
+
+The current 50-sample repository gate uses the 1.5-second timeout and still
+returns 1.000 evidence recall/precision@1/MRR with zero errors; observed
+model-first agent latency was 903/1,411 ms median/p95. The timeout is a bounded
+failure budget, not a quality shortcut: failed planner calls use the same
+evidence-checked deterministic rescue path.
 
 The persistent planner also keeps a bounded 256-entry cache keyed by the full
 raw passage. In a repeated-passage smoke test, the first grounded request took
