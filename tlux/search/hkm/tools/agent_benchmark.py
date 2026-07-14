@@ -40,6 +40,7 @@ TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
 LMSTUDIO_TIMEOUT = 1.5
+LMSTUDIO_WARMUP_TIMEOUT = 15.0
 QUERY_GUARD_WORDS = STOP_WORDS | {
     "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
     "on", "or", "the", "to", "was", "were", "will", "you", "your",

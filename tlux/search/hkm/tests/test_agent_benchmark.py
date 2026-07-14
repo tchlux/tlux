@@ -366,14 +366,12 @@ def test_persistent_local_agent_warmup_uses_planner(tmp_path: Path, monkeypatch)
         calls.append(text)
         return text
 
-    monkeypatch.setattr(
-        local_agent,
-        "LMStudioQueryGenerator",
-        lambda *args: SimpleNamespace(model=None, generate=generate),
-    )
+    client = SimpleNamespace(model=None, timeout=1.5, generate=generate)
+    monkeypatch.setattr(local_agent, "LMStudioQueryGenerator", lambda *args: client)
     agent = LocalSearchAgent(str(tmp_path / "index"))
     assert agent.warmup() is True
     assert calls == ["warmup evidence token"]
+    assert client.timeout == 1.5
 
 
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:

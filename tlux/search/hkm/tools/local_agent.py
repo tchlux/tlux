@@ -18,6 +18,7 @@ from ..search.searcher import Searcher
 from .agent_benchmark import (
     DeterministicToolAgent,
     LMSTUDIO_TIMEOUT,
+    LMSTUDIO_WARMUP_TIMEOUT,
     LMStudioPlannerToolAgent,
     LMStudioQueryGenerator,
 )
@@ -63,11 +64,17 @@ class LocalSearchAgent:
             search_ready = False
         if self.client is None:
             return search_ready
+        previous_timeout = getattr(self.client, "timeout", None)
         try:
+            if previous_timeout is not None:
+                self.client.timeout = max(float(previous_timeout), LMSTUDIO_WARMUP_TIMEOUT)
             self.client.generate("warmup evidence token")
             return search_ready
         except Exception:
             return False
+        finally:
+            if previous_timeout is not None:
+                self.client.timeout = previous_timeout
 
     # Run one raw passage through the grounded search tool.
     def run(self, excerpt: str, top_k: int = 10) -> Dict[str, Any]:

@@ -387,7 +387,8 @@ timings:
 
 The persistent CLI defaults to deterministic-first routing; pass `--model-first`
 when every passage must go through the LM Studio planner. Use `--warmup` to pay
-index and model initialization before the first request.
+index and model initialization before the first request. Warmup uses a one-time
+15-second planner budget, then restores the bounded 1.5-second request timeout.
 Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
 known deterministic-first hits in roughly 56-90 ms; these are local reference
 measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
@@ -408,6 +409,11 @@ asks for only 1-3 exact words, matching the output budget: this gate had zero
 planner recoveries, 36% bounded fallback, and 6% repeated-passage cache hits.
 The timeout is a bounded failure budget, not a quality shortcut: failed planner
 calls use the same evidence-checked deterministic rescue path.
+
+With the active LM Studio server, a warmed 20-request persistent Gemma 4
+model-first run grounded all 20 requests; 17 used model-generated queries and
+3 used deterministic rescue. Request latency was 1,067 ms median and 1,306 ms
+maximum after warmup.
 
 The persistent planner also keeps a bounded 256-entry cache keyed by the full
 raw passage. In a repeated-passage smoke test, the first grounded request took
