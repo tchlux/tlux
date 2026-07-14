@@ -394,6 +394,12 @@ recoverable; on this long-passage prompt the raw model tool-call rate was 0.0,
 while the wrapper recovery rate was 1.0. The separate structured planner above
 is the model-generated query path.
 
+The all-75 repository tool-only gate also returned 1.000 evidence recall,
+precision@1, and MRR with zero errors; raw model tool calls were 1.3% and
+deterministic recovery handled 98.7%. Exact target-document recall/precision@1
+were 0.960/0.787 because duplicate code and metadata files are indistinguishable
+from the sampled text alone.
+
 The benchmark accepts any OpenAI-compatible local endpoint. When the LM Studio
 desktop server is unavailable, its installed llama.cpp backend can serve the
 same GGUF directly:
