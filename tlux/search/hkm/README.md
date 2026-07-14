@@ -335,6 +335,15 @@ diagnostic five-second planner timeout. The normal one-second budget remains
 the production fail-fast setting and uses the same grounded deterministic
 rescue when model generation misses the budget.
 
+The larger `data/fineweb_profile` corpus is a 512-file, 785-passage gate over
+about 227,000 words of heterogeneous web text. A real-drama index audited
+cleanly at about 1.2 GiB. The all-512 deterministic-first token-tool run
+returned 1.000 target/evidence recall, precision@1, and MRR with zero errors,
+0.2% bounded fallback, and 157/494 ms median/p95 agent latency. This is the
+strongest current local quality gate, but it remains a small corpus; repeat the
+model-first gate and larger-scale cost tests before making a B2B performance
+claim.
+
 The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
 repository run both returned 1.000 evidence recall/precision@1/MRR with zero
@@ -418,6 +427,28 @@ warmup returned grounded, exact-source evidence for every request with one
 planner completion per request; median/p95 agent time was 536/1,013 ms and
 deterministic recovery handled 8.3% of responses. The p95 remains the main
 model-serving optimization target.
+
+Use `--language-query` for remembered, conversational requests rather than raw
+passages. The agent searches the original request, inspects bounded snippets,
+asks the local model for up to four paraphrase/antipattern lanes, then searches
+those alternatives in a second round. Natural-language lanes use semantic
+search even when `--tool-mode hybrid` is selected; the first lane is anchored,
+and antipatterns are soft penalties so a useful hit is never hard-filtered:
+
+    printf '%s\n' \
+      '{"text":"A scenario where something funny is said"}' \
+      '{"text":"Crowds gathered to watch in horror"}' \
+      '{"text":"A person climbs a structure at night while people gather below, but I cannot remember who the person is"}' \
+    | bin/hkm-agent data/fourth_wing_hkm_index --language-query \
+        --base-url http://192.168.8.222:1234/v1 --model google/gemma-3-4b \
+        --model-first --tool-mode semantic --top-k 5 --warmup
+
+Language responses add `agentic`, `queries`, `antipatterns`, and `rounds` to
+the normal JSONL contract. `grounded` means that the index returned evidence;
+for vague requests, review the returned previews and query trace rather than
+treating non-empty output as a perfect relevance guarantee. The reviewed
+challenge set and concept-group gate live in
+`plan/benchmark_language_queries.md`.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055

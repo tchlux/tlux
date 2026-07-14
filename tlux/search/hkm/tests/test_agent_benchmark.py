@@ -11,6 +11,7 @@ import tlux.search.hkm.tools.local_agent as local_agent
 from tlux.search.hkm import build_search_index_from_documents
 from tlux.search.hkm.tools.agent_benchmark import (
     DeterministicToolAgent,
+    LanguageSearchAgent,
     LMStudioQueryGenerator,
     LMStudioPlannerToolAgent,
     LMStudioToolAgent,
@@ -20,6 +21,8 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _grounded_quality_failed,
     _parse_tool_query,
     _keyword_query,
+    _language_query_variants,
+    _parse_language_plan,
     _planner_excerpt,
     _rerank_with_evidence,
     evaluate_agent,
@@ -97,11 +100,33 @@ class NativePlannerClient(StubQueryGenerator):
         }
 
 
+class FakeLanguageClient:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def plan_language_query(self, query: str, snippets: str):
+        self.calls.append((query, snippets))
+        return {"queries": ["nighttime climbing gathered crowd horror"], "exclude_terms": ["wooden"]}
+
+
 def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('{"query": "dragon wardstone"}') == "dragon wardstone"
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
     assert parse_query('{"query":"truncated evidence') == "truncated evidence"
     assert _keyword_query("!") == "!"
+
+
+def test_language_plan_bounds_variants_and_exclusions() -> None:
+    plan = _parse_language_plan(
+        '{"queries":["one two", "three four five"], "exclude_terms":["wooden ladder"]}'
+    )
+    assert plan == {
+        "queries": ["one two", "three four five"],
+        "exclude_terms": ["wooden ladder"],
+    }
+    assert _language_query_variants("A large wall stands over us while crowds watch in horror")
 
 
 def test_planner_excerpt_bounds_long_raw_input() -> None:
@@ -249,6 +274,50 @@ def test_lmstudio_reconnects_once_after_dropped_socket(monkeypatch) -> None:
     assert client._request("models") == {"data": []}
     assert dropped.closed is True
     assert working.requests == 1
+
+
+def test_lmstudio_reconnects_after_empty_response(monkeypatch) -> None:
+    class EmptyConnection:
+        sock = None
+
+        def __init__(self) -> None:
+            self.timeout = None
+            self.closed = False
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return SimpleNamespace(
+                status=200,
+                reason="OK",
+                headers={},
+                read=lambda: b"",
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    class WorkingConnection(EmptyConnection):
+        def getresponse(self):
+            return SimpleNamespace(
+                status=200,
+                reason="OK",
+                headers={},
+                read=lambda: b'{"data": []}',
+            )
+
+    client = LMStudioQueryGenerator("http://localhost:1234/v1", model="fake")
+    empty = EmptyConnection()
+    working = WorkingConnection()
+    connections = iter((empty, working))
+    def next_connection():
+        client._connection = next(connections)
+        return client._connection
+
+    monkeypatch.setattr(client, "_http_connection", next_connection)
+    assert client._request("models") == {"data": []}
+    assert empty.closed is True
 
 
 def test_stub_agent_recovers_sampled_documents(tmp_path: Path, monkeypatch) -> None:
@@ -450,6 +519,31 @@ def test_persistent_local_agent_returns_grounded_jsonl(tmp_path: Path, monkeypat
     assert response["docs"][0]["source_path"] == "a.txt"
 
 
+def test_persistent_local_agent_supports_language_queries(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text(
+        "At night a large wall stands over crowds watching in horror.",
+        encoding="utf-8",
+    )
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "At night a large wall stands over crowds watching in horror.", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    agent = LocalSearchAgent(
+        str(tmp_path / "index"),
+        runner=LanguageSearchAgent(mode="hybrid"),
+        language_query=True,
+    )
+    output = StringIO()
+    process_lines(agent, ['{"text":"A large structure towers over a horrified crowd at night"}\n'], output, top_k=1)
+    response = json.loads(output.getvalue())
+    assert response["agentic"] is True
+    assert response["rounds"] == 1
+    assert response["docs"][0]["source_path"] == "a.txt"
+
+
 def test_persistent_local_agent_warmup_uses_planner(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     (tmp_path / "index").mkdir()
@@ -538,6 +632,66 @@ def test_tool_deterministic_first_skips_model_on_exact_hit(tmp_path: Path, monke
     assert report["model_call_rate"] == 0.0
     assert report["completion_calls_per_sample"] == 0.0
     assert report["grounded_source_match_rate"] == 1.0
+
+
+def test_language_agent_handles_conditional_partial_memory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [
+            {
+                "text": "At night Xaden climbs the side of a large stone structure while crowds gather below to watch in horror.",
+                "metadata": {"source_path": "target.txt"},
+            },
+            {
+                "text": "A quiet wooden bridge spans a stream.",
+                "metadata": {"source_path": "decoy.txt"},
+            },
+        ],
+        max_k=1,
+    )
+    searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
+    query = "The person is forgotten, but at night something climbs a large structure while crowds watch in horror"
+    run = LanguageSearchAgent(mode="hybrid").run(query, searcher, top_k=1)
+    assert run["result"].docs[0].source_path == "target.txt"
+    assert len(run["queries"]) >= 2
+
+
+def test_language_agent_refines_after_first_search(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "nighttime climbing gathered crowd horror", "metadata": {"source_path": "target.txt"}}],
+        max_k=1,
+    )
+    searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
+    client = FakeLanguageClient()
+    run = LanguageSearchAgent(client, mode="hybrid").run(
+        "A scenario where a crowd watches in horror", searcher, top_k=1
+    )
+    assert len(client.calls) == 1
+    assert run["rounds"] == 2
+    assert run["antipatterns"]
+    assert "nighttime climbing gathered crowd horror" in run["queries"]
+    assert run["result"].docs[0].source_path == "target.txt"
+
+
+def test_deterministic_tool_agent_fails_closed_for_unindexed_evidence(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    searcher = benchmark.Searcher.from_index_root(str(tmp_path / "index"))
+    run = DeterministicToolAgent(mode="token").run(
+        "unindexed glacier observatory evidence", searcher, top_k=1
+    )
+    assert run["result"].docs == []
 
 
 def test_high_score_without_evidence_still_escalates(monkeypatch) -> None:

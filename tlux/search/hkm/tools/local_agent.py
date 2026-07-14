@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, TextIO
 from ..search.searcher import Searcher
 from .agent_benchmark import (
     DeterministicToolAgent,
+    LanguageSearchAgent,
     LMSTUDIO_TIMEOUT,
     LMSTUDIO_WARMUP_TIMEOUT,
     LMStudioPlannerToolAgent,
@@ -46,15 +47,21 @@ class LocalSearchAgent:
         deterministic_first: bool = False,
         runner: Any | None = None,
         native_tool: bool = False,
+        language_query: bool = False,
     ) -> None:
         self.searcher = Searcher.from_index_root(index_root)
+        self.language_query = language_query
         self.deterministic = DeterministicToolAgent(mode) if deterministic_first else None
         if runner is not None:
             self.client = None
             self.runner = runner
         else:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
-            self.runner = LMStudioPlannerToolAgent(self.client, mode, native_tool)
+            self.runner = (
+                LanguageSearchAgent(self.client, mode)
+                if language_query
+                else LMStudioPlannerToolAgent(self.client, mode, native_tool)
+            )
 
     # Warm HKM search and the structured planner with representative requests.
     def warmup(self) -> bool:
@@ -69,7 +76,10 @@ class LocalSearchAgent:
         try:
             if previous_timeout is not None:
                 self.client.timeout = max(float(previous_timeout), LMSTUDIO_WARMUP_TIMEOUT)
-            self.client.generate("warmup evidence token")
+            if self.language_query:
+                self.client.plan_language_query("warmup language query", "[]")
+            else:
+                self.client.generate("warmup evidence token")
             return search_ready
         except Exception:
             return False
@@ -83,6 +93,8 @@ class LocalSearchAgent:
             raise ValueError("text must not be empty")
         if top_k < 1:
             raise ValueError("top_k must be positive")
+        if self.language_query:
+            return self._serialize(self.runner.run(excerpt, self.searcher, top_k))
         if self.deterministic is not None:
             cheap = self.deterministic.run(excerpt, self.searcher, top_k)
             if cheap["result"].docs:
@@ -92,7 +104,7 @@ class LocalSearchAgent:
     # Convert the internal result to the stable JSONL response contract.
     def _serialize(self, run: Dict[str, Any]) -> Dict[str, Any]:
         result = run["result"]
-        return {
+        payload = {
             "query": run.get("query", ""),
             "grounded": bool(result.docs),
             "docs": [_hit_payload(hit) for hit in result.docs],
@@ -104,6 +116,14 @@ class LocalSearchAgent:
             "search_ms": float(run.get("search_ms", 0.0)),
             "agent_ms": float(run.get("agent_ms", 0.0)),
         }
+        if self.language_query:
+            payload.update({
+                "agentic": True,
+                "queries": run.get("queries", []),
+                "antipatterns": run.get("antipatterns", []),
+                "rounds": int(run.get("rounds", 0)),
+            })
+        return payload
 
 
 # Process JSONL requests until standard input closes.
@@ -128,23 +148,26 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
-    parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="token")
+    parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default=None)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--native-planner-tool", action="store_true", help="Require the model to emit search_index after planning")
+    parser.add_argument("--language-query", action="store_true", help="Iteratively search natural-language queries and paraphrases")
     routing = parser.add_mutually_exclusive_group()
     routing.add_argument("--deterministic-first", dest="deterministic_first", action="store_true")
     routing.add_argument("--model-first", dest="deterministic_first", action="store_false")
     parser.set_defaults(deterministic_first=True)
     parser.add_argument("--warmup", action="store_true")
     args = parser.parse_args()
+    mode = args.tool_mode or ("semantic" if args.language_query else "token")
     agent = LocalSearchAgent(
         args.index_root,
         args.base_url,
         args.model,
         args.timeout,
-        args.tool_mode,
+        mode,
         args.deterministic_first,
         native_tool=args.native_planner_tool,
+        language_query=args.language_query,
     )
     if args.warmup:
         agent.warmup()

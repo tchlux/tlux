@@ -44,6 +44,9 @@ TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
 LMSTUDIO_TIMEOUT = 1.0
 LMSTUDIO_WARMUP_TIMEOUT = 15.0
+LANGUAGE_QUERY_MAX_WORDS = 24
+LANGUAGE_QUERY_MAX_VARIANTS = 4
+LANGUAGE_QUERY_MAX_ROUNDS = 2
 QUERY_GUARD_WORDS = STOP_WORDS | {
     "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
     "on", "or", "the", "to", "was", "were", "will", "you", "your",
@@ -57,6 +60,21 @@ QUERY_RESPONSE_FORMAT = {
             "type": "object",
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
+        },
+    },
+}
+LANGUAGE_PLAN_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "language_search_plan",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "queries": {"type": "array", "items": {"type": "string"}},
+                "exclude_terms": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["queries", "exclude_terms"],
         },
     },
 }
@@ -134,6 +152,79 @@ def _keyword_query(excerpt: str, limit: int = 8) -> str:
     )
     selected = ranked[:limit] or list(enumerate(words[:limit]))
     return " ".join(word for _, word in selected) or _phrase_query(excerpt, limit)
+
+
+# Return short language-query variants while preserving content words.
+#
+# Arguments:
+#   query (str): Natural-language user query.
+#
+# Returns:
+#   (list[str]): Bounded original, clause, and keyword variants.
+#
+def _language_query_variants(query: str) -> List[str]:
+    normalized = " ".join(query.split())
+    if not normalized:
+        return []
+    clauses = [part.strip() for part in re.split(
+        r"\b(?:and|but|while|when|where|because|although|though|with|without)\b|[,;:]",
+        normalized,
+        flags=re.IGNORECASE,
+    ) if part.strip()]
+    variants = [normalized, _keyword_query(normalized, limit=12)]
+    variants.extend(clauses)
+    return list(dict.fromkeys(
+        " ".join(value.split()[:LANGUAGE_QUERY_MAX_WORDS])
+        for value in variants
+        if value.strip()
+    ))[:LANGUAGE_QUERY_MAX_VARIANTS]
+
+
+# Return simple lexical forms for language-query coverage and exclusions.
+def _language_word_forms(text: str) -> set[str]:
+    terms = set(re.findall(r"[A-Za-z0-9]+", text.lower()))
+    forms = set(terms)
+    for term in terms:
+        if len(term) > 5:
+            for suffix in ("ing", "ed", "es", "s"):
+                if term.endswith(suffix) and len(term) - len(suffix) >= 4:
+                    forms.add(term[:-len(suffix)])
+    return forms
+
+
+# Decode a bounded language-query plan from a model response.
+#
+# Arguments:
+#   response (str): Model response containing JSON.
+#
+# Returns:
+#   (dict[str, list[str]]): Queries and soft exclusion terms.
+#
+def _parse_language_plan(response: str) -> Dict[str, List[str]]:
+    text = response.strip().replace("```json", "").replace("```", "").strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        value = json.loads(match.group(0)) if match else {}
+    if not isinstance(value, dict):
+        raise ValueError("language planner returned a non-object")
+    queries = [
+        " ".join(str(item).split()[:LANGUAGE_QUERY_MAX_WORDS])
+        for item in value.get("queries", [])
+        if str(item).strip()
+    ]
+    exclude_terms = [
+        " ".join(str(item).split()[:3])
+        for item in value.get("exclude_terms", [])
+        if str(item).strip()
+    ]
+    if not queries:
+        raise ValueError("language planner returned no queries")
+    return {
+        "queries": list(dict.fromkeys(queries))[:LANGUAGE_QUERY_MAX_VARIANTS],
+        "exclude_terms": list(dict.fromkeys(exclude_terms))[:LANGUAGE_QUERY_MAX_VARIANTS],
+    }
 
 
 # Parse a model response into one bounded search query.
@@ -232,6 +323,10 @@ class LMStudioQueryGenerator:
                 if not removed:
                     raise
                 return self._request(path, retry)
+            except json.JSONDecodeError:
+                self._close_http_connection()
+                if attempt:
+                    raise
             except (TimeoutError, socket.timeout):
                 self._close_http_connection()
                 raise
@@ -278,6 +373,40 @@ class LMStudioQueryGenerator:
         if not query_terms.intersection(evidence_terms):
             raise ValueError("LM Studio query did not quote the supplied evidence")
         return query
+
+    # Propose paraphrases and soft exclusions after inspecting search results.
+    #
+    # Arguments:
+    #   query (str): Natural-language user query.
+    #   snippets (str): Bounded first-pass result snippets.
+    #
+    # Returns:
+    #   (dict[str, list[str]]): Alternative queries and soft exclusions.
+    #
+    def plan_language_query(self, query: str, snippets: str = "") -> Dict[str, List[str]]:
+        prompt = (
+            "Plan a grounded search. Return only {\"queries\":[...],\"exclude_terms\":[...]}. "
+            "Rewrite the request in several short ways, preserving every condition. "
+            "A subject or object may be unknown; do not invent one. Exclusions are soft "
+            "antipatterns seen in the results, not facts. Use at most four queries and four "
+            "short exclusion terms.\nRequest:\n"
+            f"{_planner_excerpt(query, 48)}\nInitial results:\n{_planner_excerpt(snippets, 160)}"
+        )
+        response = self._request("chat/completions", {
+            "model": self._model_name(),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": 64,
+            "reasoning_effort": "none",
+            "response_format": LANGUAGE_PLAN_RESPONSE_FORMAT,
+            "stream": False,
+        })
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("LM Studio returned no language-plan choices")
+        message = choices[0].get("message", {})
+        content = message.get("content") or message.get("reasoning_content", "")
+        return _parse_language_plan(str(content))
 
 
 # Deterministic planner used for offline tests and endpoint recovery.
@@ -738,6 +867,159 @@ class DeterministicToolAgent:
             "search_ms": search_ms,
             "fallback_calls": fallback_calls,
             "expanded_docs": len(result.docs),
+            "agent_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
+
+# Return recurring non-query terms from first-pass snippets as soft antipatterns.
+#
+# Arguments:
+#   query (str): Original user query.
+#   hits (list[Any]): First-pass search hits.
+#
+# Returns:
+#   (list[str]): Bounded terms that may describe a misleading result cluster.
+#
+def _language_antipatterns(query: str, hits: List[Any]) -> List[str]:
+    query_terms = _language_word_forms(query)
+    counts: Dict[str, int] = {}
+    for hit in hits[:6]:
+        text = hit.preview_text
+        terms = set(re.findall(r"[A-Za-z0-9][A-Za-z0-9'-]{4,}", text.lower()))
+        for term in terms:
+            if term.count("-") >= 2:
+                continue
+            if not _language_word_forms(term).intersection(query_terms) and term not in STOP_WORDS:
+                counts[term] = counts.get(term, 0) + 1
+    return [term for term, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])) if count > 1][:LANGUAGE_QUERY_MAX_VARIANTS]
+
+
+# Merge language-query result lanes and apply soft antipattern penalties.
+#
+# Arguments:
+#   results (list[Any]): Search results from query variants.
+#   query (str): Original natural-language query.
+#   exclude_terms (list[str]): Terms to penalize, never hard-filter.
+#   top_k (int): Number of result documents to keep.
+#
+# Returns:
+#   (Any): A SearchResult-like object with agent-ranked documents.
+#
+def _merge_language_results(
+    results: List[Any],
+    query: str,
+    exclude_terms: List[str],
+    top_k: int,
+) -> Any:
+    base = results[0]
+    grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool]] = {}
+    query_terms = _language_word_forms(query)
+    exclusions = set(term.lower() for term in exclude_terms)
+    for result in results:
+        for hit in result.docs:
+            key = (int(hit.doc_id), tuple(hit.span))
+            if key not in grouped:
+                grouped[key] = (hit, 0, result is results[0])
+            best_hit, lanes, anchor = grouped[key]
+            if float(hit.score) > float(best_hit.score):
+                best_hit = hit
+            grouped[key] = (best_hit, lanes + 1, anchor or result is results[0])
+
+    def rank_key(item: tuple[Any, int, bool]) -> tuple[float, float, int, str]:
+        hit, lanes, anchor = item
+        text = f"{hit.preview_text} {getattr(hit.document, 'title', '')}".lower()
+        terms = _language_word_forms(text)
+        coverage = len(query_terms.intersection(terms)) / float(max(1, len(query_terms)))
+        penalty = 0 if anchor else sum(1 for term in exclusions if term in text)
+        score = float(hit.score) + 0.04 * anchor + 0.01 * lanes + 0.01 * coverage - 0.03 * penalty
+        return (-score, -coverage, int(hit.doc_id), hit.source_path)
+
+    ranked = sorted(grouped.values(), key=rank_key)
+    base.docs = [hit for hit, _, _ in ranked[:top_k]]
+    base.count = len(ranked)
+    base.limit = top_k
+    base.next_offset = top_k if len(ranked) > top_k else None
+    return base
+
+
+# Search natural-language requests through iterative query and antipattern lanes.
+class LanguageSearchAgent:
+    name = "language_search_agent"
+
+    def __init__(
+        self,
+        client: LMStudioQueryGenerator | None = None,
+        mode: str = "hybrid",
+        max_rounds: int = LANGUAGE_QUERY_MAX_ROUNDS,
+    ) -> None:
+        if mode not in {"hybrid", "semantic", "token"}:
+            raise ValueError("mode must be hybrid, semantic, or token")
+        if max_rounds < 1 or max_rounds > LANGUAGE_QUERY_MAX_ROUNDS:
+            raise ValueError("max_rounds must be in [1, 2]")
+        self.client = client
+        self.model = client.model if client is not None else None
+        self.mode = mode
+        self.max_rounds = max_rounds
+
+    # Run bounded first-pass, refinement, and alternative-query searches.
+    def run(self, query: str, searcher: Searcher, top_k: int = 10) -> Dict[str, Any]:
+        if not query.strip():
+            raise ValueError("query must not be empty")
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
+        started = time.perf_counter()
+        base_variants = _language_query_variants(query)
+        round_queries = base_variants[:1] if self.client is not None else base_variants
+        exclude_terms: List[str] = []
+        trace: List[Dict[str, Any]] = []
+        results: List[Any] = []
+        search_ms = 0.0
+        recovered = False
+        completion_calls = 0
+        for round_index in range(self.max_rounds):
+            for variant in list(dict.fromkeys(round_queries))[:LANGUAGE_QUERY_MAX_VARIANTS]:
+                variant_mode = "semantic" if self.mode == "hybrid" else self.mode
+                result, elapsed = _search(searcher, variant, top_k * 3, 0, variant_mode)
+                results.append(result)
+                search_ms += elapsed
+                trace.append({
+                    "round": round_index,
+                    "query": variant,
+                    "mode": variant_mode,
+                    "hits": len(result.docs),
+                })
+            merged = _merge_language_results(results, query, exclude_terms, top_k)
+            seen_exclusions = _language_antipatterns(query, merged.docs)
+            exclude_terms = list(dict.fromkeys(exclude_terms + seen_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
+            if self.client is None or round_index + 1 >= self.max_rounds:
+                break
+            snippets = json.dumps(_tool_result_payload(merged, min(8, len(merged.docs))))
+            completion_calls += 1
+            try:
+                plan = self.client.plan_language_query(query, snippets)
+                query_forms = _language_word_forms(query)
+                safe_exclusions = [
+                    term for term in plan["exclude_terms"]
+                    if not _language_word_forms(term).intersection(query_forms)
+                ]
+                exclude_terms = list(dict.fromkeys(exclude_terms + safe_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
+                round_queries = list(dict.fromkeys(plan["queries"] + base_variants[1:]))[:LANGUAGE_QUERY_MAX_VARIANTS]
+            except (OSError, RuntimeError, ValueError, urllib.error.URLError):
+                recovered = True
+                round_queries = base_variants[1:]
+                if not round_queries:
+                    break
+        final = _merge_language_results(results, query, exclude_terms, top_k)
+        return {
+            "tool_called": True,
+            "query": query,
+            "queries": [row["query"] for row in trace],
+            "antipatterns": exclude_terms,
+            "rounds": max((row["round"] for row in trace), default=-1) + 1,
+            "recovered": recovered,
+            "completion_calls": completion_calls,
+            "result": final,
+            "search_ms": search_ms,
             "agent_ms": (time.perf_counter() - started) * 1000.0,
         }
 
