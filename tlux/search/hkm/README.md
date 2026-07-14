@@ -330,6 +330,10 @@ median agent latency was 1.70 s (p95 2.90 s). The tool query response is
 bounded to 32 output tokens, and this expensive model lane should be reserved
 for passages that fail the cheap first pass.
 
+The captured 50-sample Gemma query set that exposed the fallback bug now replays
+through the corrected tool path at 1.000 content-evidence recall and
+precision@1 with zero errors; this replay excludes new model-generation time.
+
 Add `--deterministic-first` to skip Gemma when a cheap lexical result already
 contains the raw passage. On the same 50-sample gates it reduced model calls
 to 0% on both prose and repository after evidence-aware reranking, with
