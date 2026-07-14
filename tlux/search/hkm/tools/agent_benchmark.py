@@ -767,6 +767,11 @@ def _evidence_coverage(
     normalized_text = " ".join(text.split())
     if normalized_excerpt and normalized_excerpt in normalized_text:
         return 1.0
+    source_path = getattr(getattr(hit, "document", None), "source_path", "")
+    if source_path and searcher is not None:
+        source = Path(searcher.source_root) / source_path
+        if source.exists():
+            return 0.0
     terms = set(re.findall(r"[A-Za-z0-9]+", normalized_excerpt))
     if len(terms) < 2:
         return 0.0
@@ -802,7 +807,8 @@ def _rerank_with_evidence(
             f"{hit.preview_text} {getattr(hit.document, 'document_preview', '')}".lower()
         )
         overlap = len(terms.intersection(re.findall(r"[A-Za-z0-9]+", text))) / len(terms)
-        return (-overlap, -float(hit.score), -float(getattr(hit, "token_score", 0.0)), int(hit.doc_id))
+        evidence = _evidence_coverage(hit, excerpt, searcher, source_cache) if searcher is not None else overlap
+        return (-evidence, -overlap, -float(hit.score), int(hit.doc_id))
 
     result.docs = sorted(result.docs, key=rank_key)
     return result

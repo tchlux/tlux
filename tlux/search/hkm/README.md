@@ -316,11 +316,10 @@ Gemma 4's native tool template can truncate on long raw passages. Use
 `--planner-tool` to have the model emit a structured query first, then execute
 `search_index` once in the wrapper; combine it with `--deterministic-first` for
 the low-compute path. Across all 395 prose passages this path returned rank-1
-evidence with 1.000 recall/precision@1/MRR at 256/361 ms median/p95 and zero
+evidence with 1.000 recall/precision@1/MRR at 255/360 ms median/p95 and zero
 model calls. The all-75 repository gate likewise kept 1.000 evidence metrics
-at 89/382 ms median/p95; exact document identity remains limited by duplicate
-source content. The current all-395 prose gate is 251/354 ms median/p95 with
-the same perfect evidence metrics.
+at 90/466 ms median/p95; exact document identity remains limited by duplicate
+source content.
 
 The model-first planner-tool path is the correctness gate when a real model
 call is required: a post-parser 50-sample prose run and a 75-sample mixed
@@ -333,6 +332,20 @@ instruction-word overlap, accepts truncated JSON arguments, and falls back
 after a two-second LM Studio timeout. If every bounded search lane misses
 the raw evidence, the tool fails closed with an empty result rather than
 returning an ungrounded candidate.
+
+Evidence ranking now requires the normalized raw passage in a readable indexed
+source before accepting a hit; generic term overlap is used only when the
+source snapshot is unavailable. With this stricter precision gate, deterministic
+token retrieval still returns 1.000 evidence recall/precision@1/MRR across all
+395 prose passages (255/360 ms median/p95) and all 75 repository passages
+(90/466 ms median/p95). Duplicate repository files can still lower exact
+document identity without lowering content relevance.
+
+The current 50-sample live Gemma 4 planner-to-tool gate on random prose ended
+at 1.000 target and evidence recall/precision@1/MRR with zero errors and one
+planner completion per request. The structured path recovered 24% of omitted
+model tool calls and used bounded fallback lanes on 18% of samples; median/p95
+agent latency was 609/1,179 ms and search latency was 208/553 ms.
 
 For lower warm latency, pass `--model google/gemma-3-4b` with
 `--planner-tool`; this smaller installed model is not tool-trained, but its
@@ -370,6 +383,13 @@ measurements, not a service-level guarantee. Omit
 `--deterministic-first` to use the structured LM Studio planner for every
 passage, or use the smaller `google/gemma-3-4b` model for a lower warm model
 latency.
+
+A persistent model-first smoke gate through the active LM Studio server sent 12
+random repository passages through one warmed Gemma 4 process. The planner-shaped
+warmup returned grounded, exact-source evidence for every request with one
+planner completion per request; median/p95 agent time was 536/1,013 ms and
+deterministic recovery handled 8.3% of responses. The p95 remains the main
+model-serving optimization target.
 
 For the lowest result latency, add `--tool-only --tool-mode token`. This stops
 after one model function call and returns the grounded HKM result directly,

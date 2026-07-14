@@ -127,12 +127,14 @@ long-running executor sample remains an environment-level verification item.
 - [x] Verify the model-first planner-tool gate after parser and timeout hardening: 50 random prose passages and 75 mixed repository passages each retained 1.000 evidence recall/precision@1/MRR with zero errors and one model call per sample. With an 8-token planner budget, median/p95 agent latency was 0.953/1.281 s on prose and 0.958/1.368 s on the repository; exact repository identity remains limited by duplicate content.
 - [x] Add the compact native planner/tool bridge: a structured query is followed by a short native `search_index` call. Live Gemma 4 gates made native calls on 98.0% of 50 prose samples and 90.7% of 75 repository samples; wrapper tool calls and evidence recall/precision@1/MRR remained 1.000 with zero errors.
 - [x] Add `hkm-agent`, a persistent JSONL local-agent entry point that reuses one HKM searcher and LM Studio client; warm deterministic-first smoke requests complete in roughly 56-90 ms after startup.
-- [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 251/354 ms median/p95 on all 395 prose chunks with perfect evidence quality; model-first planner-tool calls remain about 0.95/1.37 s median/p95, so local model generation is still the dominant cost.
+- [x] Tighten evidence acceptance to require the normalized raw passage in readable sources, then rank verified evidence before lexical score. All 395 prose and all 75 repository passages retain 1.000 evidence recall/precision@1/MRR; duplicate repository content still limits exact document identity.
+- [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
-Evidence relevance is content-based: a returned source must contain the sampled
-passage after whitespace normalization or at least 90% of its distinct terms.
-This separates a genuinely relevant duplicate file from an exact document-id
-miss and keeps the target-id audit visible.
+Evidence relevance is content-based: when a readable source snapshot exists, a
+returned source must contain the sampled passage after whitespace
+normalization. If the source snapshot is unavailable, the audit accepts at
+least 90% of distinct terms. This separates a genuinely relevant duplicate
+file from an exact document-id miss and keeps the target-id audit visible.
 
 The LM Studio application and multiple GGUF models are installed locally. Its
 bundled llama.cpp 2.24 backend serves the Gemma 4 E4B GGUF with reasoning
@@ -183,3 +185,6 @@ before relying on direct Python serving.
 - 2026-07-14: Re-measured deterministic-first after rescue short-circuiting: all 395 prose and all 75 repository passages retain perfect evidence quality at 0.251/0.354 s and 0.089/0.382 s median/p95 respectively, with zero model calls.
 - 2026-07-14: Reduced the local LM Studio default timeout to two seconds. A warm 50-sample Gemma 4 planner gate retained 1.000 evidence recall/precision@1/MRR at 0.936/1.277 s median/p95; unloaded-model requests now fail fast into deterministic recovery instead of extending the result tail.
 - 2026-07-14: Added the persistent `hkm-agent` JSONL CLI. It keeps the index and LM Studio client alive, supports startup warmup and deterministic-first routing, and returned grounded results in a local smoke test at roughly 56-90 ms per warmed request.
+- 2026-07-14: Rejected generic term-overlap false positives when a readable source snapshot exists and ranked verified raw-passage evidence first. All 395 prose and 75 repository deterministic gates retain 1.000 evidence recall/precision@1/MRR; a persistent 12-sample Gemma 4 model-first gate also returned 1.000 exact-source evidence with 0.536/1.013 s median/p95 latency.
+- 2026-07-14: Changed persistent-agent warmup from a generic one-token completion to a representative structured planner request. The same 12-sample Gemma 4 process retained 1.000 grounded/exact evidence while reducing recovery to 8.3% and roughly halving the observed request tail.
+- 2026-07-14: Re-ran the full live Gemma 4 planner-to-tool gate after the precision fix on 50 random prose passages. Final target/evidence recall/precision@1/MRR remained 1.000 with zero errors and one planner completion per sample; recovery was 24%, fallback was 18%, and median/p95 agent latency was 609/1,179 ms.

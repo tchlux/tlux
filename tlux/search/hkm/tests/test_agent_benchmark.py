@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import tlux.search.hkm.tools.agent_benchmark as benchmark
+import tlux.search.hkm.tools.local_agent as local_agent
 
 from tlux.search.hkm import build_search_index_from_documents
 from tlux.search.hkm.tools.agent_benchmark import (
@@ -14,8 +15,10 @@ from tlux.search.hkm.tools.agent_benchmark import (
     LMStudioPlannerToolAgent,
     LMStudioToolAgent,
     StubQueryGenerator,
+    _evidence_coverage,
     _parse_tool_query,
     _keyword_query,
+    _rerank_with_evidence,
     evaluate_agent,
     evaluate_tool_agent,
     parse_query,
@@ -304,6 +307,31 @@ def test_persistent_local_agent_returns_grounded_jsonl(tmp_path: Path, monkeypat
     assert response["docs"][0]["source_path"] == "a.txt"
 
 
+def test_persistent_local_agent_warmup_uses_planner(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    calls: list[str] = []
+
+    def generate(text: str) -> str:
+        calls.append(text)
+        return text
+
+    monkeypatch.setattr(
+        local_agent,
+        "LMStudioQueryGenerator",
+        lambda *args: SimpleNamespace(model=None, generate=generate),
+    )
+    agent = LocalSearchAgent(str(tmp_path / "index"))
+    assert agent.warmup() is True
+    assert calls == ["warmup evidence token"]
+
+
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
     (tmp_path / "index").mkdir()
@@ -376,3 +404,26 @@ def test_adaptive_tool_search_fails_closed_without_evidence(monkeypatch) -> None
     )
     assert result.docs == []
     assert result.count == 0
+
+
+def test_evidence_guard_rejects_generic_overlap_when_source_exists(tmp_path: Path) -> None:
+    target = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    (tmp_path / "target.txt").write_text(target, encoding="utf-8")
+    (tmp_path / "decoy.txt").write_text(
+        "alpha beta gamma delta epsilon zeta eta theta iota lambda", encoding="utf-8"
+    )
+    searcher = SimpleNamespace(source_root=str(tmp_path))
+
+    def hit(path: str, score: float = 0.0) -> SimpleNamespace:
+        return SimpleNamespace(
+            preview_text="",
+            score=score,
+            token_score=score,
+            doc_id=1 if path == "target.txt" else 2,
+            document=SimpleNamespace(source_path=path, byte_start=0, byte_end=0),
+        )
+    assert _evidence_coverage(hit("target.txt"), target, searcher) == 1.0
+    assert _evidence_coverage(hit("decoy.txt"), target, searcher) == 0.0
+    result = SimpleNamespace(docs=[hit("decoy.txt", 1.0), hit("target.txt", 0.1)])
+    _rerank_with_evidence(result, target, searcher)
+    assert result.docs[0].document.source_path == "target.txt"

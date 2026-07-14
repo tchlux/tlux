@@ -54,7 +54,7 @@ class LocalSearchAgent:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
             self.runner = LMStudioPlannerToolAgent(self.client, mode)
 
-    # Warm HKM search and the configured model with minimal requests.
+    # Warm HKM search and the structured planner with representative requests.
     def warmup(self) -> bool:
         search_ready = True
         try:
@@ -64,14 +64,7 @@ class LocalSearchAgent:
         if self.client is None:
             return search_ready
         try:
-            self.client._request("chat/completions", {
-                "model": self.client._model_name(),
-                "messages": [{"role": "user", "content": "Return a short search query."}],
-                "temperature": 0,
-                "max_tokens": 1,
-                "reasoning_effort": "none",
-                "stream": False,
-            })
+            self.client.generate("warmup evidence token")
             return search_ready
         except Exception:
             return False
