@@ -51,6 +51,19 @@ class FakeToolAgent(LMStudioToolAgent):
         return self.model
 
 
+class NoToolAgent(LMStudioToolAgent):
+    def __init__(self) -> None:
+        client = StubQueryGenerator()
+        self.client = client
+        self.model = "fake"
+
+    def _request(self, path, payload=None):
+        return {"choices": [{"message": {"content": "truncated reasoning"}}]}
+
+    def _model_name(self):
+        return self.model
+
+
 def test_parse_query_accepts_json_and_code_fences() -> None:
     assert parse_query('{"query": "dragon wardstone"}') == "dragon wardstone"
     assert parse_query('```json\n{"query":"sky fortress"}\n```') == "sky fortress"
@@ -149,6 +162,26 @@ def test_lmstudio_tool_protocol_executes_search_and_answer(tmp_path: Path, monke
     assert report["evidence"]["recall_at_k"] == 1.0
     assert report["grounded_source_match_rate"] == 1.0
     assert report["answer_source_match_rate"] == 1.0
+
+
+def test_lmstudio_tool_recovery_handles_missing_tool_call(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [{"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}}],
+        max_k=1,
+    )
+    report = evaluate_tool_agent(
+        str(tmp_path / "index"), agent=NoToolAgent(), samples=1, top_k=1
+    )
+    assert report["tool_call_rate"] == 1.0
+    assert report["model_tool_call_rate"] == 0.0
+    assert report["recovery_rate"] == 1.0
+    assert report["evidence"]["precision_at_1"] == 1.0
+    assert report["answer_source_match_rate"] == 0.0
+    assert report["rows"][0]["recovered"] is True
 
 
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:

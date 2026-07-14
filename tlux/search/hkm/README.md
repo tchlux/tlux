@@ -336,6 +336,15 @@ content-evidence recall@5/precision@1 with zero errors; target-document
 recall@5 was 0.980 and median/p95 one-completion latency was 1.57/2.85 s.
 Disable Gemma reasoning for direct llama.cpp serving: otherwise hidden
 reasoning can consume the bounded completion before the tool call is emitted.
+The wrapper still guarantees a grounded result if that happens: a 20-sample
+default-reasoning stress run recovered every omitted tool call deterministically,
+with 1.000 evidence recall/precision@1 and zero errors. Reports separate raw
+model tool-call rate from wrapper recovery rate.
+
+The same 50-sample gate through the live LM Studio endpoint reached wrapper
+tool-call rate 1.000, raw model tool-call rate 0.280, recovery rate 0.720, and
+1.000 content-evidence recall/precision@1 with zero errors; median/p95 agent
+latency was 2.09/3.83 s.
 
 The captured 50-sample Gemma query set that exposed the fallback bug now replays
 through the corrected tool path at 1.000 content-evidence recall and
@@ -364,6 +373,10 @@ same GGUF directly:
     runtime="$HOME/.cache/lm-studio/extensions/backends/llama.cpp-mac-arm64-apple-metal-advsimd-2.24.0"
     model="$HOME/.cache/lm-studio/models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf"
     DYLD_LIBRARY_PATH="$runtime" "$runtime/llama-server" -m "$model" --host 127.0.0.1 --port 1234 -c 4096 --n-predict 32 --reasoning off --jinja
+
+When LM Studio is serving on its LAN address, use the advertised endpoint and
+model id, for example `--base-url http://192.168.8.222:1234/v1 --model
+google/gemma-4-e4b`.
 
 ## Forward-looking architecture
 

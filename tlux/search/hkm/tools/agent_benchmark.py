@@ -346,6 +346,43 @@ class LMStudioToolAgent:
     def _model_name(self) -> str:
         return self.client._model_name()
 
+    # Recover a grounded result when the model omits or truncates its tool call.
+    def _recover_tool_result(
+        self,
+        excerpt: str,
+        searcher: Searcher,
+        top_k: int,
+        probe_count: int,
+        started: float,
+    ) -> Dict[str, Any]:
+        query = _keyword_query(excerpt, limit=TOOL_KEYWORD_WORDS)
+        if not query:
+            raise ValueError("cannot recover a tool query from empty evidence")
+        result, search_ms, fallback_calls = _adaptive_tool_search(
+            searcher,
+            query,
+            top_k,
+            probe_count,
+            getattr(self, "mode", "hybrid"),
+            excerpt,
+            getattr(self, "source_cache", None),
+        )
+        _rerank_with_evidence(result, excerpt, searcher, getattr(self, "source_cache", None))
+        return {
+            "tool_called": True,
+            "model_tool_called": False,
+            "recovered": True,
+            "query": query,
+            "result": result,
+            "answer": "",
+            "answer_source_path": "",
+            "completion_calls": 1,
+            "search_ms": search_ms,
+            "fallback_calls": fallback_calls,
+            "expanded_docs": len(result.docs),
+            "agent_ms": (time.perf_counter() - started) * 1000.0,
+        }
+
     def run(self, excerpt: str, searcher: Searcher, top_k: int = 10, probe_count: int = 0) -> Dict[str, Any]:
         started = time.perf_counter()
         messages = [
@@ -375,19 +412,13 @@ class LMStudioToolAgent:
         if not calls and assistant.get("function_call"):
             calls = [{"id": "legacy-call", "function": assistant["function_call"]}]
         if not calls:
-            return {
-                "tool_called": False,
-                "query": "",
-                "result": None,
-                "answer": _message_text(assistant),
-                "answer_source_path": "",
-                "completion_calls": 1,
-                "search_ms": 0.0,
-                "agent_ms": (time.perf_counter() - started) * 1000.0,
-            }
+            return self._recover_tool_result(excerpt, searcher, top_k, probe_count, started)
         call = calls[0]
         function = call.get("function", {})
-        query = _parse_tool_query(function.get("arguments", {}))
+        try:
+            query = _parse_tool_query(function.get("arguments", {}))
+        except (TypeError, ValueError):
+            return self._recover_tool_result(excerpt, searcher, top_k, probe_count, started)
         result, search_ms, fallback_calls = _adaptive_tool_search(
             searcher,
             query,
@@ -402,6 +433,8 @@ class LMStudioToolAgent:
         if not getattr(self, "final_answer", True):
             return {
                 "tool_called": True,
+                "model_tool_called": True,
+                "recovered": False,
                 "query": query,
                 "result": result,
                 "answer": "",
@@ -440,6 +473,8 @@ class LMStudioToolAgent:
         answer = _message_text(final_choices[0].get("message", {})) if final_choices else ""
         return {
             "tool_called": True,
+            "model_tool_called": True,
+            "recovered": False,
             "query": query,
             "result": result,
             "answer": answer,
@@ -471,6 +506,8 @@ class DeterministicToolAgent:
         answer_source_path = result.docs[0].source_path if result.docs else ""
         return {
             "tool_called": True,
+            "model_tool_called": False,
+            "recovered": False,
             "query": query,
             "result": result,
             "answer": "",
@@ -887,6 +924,8 @@ def evaluate_tool_agent(
         except Exception as exc:
             run = {
                 "tool_called": False,
+                "model_tool_called": False,
+                "recovered": False,
                 "query": "",
                 "result": None,
                 "answer": "",
@@ -926,6 +965,8 @@ def evaluate_tool_agent(
                 if answer_source_path else False
             ),
             "grounded_source_match": grounded_source_path == sample.source_path if grounded_source_path else False,
+            "model_tool_called": bool(run.get("model_tool_called", run.get("tool_called") and model_called)),
+            "recovered": bool(run.get("recovered")),
             "completion_calls": int(run.get("completion_calls", 0)),
             "fallback_calls": int(run.get("fallback_calls", 0)),
             "expanded_docs": int(run.get("expanded_docs", 0)),
@@ -945,6 +986,8 @@ def evaluate_tool_agent(
         "deterministic_first": deterministic_first,
         "errors": errors,
         "tool_call_rate": sum(row["tool_called"] for row in rows) / len(rows) if rows else 0.0,
+        "model_tool_call_rate": sum(row["model_tool_called"] for row in rows) / len(rows) if rows else 0.0,
+        "recovery_rate": sum(row["recovered"] for row in rows) / len(rows) if rows else 0.0,
         "model_call_rate": sum(row["model_called"] for row in rows) / len(rows) if rows else 0.0,
         "completion_calls_per_sample": sum(row["completion_calls"] for row in rows) / len(rows) if rows else 0.0,
         "fallback_rate": sum(row["fallback_calls"] > 0 for row in rows) / len(rows) if rows else 0.0,
@@ -1016,7 +1059,7 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         f"- Model: `{report['model'] or 'deterministic'}`",
         f"- Samples/seed/top-k/probe/mode: {report['samples']} / {report['seed']} / {report['top_k']} / {report['probe_count']} / `{report['mode']}`",
         f"- Answer path: `{report['answer_mode']}`",
-        f"- Deterministic-first: `{report['deterministic_first']}`; tool-call rate: `{report['tool_call_rate']:.3f}`; model-call rate: `{report['model_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
+        f"- Deterministic-first: `{report['deterministic_first']}`; tool-call rate: `{report['tool_call_rate']:.3f}`; model tool-call rate: `{report['model_tool_call_rate']:.3f}`; recovery rate: `{report['recovery_rate']:.3f}`; model-call rate: `{report['model_call_rate']:.3f}`; completion calls/sample: `{report['completion_calls_per_sample']:.2f}`",
         f"- Low-confidence fallback rate: `{report['fallback_rate']:.3f}`",
         f"- Expanded result-page rate: `{report['expansion_rate']:.3f}`",
         f"- Tool target-doc recall@k: `{target['recall_at_k']:.3f}`; precision@1: `{target['precision_at_1']:.3f}`; MRR: `{target['mrr']:.3f}`",
@@ -1027,15 +1070,15 @@ def render_tool_report(report: Dict[str, Any]) -> str:
         "",
         "## Samples",
         "",
-        "| ID | Target doc | Query | Relevant rank | Grounded source | Model source | Tool |",
-        "|---:|---:|---|---:|---|---|:---:|",
+        "| ID | Target doc | Query | Relevant rank | Grounded source | Model source | Tool | Recovery |",
+        "|---:|---:|---|---:|---|---|:---:|:---:|",
     ]
     for row in report["rows"]:
         lines.append(
             f"| {row['sample_id']} | {row['doc_id']} | {row['query'].replace('|', ' ')} | "
             f"{row['relevant_rank'] or '-'} | {row['grounded_source_path'] or '-'} | "
             f"{row['answer_source_path'] or '-'} | "
-            f"{'yes' if row['tool_called'] else 'no'} |"
+            f"{'yes' if row['tool_called'] else 'no'} | {'yes' if row['recovered'] else 'no'} |"
         )
     return "\n".join(lines)
 
