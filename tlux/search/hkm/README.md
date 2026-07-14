@@ -280,7 +280,8 @@ The supported package-level exports are:
 - `drain_jobs`
 - `Searcher`
 
-The local CLI now includes `hkm-audit`, `hkm-inspect`, and `hkm-benchmark`.
+The local CLI now includes `hkm-audit`, `hkm-inspect`, `hkm-benchmark`, and
+the persistent JSONL `hkm-agent`.
 `hkm-inspect` reports build stages, failures, storage composition, and warm
 search p50/p95/p99 timings; `hkm-benchmark` adds exhaustive quality oracles,
 probe work, exact checks, quantization/window ablations, and 1K-to-1B scale
@@ -352,6 +353,23 @@ repository passages, while wrapper tool calls and evidence recall/precision@1/
 MRR stayed at 1.000 with zero errors. Its median/p95 latency was 1.904/2.282 s
 on prose and 1.897/2.690 s on the repository; use plain `--planner-tool` for
 the lower-latency one-completion path.
+
+For a long-running local service, `hkm-agent` keeps the index and LM Studio
+client alive and accepts one JSON object per line. The response is also JSONL
+and contains the bounded query, grounded HKM hits, tool/recovery flags, and
+timings:
+
+    printf '%s\n' '{"text":"raw passage"}' | bin/hkm-agent data/fourth_wing_hkm_index \
+        --base-url http://192.168.8.222:1234/v1 --model google/gemma-4-e4b \
+        --deterministic-first --warmup --top-k 5
+
+Use `--warmup` to pay index and model initialization before the first request.
+Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
+known deterministic-first hits in roughly 56-90 ms; these are local reference
+measurements, not a service-level guarantee. Omit
+`--deterministic-first` to use the structured LM Studio planner for every
+passage, or use the smaller `google/gemma-3-4b` model for a lower warm model
+latency.
 
 For the lowest result latency, add `--tool-only --tool-mode token`. This stops
 after one model function call and returns the grounded HKM result directly,

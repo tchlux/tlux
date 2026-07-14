@@ -1,3 +1,5 @@
+import json
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,7 @@ from tlux.search.hkm.tools.agent_benchmark import (
     evaluate_tool_agent,
     parse_query,
 )
+from tlux.search.hkm.tools.local_agent import LocalSearchAgent, process_lines
 
 
 class CountingGenerator(StubQueryGenerator):
@@ -274,6 +277,31 @@ def test_structured_planner_can_use_native_tool_call(tmp_path: Path, monkeypatch
     assert report["model_tool_call_rate"] == 1.0
     assert report["completion_calls_per_sample"] == 2.0
     assert report["evidence"]["precision_at_1"] == 1.0
+
+
+def test_persistent_local_agent_returns_grounded_jsonl(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    (tmp_path / "index").mkdir()
+    (tmp_path / "index" / "a.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    (tmp_path / "index" / "b.txt").write_text("alpha dragon fortress", encoding="utf-8")
+    build_search_index_from_documents(
+        str(tmp_path / "index"),
+        [
+            {"text": "alpha dragon fortress", "metadata": {"source_path": "a.txt"}},
+            {"text": "alpha dragon fortress", "metadata": {"source_path": "b.txt"}},
+        ],
+        max_k=2,
+    )
+    agent = LocalSearchAgent(
+        str(tmp_path / "index"),
+        runner=DeterministicToolAgent(mode="token"),
+    )
+    output = StringIO()
+    process_lines(agent, ['{"text":"alpha dragon fortress"}\n'], output, top_k=1)
+    response = json.loads(output.getvalue())
+    assert response["grounded"] is True
+    assert len(response["docs"]) == 1
+    assert response["docs"][0]["source_path"] == "a.txt"
 
 
 def test_tool_only_skips_second_completion(tmp_path: Path, monkeypatch) -> None:
