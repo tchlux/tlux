@@ -134,6 +134,7 @@ long-running executor sample remains an environment-level verification item.
 - [x] Bound the default LM Studio planner timeout to 1.5 seconds; a live 50-sample repository gate retained 1.000 evidence recall/precision@1/MRR with zero errors at 903/1,411 ms median/p95 model-first agent latency.
 - [x] Align the 8-token planner prompt with its budget by requesting 1-3 exact words; the same live 50-sample gate retained perfect evidence metrics with zero planner recoveries and 36% bounded fallback.
 - [x] Order deterministic rare-term fallback before phrase lanes; the live 50-sample gate retained perfect evidence metrics while reducing model-first agent latency to 578/1,227 ms median/p95 and search latency to 42/384 ms.
+- [x] Add a `--require-grounded` benchmark gate that exits nonzero unless final evidence recall, precision@1, and MRR are all 1.000.
 - [ ] Reduce the remaining tail latency. Candidate-first lexical ranking now measures 255/360 ms median/p95 on all 395 prose chunks with perfect evidence quality; the planner-shaped warmup persistent Gemma 4 smoke gate measures 0.536/1.013 s median/p95, so local model generation and recovery tails are still open.
 
 Evidence relevance is content-based: when a readable source snapshot exists, a
@@ -201,3 +202,4 @@ before relying on direct Python serving.
 - 2026-07-14: Reduced the default LM Studio planner timeout from 2.0 to 1.5 seconds. A live 50-sample repository gate retained perfect evidence metrics at 0.903/1.411 seconds median/p95; timeout failures still use evidence-checked deterministic rescue.
 - 2026-07-14: Shortened the 8-token planner instruction to request 1-3 exact evidence words. A live 50-sample repository gate retained perfect evidence metrics with zero planner recoveries, 36% bounded fallback, and 0.897/1.542 seconds median/p95 agent latency.
 - 2026-07-14: Ordered the deterministic rare-term fallback before phrase lanes. The same live 50-sample gate retained perfect evidence metrics while reducing model-first agent latency to 0.578/1.227 seconds median/p95 and search latency to 42/384 ms.
+- 2026-07-14: Added `--require-grounded` to make the benchmark fail closed when final evidence recall, precision@1, or MRR drops below 1.000; the 75-sample deterministic repository gate passes this check.

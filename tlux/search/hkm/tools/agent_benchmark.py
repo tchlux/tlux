@@ -916,6 +916,15 @@ def _timing_metrics(rows: Iterable[Dict[str, Any]], key: str) -> Dict[str, float
     }
 
 
+# Return whether a report fails the exact grounded-evidence quality gate.
+def _grounded_quality_failed(report: Dict[str, Any]) -> bool:
+    metrics = report.get("evidence", report.get("final_relevance", {}))
+    return bool(report.get("errors")) or any(
+        float(metrics.get(name, 0.0)) < 1.0
+        for name in ("recall_at_k", "precision_at_1", "mrr")
+    )
+
+
 # Evaluate model queries, evidence fallback, and probe budgets.
 def evaluate_agent(
     index_root: str,
@@ -1297,6 +1306,7 @@ def main() -> None:
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="hybrid")
     parser.add_argument("--tool-only", action="store_true", help="Return the grounded tool result after one model call")
     parser.add_argument("--deterministic-first", action="store_true", help="Search cheaply before calling the model")
+    parser.add_argument("--require-grounded", action="store_true", help="Exit nonzero unless final evidence metrics are all 1.0")
     parser.add_argument("--initial-probe", type=int, default=0, help="Use this probe budget before exhaustive escalation")
     parser.add_argument("--json-output", default=None)
     parser.add_argument("--report-output", default=None)
@@ -1333,6 +1343,8 @@ def main() -> None:
         if args.report_output:
             Path(args.report_output).write_text(markdown, encoding="utf-8")
         print(markdown)
+        if args.require_grounded and _grounded_quality_failed(report):
+            raise SystemExit("grounded evidence quality gate failed")
         return
     generator: QueryGenerator = StubQueryGenerator() if args.stub else LMStudioQueryGenerator(args.base_url, args.model, args.timeout)
     if not args.stub:
@@ -1358,6 +1370,8 @@ def main() -> None:
     if args.report_output:
         Path(args.report_output).write_text(markdown, encoding="utf-8")
     print(markdown)
+    if args.require_grounded and _grounded_quality_failed(report):
+        raise SystemExit("grounded evidence quality gate failed")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -299,6 +299,10 @@ a real-model run proves a lower-work setting preserves recall. For example:
 
     bin/hkm-agent-benchmark data/fourth_wing_hkm_index --samples 50 --stub
 
+Add `--require-grounded` to make the command fail if any final evidence recall,
+precision@1, or MRR metric is below 1.000; this is the local correctness gate
+used before comparing latency.
+
 Add `--deterministic-first` to search with cheap lexical evidence before calling
 the model; the model is used only when that first result is not evidence-relevant.
 Add `--initial-probe 2` to try a small HKM probe first and retry exhaustive
