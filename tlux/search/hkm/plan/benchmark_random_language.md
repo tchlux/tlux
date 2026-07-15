@@ -21,14 +21,14 @@ bin/hkm-random-language-benchmark data/fourth_wing_hkm_index \
   --json-output /private/tmp/random_language.json
 ```
 
-On 10 Fourth Wing samples (40 cases), the deterministic generator reaches
-evidence recall@5 1.000, precision@1 0.900, and MRR 0.935. By style, evidence
-recall is 1.000 for every style; precision@1 is 1.000 vague, 0.900 specific,
-0.800 conditional, and 0.900 missing-entity. Median agent/search latency is
-552/464 ms (p95 906/781 ms). The generator normalizes contractions, drops
-common dialogue glue, and keeps four grounded clues for ordinary styles plus
-four later clues after omitting the first for missing-entity requests; the LM
-prompt redacts that omitted clue as `[unknown]`.
+On 20 Fourth Wing samples (80 cases), the deterministic generator reaches
+evidence recall@5 1.000, precision@1 0.9625, and MRR 0.9813. By style, evidence
+recall is 1.000 for every style; precision@1 is 0.950 vague, 1.000 specific,
+0.950 conditional, and 0.950 missing-entity. Median agent/search latency is
+649/430 ms (p95 955/727 ms). The generator normalizes contractions, drops
+common dialogue glue, keeps four grounded clues for ordinary styles, and adds
+a bounded lexical rescue page; missing-entity requests omit the first clue and
+the LM prompt redacts it as `[unknown]`.
 This remains a challenge baseline, not a production quality claim; the
 conditional and forgotten-entity styles still need larger quality gates.
 The deterministic templates intentionally retain lexical clues, so they test
@@ -70,6 +70,13 @@ the 512-file profile index. It passes 10/10 coverage/coherence and 1.000 judged
 precision over 20 labels with the deterministic agent; use it as the stable
 heterogeneous regression gate while expanding the broader random sample.
 
+The extended FineWeb fixture in
+`plan/benchmark_fineweb_language_challenges_extended.md` adds 20 unrelated
+documents and domains with harder conditionals and forgotten entities. It
+passes 20/20 coverage/coherence and 1.000 judged precision over 43 labeled
+hits at top-k 5 (2.81/2.60 seconds median agent/search, 3.58/3.36 seconds
+p95).
+
 Use `--query-source lm --base-url URL --model MODEL` to ask LM Studio to write
 each request from the raw evidence. Generated requests must quote at least two
 evidence terms. Missing-entity requests must also omit the first distinctive
@@ -78,8 +85,19 @@ deterministic fallback. Timeout, malformed output, or unsupported endpoint
 responses fall back per case and are reported in `planner_errors` and
 `query_origin`.
 Use `--model-first` to let the language-search agent perform its own LM Studio
-refinement after the generated request. Add `--require-evidence` when a run
-should exit nonzero unless recall@k, precision@1, and MRR are all 1.0.
+refinement after the generated request. Add `--always-refine` to force the
+inspect/refine round even after a confident first result, and use
+`--timeout 1.5` or higher so the trace measures genuine LM planning rather than
+the one-second deterministic rescue budget. Add `--require-evidence` when a
+run should exit nonzero unless recall@k, precision@1, and MRR are all 1.0.
+
+A live Gemma 3 run over two random Fourth Wing passages (eight cases) with
+`--query-source lm --model-first --always-refine --timeout 1.5` generated all
+eight first memory queries, completed one planner call per case, recorded
+alternative lanes and antipatterns, and returned rank-one evidence for every
+case. Median agent/search latency was 2.46/0.84 seconds (p95 3.42/1.82 s).
+This is the strongest end-to-end raw-passage autonomy trace; the broader
+quality gate remains open because model-generated lanes are stochastic.
 
 The checked-in [LM trace](benchmark_random_language_lm_sample.json) is a
 historical two-sample model-first failure trace retained as a regression

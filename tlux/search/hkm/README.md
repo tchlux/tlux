@@ -443,10 +443,12 @@ are soft penalties so a useful hit is never hard-filtered:
       '{"text":"A person climbs a structure at night while people gather below, but I cannot remember who the person is"}' \
     | bin/hkm-agent data/fourth_wing_hkm_index --language-query \
         --base-url http://192.168.8.222:1234/v1 --model google/gemma-3-4b \
-        --model-first --tool-mode semantic --top-k 5 --warmup
+        --model-first --tool-mode semantic --timeout 1.5 --top-k 5 --warmup
 
-Language responses add `agentic`, `queries`, `antipatterns`, and `rounds` to
-the normal JSONL contract. `grounded` means that the index returned evidence;
+Language responses add `agentic`, `queries`, `antipatterns`, `rounds`, and
+`planner_called` to the normal JSONL contract. `planner_called` is true only
+when the LM refinement completion succeeded rather than using deterministic
+recovery. `grounded` means that the index returned evidence;
 for vague requests, review the returned previews and query trace rather than
 treating non-empty output as a perfect relevance guarantee. The reviewed
 challenge set and concept-group gate live in
@@ -466,7 +468,9 @@ Adaptive language routing stops after a confident first pass for low latency.
 Pass `--always-refine` with `--model-first` to force one LM inspection round,
 which records generated alternative queries and antipatterns for an auditable
 agentic trace. This strict diagnostic mode adds model latency and is not yet
-the default quality gate.
+the default quality gate. Use a timeout of at least 1.5 seconds when measuring
+genuine LM refinement; the 1.0-second default is intentionally a fail-fast
+latency budget and may use deterministic recovery.
 
 For a reproducible harder audit, run
 `bin/hkm-random-language-benchmark INDEX --samples 10 --top-k 5`. It samples
@@ -475,14 +479,17 @@ missing-entity requests against exact source evidence. The fixed Fourth Wing
 baseline is documented in `plan/benchmark_random_language.md`; use
 `--query-source lm` to generate requests through LM Studio and
 `--require-evidence` to fail closed on an imperfect evidence gate.
-The current 40-case deterministic run reaches 1.000 evidence recall@5,
-0.900 precision@1, and 0.935 MRR; vague requests are perfect, while
-conditional precision@1 is 0.800 and missing-entity precision@1 is 0.900.
+The current 80-case deterministic run reaches 1.000 evidence recall@5,
+0.9625 precision@1, and 0.9813 MRR; vague and conditional precision@1 are
+0.950, specific is 1.000, and missing-entity is 0.950. The broader exploratory
+200-case Fourth Wing slice reaches 0.965 recall@5, 0.890 precision@1, and
+0.9225 MRR, so generic random clues remain an open quality target.
 Missing-entity requests omit the first distinctive clue and the LM prompt
 redacts that clue as `[unknown]`, so the model cannot simply copy it. A
 checked-in 10-case FineWeb challenge fixture passes 10/10 coverage/coherence
-and 1.000 judged precision over 20 labels; broader random-corpus gates remain
-open.
+and 1.000 judged precision over 20 labels. The extended 20-case FineWeb
+fixture covers 20 unrelated documents and passes 1.000 coverage/coherence and
+1.000 judged precision over 40 labels.
 
 The current warmed 50-sample Gemma 4 prose gate uses the 1.0-second timeout and
 returns 1.000 evidence recall/precision@1/MRR with zero errors at 880/1,055

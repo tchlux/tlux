@@ -115,6 +115,7 @@ class LocalSearchAgent:
             "tool_called": bool(run.get("tool_called")),
             "model_tool_called": bool(run.get("model_tool_called")),
             "recovered": bool(run.get("recovered")),
+            "planner_called": bool(run.get("planner_called")),
             "planner_cache_hit": bool(run.get("planner_cache_hit")),
             "completion_calls": int(run.get("completion_calls", 0)),
             "search_ms": float(run.get("search_ms", 0.0)),

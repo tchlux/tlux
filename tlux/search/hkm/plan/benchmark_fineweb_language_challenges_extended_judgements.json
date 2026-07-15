@@ -1,0 +1,24 @@
+{
+  "cases": {
+    "LQ-31": {"relevant": [{"all": ["Cocker Spaniel", "mud", "dog park"]}], "negative": []},
+    "LQ-32": {"relevant": [{"all": ["campaign", "true", "Karl Rove", "Obama"]}], "negative": []},
+    "LQ-33": {"relevant": [{"all": ["authors", "disagreements", "discussion"]}], "negative": []},
+    "LQ-34": {"relevant": [{"all": ["building plans", "porch", "foyer", "office"]}], "negative": []},
+    "LQ-35": {"relevant": [{"all": ["conversation", "MP3", "Poe", "Charlottesville"]}], "negative": []},
+    "LQ-36": {"relevant": [{"all": ["sacks", "interception", "Nebraska", "Special Teams"]}], "negative": []},
+    "LQ-37": {"relevant": [{"all": ["about-turn", "1570", "language", "common"]}], "negative": []},
+    "LQ-38": {"relevant": [{"all": ["Tented Camp", "Zimbabwean", "South African"]}], "negative": []},
+    "LQ-39": {"relevant": [{"all": ["Black Band Tee", "black cotton", "fan"]}], "negative": []},
+    "LQ-40": {"relevant": [{"all": ["drug companies", "tax windfall", "shareholders", "patients"]}], "negative": []},
+    "LQ-41": {"relevant": [{"all": ["Reds", "Petrojet", "Egyptian Premier League"]}], "negative": []},
+    "LQ-42": {"relevant": [{"all": ["Zexion", "Demyx", "straddling", "emotion"]}], "negative": []},
+    "LQ-43": {"relevant": [{"all": ["outgoing", "incoming", "geolocation", "proxy server"]}], "negative": []},
+    "LQ-44": {"relevant": [{"all": ["Denver Paper Fashion", "paper", "scissors", "transformations"]}], "negative": []},
+    "LQ-45": {"relevant": [{"all": ["BioVisions", "two months", "waiting", "post"]}], "negative": []},
+    "LQ-46": {"relevant": [{"all": ["panda", "leopard", "cheetah", "ambushed"]}], "negative": []},
+    "LQ-47": {"relevant": [{"all": ["German division", "euros", "forex", "EUR/USD"]}], "negative": []},
+    "LQ-48": {"relevant": [{"all": ["Zexion", "Demyx", "eye contact", "voice"]}], "negative": []},
+    "LQ-49": {"relevant": [{"all": ["royal palaces", "museums", "ancient trees", "private rock"]}], "negative": []},
+    "LQ-50": {"relevant": [{"all": ["economy", "business trips", "cost cuts", "demand"]}], "negative": []}
+  }
+}

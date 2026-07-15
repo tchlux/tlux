@@ -48,13 +48,13 @@ TOOL_EXPANSION_FACTOR = 3
 LMSTUDIO_TIMEOUT = 1.0
 LMSTUDIO_WARMUP_TIMEOUT = 15.0
 LANGUAGE_QUERY_MAX_WORDS = 24
-LANGUAGE_QUERY_MAX_VARIANTS = 7
+LANGUAGE_QUERY_MAX_VARIANTS = 8
 LANGUAGE_MODEL_QUERY_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_TOKENS = 64
 LANGUAGE_QUERY_MAX_ROUNDS = 2
 LANGUAGE_SEARCH_CACHE_SIZE = 256
-LANGUAGE_COVERAGE_WEIGHT = 0.50
+LANGUAGE_COVERAGE_WEIGHT = 0.75
 LANGUAGE_FIRST_PASS_BONUS = 0.05
 LANGUAGE_UNLESS_PENALTY = 0.12
 LANGUAGE_CONFIDENCE_COVERAGE = 0.70
@@ -230,6 +230,7 @@ def _language_query_variants(query: str) -> List[str]:
         content = _language_memory_content_query(normalized)
         if len(_language_word_forms(content)) >= 2:
             variants.append(content)
+            variants.append(f"{content} passage")
     variants.extend(concept_queries)
     variants.extend(
         f"{clauses[index]} {clauses[index + 1]}"
@@ -1357,7 +1358,7 @@ class LanguageSearchAgent:
             raise ValueError("top_k must be positive")
         started = time.perf_counter()
         base_variants = _language_query_variants(query)
-        round_queries = base_variants[:1] if self.client is not None else base_variants
+        round_queries = base_variants[:1]
         exclude_terms: List[str] = []
         trace: List[Dict[str, Any]] = []
         results: List[Any] = []
@@ -1380,14 +1381,10 @@ class LanguageSearchAgent:
                         _language_memory_content_query(query),
                     }
                     and variant_mode == "semantic"
-                    and re.search(
-                        r"\b(?:forgot|forgotten|forget|remember|recall|unknown)\b",
-                        query,
-                        flags=re.IGNORECASE,
-                    )
                 ):
                     variant_mode = "token"
-                result, elapsed = self._cached_search(searcher, variant, top_k * 3, 0, variant_mode)
+                lane_top_k = top_k * (12 if variant_mode == "token" else 3)
+                result, elapsed = self._cached_search(searcher, variant, lane_top_k, 0, variant_mode)
                 results.append(result)
                 search_ms += elapsed
                 trace.append({
@@ -1405,9 +1402,16 @@ class LanguageSearchAgent:
             )
             seen_exclusions = _language_antipatterns(query, merged.docs)
             exclude_terms = list(dict.fromkeys(exclude_terms + seen_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
+            if self.client is None:
+                if (
+                    _language_first_pass_confident(query, merged)
+                    or round_index + 1 >= self.max_rounds
+                ):
+                    break
+                round_queries = base_variants[1:]
+                continue
             if (
-                self.client is None
-                or round_index + 1 >= self.max_rounds
+                round_index + 1 >= self.max_rounds
                 or (
                     _language_first_pass_confident(query, merged)
                     and not self.always_refine
@@ -1452,6 +1456,7 @@ class LanguageSearchAgent:
             "rounds": max((row["round"] for row in trace), default=-1) + 1,
             "recovered": recovered,
             "completion_calls": completion_calls,
+            "planner_called": completion_calls > 0 and not recovered,
             "result": final,
             "search_ms": search_ms,
             "agent_ms": (time.perf_counter() - started) * 1000.0,

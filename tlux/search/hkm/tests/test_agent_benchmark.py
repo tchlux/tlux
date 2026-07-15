@@ -146,6 +146,7 @@ def test_language_variants_skip_single_word_clause_lanes() -> None:
         "I remember make near pretty, but not who or what was involved"
     )
     assert "pretty make" in missing
+    assert "pretty make passage" in missing
 
 
 def test_language_clauses_consume_multiword_condition_markers() -> None:
@@ -842,7 +843,8 @@ def test_persistent_local_agent_supports_language_queries(tmp_path: Path, monkey
     process_lines(agent, ['{"text":"A large structure towers over a horrified crowd at night"}\n'], output, top_k=1)
     response = json.loads(output.getvalue())
     assert response["agentic"] is True
-    assert response["rounds"] == 1
+    assert response["planner_called"] is False
+    assert response["rounds"] == 2
     assert response["docs"][0]["source_path"] == "a.txt"
 
 
@@ -999,6 +1001,7 @@ def test_language_agent_refines_after_first_search(tmp_path: Path, monkeypatch) 
     )
     assert len(client.calls) == 1
     assert run["rounds"] == 2
+    assert run["planner_called"] is True
     assert run["antipatterns"]
     assert "nighttime climbing gathered crowd horror" in run["queries"]
     assert run["result"].docs[0].source_path == "target.txt"
@@ -1046,7 +1049,7 @@ def test_language_model_cap_keeps_deterministic_recovery_budget(monkeypatch) -> 
     recovered = LanguageSearchAgent(FailingLanguageClient(), mode="hybrid").run(
         query, None, top_k=1
     )
-    assert len(recovered["queries"]) == 7
+    assert len(recovered["queries"]) == 8
 
 
 def test_deterministic_tool_agent_fails_closed_for_unindexed_evidence(tmp_path: Path, monkeypatch) -> None:
