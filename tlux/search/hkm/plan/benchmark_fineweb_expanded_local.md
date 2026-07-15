@@ -43,3 +43,45 @@ the normal one-second budget is expected to fall back on this larger corpus.
 The next suite should add fixed challenging cases with distractors, reordered
 clues, multi-condition logic, omitted entities, and adversarially generic terms,
 then measure both deterministic recovery and genuine LM refinement.
+
+## Deep fixed suite
+
+`plan/benchmark_fineweb_expanded_deep.md` contains 24 hand-authored queries
+across vehicles, politics, medicine, security, travel, finance, arts, and
+fiction. They deliberately vary clue order, use nested conditionals and
+negation, and omit a remembered subject or object. Stable text-pattern
+judgements live in the adjacent JSON sidecar so rebuilt document IDs do not
+become the oracle.
+
+The first deterministic run on the audited index passed all 24 cases with full
+group coverage and 43/43 judged top-five hits relevant. The aliases intentionally
+include normalized spellings and passage-window variants (for example
+`Aedesaegypti` and `monthly payment`) so the oracle tests meaning rather than a
+single exact token. Median agent/search latency was 5.37/5.16 seconds (p95
+5.76/5.50 seconds). Re-run it with:
+
+```text
+bin/hkm-language-benchmark /private/tmp/hkm_fineweb_expanded_drama \
+  --benchmark plan/benchmark_fineweb_expanded_deep.md \
+  --judgements plan/benchmark_fineweb_expanded_deep_judgements.json \
+  --tool-mode semantic --top-k 5 --timeout 15 \
+  --require-gate --require-precision
+```
+
+The long pytest gate is opt-in because the local index is ignored and takes
+about two minutes to load and search. Set `HKM_EXPANDED_INDEX` and run
+`bin/hkm-python -m pytest tests/test_fineweb_expanded_gate.py -q`; its process
+timeout defaults to 900 seconds and can be raised with
+`HKM_EXPANDED_TEST_TIMEOUT`. To exercise the LM Studio planner as well, set
+`HKM_EXPANDED_MODEL` and optionally `HKM_EXPANDED_BASE_URL` and
+`HKM_EXPANDED_LM_TIMEOUT` (the latter defaults to 15 seconds). The normal
+one-second LM default remains unchanged for product behavior.
+
+The companion `benchmark_fineweb_expanded_stress.md` contains 25 harder cases
+from additional domains. Its current deterministic floor is 13/25 full-group
+passes and 25/25 coherent top-five results; the twelve misses are retained as
+regression targets instead of being hidden by permissive aliases. Run that
+diagnostic with `HKM_RUN_EXPANDED_STRESS=1` alongside `HKM_EXPANDED_INDEX`.
+The current misses are LQ-52, LQ-53, LQ-54, LQ-56, LQ-62, LQ-63, LQ-65,
+LQ-66, LQ-70, LQ-72, LQ-73, and LQ-74; each still returns a coherent passage,
+so they isolate multi-clue coverage rather than total retrieval failure.

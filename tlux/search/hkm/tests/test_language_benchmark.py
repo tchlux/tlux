@@ -38,6 +38,33 @@ def test_parse_conditional_language_fixture() -> None:
     assert cases[6]["judgements"]["negative"] == [{"all": ["spectators", "dragons"]}]
 
 
+def test_parse_expanded_deep_fixture() -> None:
+    root = Path(__file__).parents[1]
+    judgements = load_judgements(
+        root / "plan" / "benchmark_fineweb_expanded_deep_judgements.json"
+    )
+    cases = parse_cases(
+        (root / "plan" / "benchmark_fineweb_expanded_deep.md").read_text(
+            encoding="utf-8"
+        ),
+        judgements,
+    )
+    assert [case["id"] for case in cases] == [f"LQ-{index}" for index in range(101, 125)]
+    assert all(case["groups"] and case["judgements"]["relevant"] for case in cases)
+    assert len({case["id"] for case in cases}) == len(cases)
+
+
+def test_parse_expanded_stress_fixture() -> None:
+    root = Path(__file__).parents[1]
+    cases = parse_cases(
+        (root / "plan" / "benchmark_fineweb_expanded_stress.md").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [case["id"] for case in cases] == [f"LQ-{index}" for index in range(51, 76)]
+    assert all(len(case["groups"]) >= 3 for case in cases)
+
+
 def test_evaluate_case_matches_aliases_and_reports_antipattern_rank() -> None:
     case = {
         "id": "LQ-test",

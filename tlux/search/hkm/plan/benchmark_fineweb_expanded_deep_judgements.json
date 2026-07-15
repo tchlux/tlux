@@ -1,0 +1,28 @@
+{
+  "cases": {
+    "LQ-101": {"relevant": [{"all": ["BMW 435d xDrive", "308bhp diesel"]}]},
+    "LQ-102": {"relevant": [{"all": ["Stannis Baratheon", "Dragonstone", "Princess Shireen"]}]},
+    "LQ-103": {"relevant": [{"all": ["mini excavators", "tipper trucks", "labour hire"]}]},
+    "LQ-104": {"relevant": [{"all": ["Holger Czukay", "Can", "krautrock"]}]},
+    "LQ-105": {"relevant": [{"all": ["India", "Nepal", "connectivity"]}]},
+    "LQ-106": {"relevant": [{"all": ["green bridesmaid dresses", "convertible", "emerald"]}]},
+    "LQ-107": {"relevant": [{"all": ["Australians", "Reserve Bank of Australia", "Jonathan Kearns"]}]},
+    "LQ-108": {"relevant": [{"all": ["meteorite", "Monte Grande", "gunpowder"]}]},
+    "LQ-109": {"relevant": [{"all": ["Timothy", "Shawn Donaghy", "Transit Operations"]}]},
+    "LQ-110": {"relevant": [{"all": ["30-year Conventional fixed-rate loan", "Greenwood Village", "DTC Boulevard"]}]},
+    "LQ-111": {"relevant": [{"all": ["Nick Ut", "Sara Cannon", "Los Angeles City Hall"]}]},
+    "LQ-112": {"relevant": [{"all": ["Internet isn't the real world", "firewall", "IP address"]}]},
+    "LQ-113": {"relevant": [{"all": ["Aedesaegypti", "dengue", "70 Gy"]}]},
+    "LQ-114": {"relevant": [{"all": ["Tata Teleservices", "Telcordia", "40 million"]}]},
+    "LQ-115": {"relevant": [{"all": ["West Nile", "Lubbock", "RNAs"]}]},
+    "LQ-116": {"relevant": [{"all": ["Split", "Croatia", "Diocletian's Palace"]}]},
+    "LQ-117": {"relevant": [{"all": ["wall-to-wall carpeting", "outdated", "hardwood"]}]},
+    "LQ-118": {"relevant": [{"all": ["PhD in Medicine", "Sydney", "Europe"]}]},
+    "LQ-119": {"relevant": [{"all": ["Esquire UK", "GQ UK"]}, {"all": ["Generation A", "Coupland"]}]},
+    "LQ-120": {"relevant": [{"all": ["Anáhuac", "International Relations", "conflict resolution"]}]},
+    "LQ-121": {"relevant": [{"all": ["BMW 435d xDrive", "four-wheel-drive", "Sport Auto"]}]},
+    "LQ-122": {"relevant": [{"all": ["Blackwater Bay", "Stormlands"]}]},
+    "LQ-123": {"relevant": [{"all": ["labour hire", "service histories", "mini excavators"]}]},
+    "LQ-124": {"relevant": [{"all": ["pizza oven", "explosion"]}]}
+  }
+}
