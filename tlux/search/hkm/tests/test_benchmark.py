@@ -1,6 +1,8 @@
+import json
+
 import numpy as np
 
-from tlux.search.hkm.tools.benchmark import _exact_rank, _recall, render_report
+from tlux.search.hkm.tools.benchmark import _exact_rank, _recall, _resource_evidence, render_report
 
 
 def test_exact_rank_returns_one_best_window_per_document() -> None:
@@ -42,3 +44,22 @@ def test_recall_and_report_are_machine_and_human_readable() -> None:
     output = render_report(report)
     assert "Recall@k" in output
     assert "1B" in output
+
+
+def test_resource_evidence_aggregates_valid_samples(tmp_path) -> None:
+    resource_path = tmp_path / ".hkm_jobs" / "ids" / "1" / "resources"
+    resource_path.parent.mkdir(parents=True)
+    resource_path.write_text(
+        "\n".join([
+            json.dumps({"rss": 4, "cpu_percent": 1.5, "gpu_percent": None}),
+            json.dumps({"rss": 8, "cpu_percent": 3.0, "gpu_percent": 12.0}),
+            "malformed",
+        ]),
+        encoding="utf-8",
+    )
+    report = _resource_evidence(tmp_path)
+    assert report["jobs"] == 1
+    assert report["samples"] == 2
+    assert report["peak_rss_bytes"] == 8
+    assert report["peak_cpu_percent"] == 3.0
+    assert report["peak_gpu_percent"] == 12.0

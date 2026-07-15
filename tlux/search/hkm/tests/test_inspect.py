@@ -16,3 +16,5 @@ def test_inspect_reports_audited_storage_and_search(tmp_path, monkeypatch) -> No
     assert report["documents"] == 1
     assert report["storage_components"]["embeddings"] > 0
     assert report["search"][0]["timing_ms"]["p99"] >= 0.0
+    assert report["build"]["resources"]["samples"] >= 1
+    assert report["build"]["resources"]["peak_rss_bytes"] >= 0

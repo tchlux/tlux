@@ -40,6 +40,41 @@
 - Use `bin/hkm-python -m pytest tests/` to execute HKM tests with the local Python 3.12 runtime while ignoring the broken global `PYTHONPATH` on this machine.
 - No test should take more than 30 seconds, so you are encouraged to set timeouts on test execution to enforce that behavior.
 
+## Standard benchmark evaluation
+
+The default fast quality command is `bin/hkm-quality-benchmark`; it uses the
+deterministic local fixture and does not download external corpora. The
+standard real-data runner is `bin/hkm-standard-benchmark` and supports BEIR,
+MIRACL, and TREC/MS MARCO-compatible layouts. Use it when evaluating search
+changes against recognized retrieval benchmarks.
+
+For a BEIR-only BM25-versus-HKM comparison, use
+`bin/hkm-beir DATASET_ROOT --limit 25 --build-index --index-root INDEX_ROOT`.
+
+```bash
+# Fast regression suite.
+bin/hkm-python -m pytest tests/ -q
+
+# BEIR; --download-beir fetches SciFact, and zero means the full corpus.
+HKM_FAKE_EMBEDDER=1 bin/hkm-standard-benchmark beir data/benchmarks /tmp/hkm-beir \
+  --dataset scifact --download-beir --max-documents 0 --mode hybrid
+
+# MIRACL English dev; place official corpus, topics, and qrels under the root.
+HKM_FAKE_EMBEDDER=1 bin/hkm-standard-benchmark miracl data/benchmarks/miracl /tmp/hkm-miracl \
+  --language en --split dev --max-documents 10000 --mode hybrid
+
+# TREC/MS MARCO; root contains collection.tsv, queries.tsv, and qrels.*.
+HKM_FAKE_EMBEDDER=1 bin/hkm-standard-benchmark trec data/benchmarks/trec /tmp/hkm-trec \
+  --split test --max-documents 10000 --mode hybrid
+```
+
+The runner streams JSONL, JSONL.GZ, or TSV corpora, preserves benchmark IDs,
+and reports indexed documents, judged-query coverage, build/search time, and
+precision, recall, average precision, MRR, and nDCG. Bounded runs are smoke
+tests only and must not be presented as published full-corpus scores. MIRACL
+test-a/test-b topics do not contain qrels and are not locally scoreable until
+judgments are supplied.
+
 
 ## Example Python Code
 

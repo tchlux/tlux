@@ -133,6 +133,69 @@ The CLI prints one JSON object with `docs`, `offset`, `limit`, `count`,
 `next_offset`, and the normalized `query`.
 
 The build CLI prints the root build job id. Jobs are stored under `idx/.hkm_jobs` by default.
+
+## Quality and capacity evaluation
+
+Run the deterministic heterogeneous fixture and side-by-side lexical, BM25,
+sparse, dense, late-interaction, hybrid, reranker, and agentic baselines with:
+
+```bash
+tlux/search/hkm/bin/hkm-quality-benchmark --k 5
+```
+
+The report separates graded qrels, judged versus unjudged results, nDCG/MAP,
+facet coverage, diversity, calibration, abstention, duplicate/leakage checks,
+and statistical helpers from target-recovery benchmarks. The fixture includes
+natural source-blind queries, code, tables, OCR-like noise, multilingual text,
+duplicates, conflicts, hard negatives, long text, misspellings, negation,
+temporal, conditional, conversational, vague, contradictory, and no-answer
+cases.
+
+Measure actual build capacity on deterministic local corpus sizes with:
+
+```bash
+tlux/search/hkm/bin/hkm-capacity /tmp/hkm-capacity --documents 16 --documents 64
+```
+
+The report includes build time, indexed count, storage components, retained
+build/job bytes, child-RSS scope, hardware, and optional hourly-rate cost.
+Each row is measured; it does not claim web-scale performance.
+
+Measure concurrent serving capacity on a built index with:
+
+```bash
+tlux/search/hkm/bin/hkm-throughput idx --mode hybrid --concurrency 4 --requests 32
+```
+
+Throughput and billion-document rows are measurements only where explicitly
+marked; extrapolations do not establish web-scale performance. Metadata fields
+and provenance are not authorization or tenant-isolation enforcement.
+
+Run three standard benchmark families with the same HKM runner:
+
+```bash
+# BEIR SciFact; --download-beir fetches the official archive.
+bin/hkm-standard-benchmark beir data/benchmarks /tmp/hkm-beir \
+  --dataset scifact --download-beir --max-documents 0 --mode hybrid
+
+# MIRACL English development data after placing its corpus, topics, and qrels
+# files under data/benchmarks/miracl.
+bin/hkm-standard-benchmark miracl data/benchmarks/miracl /tmp/hkm-miracl \
+  --language en --split dev --max-documents 10000 --mode hybrid
+
+# TREC Deep Learning/MS MARCO-compatible collection.tsv, queries.tsv, qrels.
+bin/hkm-standard-benchmark trec data/benchmarks/trec /tmp/hkm-trec \
+  --split test --max-documents 10000 --mode hybrid
+```
+
+The loaders preserve benchmark document IDs, stream JSONL, JSONL.GZ, or TSV
+corpora, accept graded qrels, and report judged-query coverage, indexed
+documents, build/search time, precision, recall, average precision, MRR, and
+nDCG. `--max-documents 0` means the full local corpus; bounded runs are useful
+for smoke tests but are not directly comparable with published full-corpus
+scores. The adapters follow the official [BEIR dataset layout](https://github.com/beir-cellar/beir/wiki/Datasets-available),
+[MIRACL layout](https://github.com/project-miracl/miracl), and [TREC qrels format](https://trec.nist.gov/data/qrels_eng/).
+
 Builds are incremental by default when a compatible `manifests/source_snapshot.json`
 exists. Use `--full-rebuild` to rebuild the HKM tree while preserving cached
 document embeddings.

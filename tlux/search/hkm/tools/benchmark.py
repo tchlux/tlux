@@ -110,6 +110,8 @@ def _storage_components(root: Path) -> dict[str, int]:
 #
 def _build_evidence(root: Path) -> dict[str, Any]:
     stages: dict[str, dict[str, float | int]] = {}
+    start_times: list[float] = []
+    end_times: list[float] = []
     ids_root = root / ".hkm_jobs" / "ids"
     for config_path in sorted(ids_root.glob("*/job_config")):
         try:
@@ -119,6 +121,9 @@ def _build_evidence(root: Path) -> dict[str, Any]:
             start = float(config.get("start_ts", 0.0) or 0.0)
             end = float(config.get("end_ts", 0.0) or 0.0)
             duration = max(0.0, end - start) if end and start else 0.0
+            if start and end:
+                start_times.append(start)
+                end_times.append(end)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
         entry = stages.setdefault(stage, {"count": 0, "duration_seconds": 0.0, "max_seconds": 0.0})
@@ -134,6 +139,8 @@ def _build_evidence(root: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
     summary_path = root / "manifests" / "ingest_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    wall_seconds = max(end_times) - min(start_times) if start_times and end_times else 0.0
+    indexed = int(summary.get("indexed", 0) or 0)
     return {
         "stages": stages,
         "ingest_summary": summary,
@@ -141,7 +148,61 @@ def _build_evidence(root: Path) -> dict[str, Any]:
             "bytes": int(manifest.get("build_config", {}).get("staging_copy_bytes", 0)),
             "seconds": float(manifest.get("build_config", {}).get("staging_copy_seconds", 0.0)),
         },
+        "wall_seconds": wall_seconds,
+        "documents_per_second": indexed / wall_seconds if wall_seconds else 0.0,
         "failures": failures,
+        "resources": _resource_evidence(root),
+    }
+
+
+# Summarize persisted resource samples from one completed build.
+#
+# Arguments:
+#   root (Path): Index root containing `.hkm_jobs`.
+#
+# Returns:
+#   (dict[str, Any]): Sample counts and peak resource values.
+def _resource_evidence(root: Path) -> dict[str, Any]:
+    jobs = 0
+    samples = 0
+    nonzero_rss = 0
+    nonzero_cpu = 0
+    peak_rss = 0.0
+    peak_cpu = 0.0
+    peak_gpu: float | None = None
+    ids_root = root / ".hkm_jobs" / "ids"
+    for resource_path in sorted(ids_root.glob("*/resources")):
+        job_samples = 0
+        try:
+            lines = resource_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                sample = json.loads(line)
+                rss = float(sample.get("rss", 0.0) or 0.0)
+                cpu = float(sample.get("cpu_percent", 0.0) or 0.0)
+                gpu_value = sample.get("gpu_percent")
+                gpu = float(gpu_value) if gpu_value is not None else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            samples += 1
+            job_samples += 1
+            peak_rss = max(peak_rss, rss)
+            peak_cpu = max(peak_cpu, cpu)
+            nonzero_rss += rss > 0.0
+            nonzero_cpu += cpu > 0.0
+            if gpu is not None:
+                peak_gpu = gpu if peak_gpu is None else max(peak_gpu, gpu)
+        jobs += job_samples > 0
+    return {
+        "jobs": jobs,
+        "samples": samples,
+        "nonzero_rss_samples": nonzero_rss,
+        "nonzero_cpu_samples": nonzero_cpu,
+        "peak_rss_bytes": int(peak_rss),
+        "peak_cpu_percent": peak_cpu,
+        "peak_gpu_percent": peak_gpu,
     }
 
 
@@ -560,6 +621,19 @@ def render_report(report: dict[str, Any]) -> str:
         lines.append(
             f"Staging copy: {int(staging.get('bytes', 0)):,} bytes in "
             f"{float(staging.get('seconds', 0.0)):.3f} seconds."
+        )
+    build = report.get("build", {})
+    if build.get("wall_seconds"):
+        lines.append(
+            f"Build wall time: {float(build['wall_seconds']):.3f} seconds; "
+            f"indexed throughput={float(build.get('documents_per_second', 0.0)):.2f} documents/sec."
+        )
+    resources = report.get("build", {}).get("resources", {})
+    if resources:
+        lines.append(
+            f"Resources: peak RSS={int(resources.get('peak_rss_bytes', 0)):,} bytes, "
+            f"peak CPU={float(resources.get('peak_cpu_percent', 0.0)):.1f}%, "
+            f"peak GPU={resources.get('peak_gpu_percent')}, samples={int(resources.get('samples', 0))}."
         )
     lines.extend(["", "## Canonical storage components", "", "| Component | Bytes |", "|---|---:|"])
     for name, size in sorted(report.get("storage_components", {}).items()):

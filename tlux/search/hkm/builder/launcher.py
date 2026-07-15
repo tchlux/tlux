@@ -610,7 +610,7 @@ def build_search_index(
     incremental: bool = True,
 ) -> Job:
     docs_dir_path = Path(docs_dir).resolve()
-    public_index_root = Path(index_root).expanduser().absolute()
+    public_index_root = Path(index_root).expanduser().resolve()
     public_index_root.mkdir(parents=True, exist_ok=True)
     active_index_root = _active_generation_root(public_index_root)
     docs_dir = str(docs_dir_path)
@@ -889,7 +889,7 @@ def build_search_index_from_documents(
     chunk_size_limit: int = 8 * 2**20,
     max_tokens: int | None = 200_000,
 ) -> Job:
-    public_index_root = Path(index_root).expanduser().absolute()
+    public_index_root = Path(index_root).expanduser().resolve()
     public_index_root.mkdir(parents=True, exist_ok=True)
     build_id = _utc_now()
     index_root_path = _new_generation_root(public_index_root, build_id)
