@@ -8,7 +8,6 @@ from typing import List, Dict, Tuple, Any
 # Configuration constants
 LEAF_MAX_CHUNKS = 256_000
 PREVIEW_CHUNKS = 1024  # 512 random + 512 diverse
-WINDOW_SIZES = (8, 32, 128, 512)
 STRIDE_FACTOR = 0.5
 HASHBITMASK_FP_RATE = 0.01
 KMEANS_MAX_K = 4096

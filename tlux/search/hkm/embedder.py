@@ -51,6 +51,7 @@ def _load_backend(name: str) -> EmbedderBackend:
         "drama": "tlux.search.hkm.libs.drama.inference",
         "contriever": "tlux.search.hkm.libs.contriever.inference",
         "e5": "tlux.search.hkm.libs.e5.inference",
+        "gemma": "tlux.search.hkm.libs.gemma.inference",
     }
     if name == "fake":
         return _load_fake_backend()
@@ -83,10 +84,10 @@ def get_backend(name: str | None = None) -> EmbedderBackend:
 #   (list[str]): Backend names available through the shared interface.
 #
 def available_backends() -> list[str]:
-    return ["drama", "contriever", "e5", "fake"]
+    return ["drama", "contriever", "e5", "gemma", "fake"]
 
 
-_DEFAULT_WINDOWS = (32, 128, 512, 1024)
+DEFAULT_WINDOWS = (128, 512, 1024)
 _DEFAULT_OVERLAP = 0.5
 
 
@@ -141,7 +142,7 @@ def embed(token_ids: list[list[int]], max_len: int = 8192, role: str = "doc") ->
 #
 def embed_windows(
     token_ids_list: list[list[int]],
-    window_sizes: list[int] = list(_DEFAULT_WINDOWS),
+    window_sizes: list[int] = list(DEFAULT_WINDOWS),
     window_overlap: float = _DEFAULT_OVERLAP,
     role: str = "doc",
 ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:

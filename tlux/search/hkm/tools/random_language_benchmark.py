@@ -332,7 +332,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--styles", default=",".join(_STYLES))
     parser.add_argument("--query-source", choices=["deterministic", "lm"], default="deterministic")
-    parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:4321/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--model-first", action="store_true")

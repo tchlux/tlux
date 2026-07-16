@@ -28,7 +28,11 @@ from tlux.search.hkm.tools.agent_benchmark import (
     _language_unless_clauses,
     _language_missing_entity_query,
     _language_missing_entity_clue,
+    _language_compact_concept_query,
+    _language_named_contrast_query,
     _language_positive_clauses,
+    _language_should_abstain,
+    _language_token_pairs,
     _language_word_forms,
     _merge_language_results,
     _parse_language_plan,
@@ -138,6 +142,12 @@ def test_language_plan_bounds_variants_and_exclusions() -> None:
     assert _language_query_variants("A large wall stands over us while crowds watch in horror")
 
 
+def test_compact_language_query_uses_one_guarded_concept_lane() -> None:
+    assert _language_compact_concept_query("A large wall stands over us") == "large wall structure"
+    assert _language_compact_concept_query("A large wall stands over crowds watching in horror") == ""
+    assert _language_compact_concept_query("Find a large wall, not a tower") == ""
+
+
 def test_language_variants_skip_single_word_clause_lanes() -> None:
     variants = _language_query_variants("Find the Scribe Quadrant, like, right now, if needed")
     assert "like" not in variants
@@ -165,6 +175,30 @@ def test_language_clauses_consume_multiword_condition_markers() -> None:
     assert "crowd people below" in variants
     assert "night dark" in variants
     assert "night dark" in _language_query_variants("after darkness or nightfall")
+
+
+def test_language_token_pairs_keep_bounded_content_pairs() -> None:
+    assert _language_token_pairs(
+        "a Padres slugger clears loaded bases against Arizona"
+    ) == [
+        "padres slugger",
+        "slugger clears",
+        "clears loaded",
+        "loaded bases",
+        "bases against",
+        "against arizona",
+    ]
+
+
+def test_language_named_contrast_query_keeps_anchor_and_tail_clues() -> None:
+    assert _language_named_contrast_query(
+        "If a Montessori teacher observes children lining up instead of yelling, "
+        "find the classroom example where pushing and arguing occur."
+    ) == "montessori example pushing arguing"
+    assert _language_named_contrast_query(
+        "if a montessori teacher observes children lining up instead of yelling, "
+        "find the classroom example where pushing and arguing occur."
+    ) == "montessori example pushing arguing"
 
 
 def test_lm_memory_query_generation_is_structured_and_grounded() -> None:
@@ -236,6 +270,37 @@ def test_language_ranking_uses_document_preview_for_condition_coverage() -> None
     assert "a" not in _language_word_forms("A large wall stands over us")
 
 
+def test_missing_entity_merge_rewards_all_condition_groups() -> None:
+    def hit(doc_id: int, score: float, text: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            doc_id=doc_id,
+            span=(0, 1),
+            score=score,
+            source_path=f"{doc_id}.txt",
+            preview_text=text,
+            anchor_preview_text="",
+            document=SimpleNamespace(document_preview=text),
+        )
+
+    query = (
+        "I remember someone climbing something tall at night while people watched "
+        "below, but I forgot who the person was and what the structure was called"
+    )
+    result = SimpleNamespace(
+        docs=[
+            hit(0, 0.90, "A routine office discussion."),
+            hit(1, 0.80, "Someone climbs at night while people watch below."),
+            hit(2, 0.50, "A towering parapet rises above the scene."),
+            hit(3, 0.60, "A funny remark is exchanged."),
+        ],
+        count=4,
+        limit=4,
+        next_offset=None,
+    )
+    merged = _merge_language_results([result], query, [], 3)
+    assert [hit.doc_id for hit in merged.docs] == [1, 0, 2]
+
+
 def test_language_first_pass_confidence_requires_positive_coverage() -> None:
     hit = SimpleNamespace(
         preview_text="A crowd watches in horror.",
@@ -245,6 +310,20 @@ def test_language_first_pass_confidence_requires_positive_coverage() -> None:
     result = SimpleNamespace(docs=[hit])
     assert _language_first_pass_confident("A crowd watches in horror", result)
     assert not _language_first_pass_confident("A crowd watches in horror, not dragons", result)
+
+
+def test_language_abstention_rejects_low_coverage_token_decoys() -> None:
+    hit = SimpleNamespace(
+        doc_id=1,
+        preview_text="A battery is mentioned during a briefing.",
+        anchor_preview_text="",
+        semantic_score=0.0,
+        document=SimpleNamespace(document_preview=""),
+    )
+    result = SimpleNamespace(docs=[hit])
+    assert _language_should_abstain("Which document explains lunar battery gardening?", result)
+    hit.semantic_score = 0.4
+    assert not _language_should_abstain("Which document explains lunar battery gardening?", result)
 
 
 def test_language_merge_preserves_first_pass_candidates_for_refinement() -> None:
@@ -311,6 +390,40 @@ def test_language_merge_keeps_stronger_focused_lane_over_repeated_decoy() -> Non
         1,
     )
     assert merged.docs[0].doc_id == 1
+
+
+def test_language_merge_preserves_lane_specific_expansion_evidence() -> None:
+    def hit(doc_id: int, score: float, preview: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            doc_id=doc_id,
+            span=(0, 1),
+            score=score,
+            source_path=f"{doc_id}.txt",
+            preview_text=preview,
+            anchor_preview_text="",
+            document=SimpleNamespace(document_preview=preview),
+        )
+
+    first = SimpleNamespace(
+        docs=[hit(1, 0.80, "generic immune response")], count=1, limit=1, next_offset=None
+    )
+    expansion = SimpleNamespace(
+        docs=[hit(2, 0.45, "JAM-A intestinal immune compensation")],
+        count=1,
+        limit=1,
+        next_offset=None,
+    )
+    merged = _merge_language_results(
+        [first, expansion],
+        "inflammatory Th17 cells and anti-inflammatory iTregs",
+        [],
+        1,
+        lane_queries=[
+            "inflammatory Th17 cells and anti-inflammatory iTregs",
+            "JAM-A intestinal immune compensation",
+        ],
+    )
+    assert merged.docs[0].doc_id == 2
 
 
 def test_language_negative_clause_demotes_matching_anchor() -> None:
@@ -820,6 +933,22 @@ def test_persistent_local_agent_returns_grounded_jsonl(tmp_path: Path, monkeypat
     assert response["grounded"] is True
     assert len(response["docs"]) == 1
     assert response["docs"][0]["source_path"] == "a.txt"
+    assert response["docs"][0]["document"]["document_preview"]
+    assert response["docs"][0]["document"]["source_context"] == "alpha dragon fortress"
+
+
+def test_source_context_is_bounded_and_root_contained(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "a.txt").write_text("head " + ("x" * 3000) + " tail", encoding="utf-8")
+    document = SimpleNamespace(byte_start=0, byte_end=3010, document_preview="")
+    hit = SimpleNamespace(source_path="a.txt", document=document)
+    context = local_agent._source_context(hit, str(source_root))
+    assert len(context.encode("utf-8")) <= 2048
+    assert context.startswith("head")
+    assert context.endswith("tail")
+    hit.source_path = "../outside.txt"
+    assert local_agent._source_context(hit, str(source_root)) == ""
 
 
 def test_persistent_local_agent_supports_language_queries(tmp_path: Path, monkeypatch) -> None:

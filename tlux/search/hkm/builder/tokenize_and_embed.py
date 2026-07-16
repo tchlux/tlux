@@ -38,7 +38,6 @@ DocumentValue = Union[str, float, int, bytes, list, dict, None]
 DocumentBatch = Iterable[Tuple[List[str], List[List[DocumentValue]]]]
 MetadataSchema = List[Tuple[str, type]]
 DEFAULT_METADATA_SCHEMA_TEXT = json.dumps(DEFAULT_METADATA_SCHEMA)
-EMBED_CACHE_WINDOWS = (32, 128, 512, 1024)
 EMBED_CACHE_OVERLAP = 0.5
 PASSAGE_TARGET_WORDS = 360
 PASSAGE_MAX_WORDS = 520
@@ -247,7 +246,7 @@ def _set_metadata(metadata: List[DocumentValue], field_names: Dict[str, int], na
 def _embedding_cache_key(backend_name: str, content_hash: str) -> str:
     payload = {
         "backend": backend_name,
-        "windows": EMBED_CACHE_WINDOWS,
+        "windows": embedder.DEFAULT_WINDOWS,
         "overlap": EMBED_CACHE_OVERLAP,
         "passage_index_version": 2,
         "content_hash": content_hash,
@@ -434,7 +433,7 @@ def process_documents(
             if cached is None:
                 embeddings, embedding_windows = embedder.embed_windows(
                     [tokens],
-                    window_sizes=list(EMBED_CACHE_WINDOWS),
+                    window_sizes=list(embedder.DEFAULT_WINDOWS),
                     window_overlap=EMBED_CACHE_OVERLAP,
                 )
                 _write_embedding_cache(

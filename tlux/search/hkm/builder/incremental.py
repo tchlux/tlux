@@ -45,7 +45,11 @@ def _drain_descendant_jobs(jobs_root: str, max_workers: int) -> None:
         queued = len(fs.listdir("queued"))
         running = len(fs.listdir("running"))
         if waiting == 0 and queued == 0 and running <= 1:
-            return
+            # Let delayed state writes and final child artifacts become visible before auditing.
+            time.sleep(0.05)
+            idle = not any(fs.listdir(bucket) for bucket in ("waiting", "queued"))
+            if idle and len(fs.listdir("running")) <= 1:
+                return
         time.sleep(0.05)
     raise TimeoutError(f"Timed out waiting for recursive HKM jobs under {jobs_root}")
 from ..schema import DOC_INDEX_DTYPE

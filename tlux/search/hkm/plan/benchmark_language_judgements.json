@@ -7,12 +7,14 @@
     "LQ-02": {
       "relevant": [
         {"all": ["giant", "wall"]},
-        {"all": ["structure", "crowd"]}
+        {"all": ["structure", "crowd"]},
+        {"all": ["enormous", "walls"]},
+        {"all": ["massive", "wall"]},
+        {"all": ["outer", "wall"]},
+        {"all": ["thick", "battlements"]}
       ],
       "negative": [
-        {"all": ["walls", "behind"]},
-        {"all": ["climb", "cliff", "wall"]},
-        {"all": ["wall", "beside"]}
+        {"all": ["climb", "cliff", "wall"]}
       ]
     },
     "LQ-03": {
@@ -38,11 +40,11 @@
       "negative": []
     },
     "LQ-06": {
-      "relevant": [{"all": ["office", "funny"]}],
-      "negative": [
-        {"all": ["funny", "archives", "research"]},
-        {"all": ["archives", "door"]}
-      ]
+      "relevant": [
+        {"all": ["office", "funny"]},
+        {"all": ["door", "kidding"]}
+      ],
+      "negative": [{"all": ["funny", "archives", "research"]}]
     }
   }
 }

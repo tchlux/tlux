@@ -30,6 +30,8 @@ setup(
         "hkm-beir=tlux.search.hkm.tools.beir_benchmark:main",
         "hkm-standard-benchmark=tlux.search.hkm.tools.recognized_benchmarks:main",
         "hkm-agent=tlux.search.hkm.tools.local_agent:main",
+        "hkm-active-search=tlux.search.hkm.tools.active_search:main",
+        "hkm-active-benchmark=tlux.search.hkm.tools.evaluation_artifacts:main",
         "hkm-language-benchmark=tlux.search.hkm.tools.language_benchmark:main",
         "hkm-random-language-benchmark=tlux.search.hkm.tools.random_language_benchmark:main",
     ]},

@@ -58,7 +58,7 @@ def embed(
 ) -> np.ndarray:
     assert role in {"doc", "query"}, "role must be 'doc' or 'query'"
     # Reserve space for [FIRST] + [LAST]
-    body_max = max_len - 2
+    body_max = min(max_len, MAX_SEQ_LEN) - 2
     batch_size = len(token_ids)
     # Build each sequence with special tokens
     sequences = []

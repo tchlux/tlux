@@ -76,6 +76,21 @@ def test_loaders_preserve_standard_ids_and_grades(tmp_path) -> None:
     assert [row["metadata"]["source_id"] for row in trec.documents()] == ["d1", "d2"]
 
 
+def test_loader_rejects_unknown_and_malformed_qrels(tmp_path) -> None:
+    root = tmp_path / "beir"
+    _make_beir(root)
+    qrels = root / "scifact" / "qrels" / "test.tsv"
+    qrels.write_text("query-id\tcorpus-id\tscore\nmissing\td1\t1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown qrels query ID"):
+        load_beir(root, "scifact")
+    qrels.write_text("q1 d1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="malformed qrels row"):
+        load_beir(root, "scifact")
+    qrels.write_text("q1 d1 not-a-grade\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid qrels grade"):
+        load_beir(root, "scifact")
+
+
 @pytest.mark.parametrize("kind", ["beir", "miracl", "trec"])
 def test_runner_builds_and_scores_each_supported_benchmark(tmp_path, monkeypatch, kind) -> None:
     monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
@@ -93,4 +108,31 @@ def test_runner_builds_and_scores_each_supported_benchmark(tmp_path, monkeypatch
     report = run_benchmark(data, tmp_path / f"{kind}-index", mode="hybrid", k=1)
 
     assert report["queries"] == 1
+    assert report["embedder_backend"] == "fake"
+    assert report["max_queries"] == 0
     assert report["evaluation"]["mean"]["recall_at_k"] == 1.0
+
+
+def test_runner_rejects_negative_limits(tmp_path) -> None:
+    root = tmp_path / "beir"
+    _make_beir(root)
+    data = load_beir(root, "scifact")
+    with pytest.raises(ValueError, match="non-negative"):
+        run_benchmark(data, tmp_path / "index", max_queries=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        run_benchmark(data, tmp_path / "index", max_documents=-1)
+
+
+def test_runner_reports_judgments_outside_bounded_corpus(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HKM_FAKE_EMBEDDER", "1")
+    root = tmp_path / "beir"
+    _make_beir(root)
+    (root / "scifact" / "qrels" / "test.tsv").write_text(
+        "query-id\tcorpus-id\tscore\nq1\td2\t2\n", encoding="utf-8"
+    )
+    data = load_beir(root, "scifact")
+    report = run_benchmark(data, tmp_path / "index", mode="hybrid", k=1, max_documents=1)
+    assert report["queries_requested"] == 1
+    assert report["queries"] == 0
+    assert report["queries_without_indexed_judgments"] == 1
+    assert report["unknown_judgments"] == 1

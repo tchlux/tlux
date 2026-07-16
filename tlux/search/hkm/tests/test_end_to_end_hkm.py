@@ -4,12 +4,36 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from tlux.search.hkm import Searcher, build_search_index, build_search_index_from_documents, drain_jobs, open_index, resolve_index_root
 from tlux.search.hkm.fs import FileSystem
+
+
+def test_hybrid_score_prioritizes_nonexact_semantic_evidence() -> None:
+    semantic = SimpleNamespace(
+        semantic_score=0.55,
+        token_score=0.0,
+        match_reasons=["semantic"],
+    )
+    lexical = SimpleNamespace(
+        semantic_score=0.46,
+        token_score=0.55,
+        match_reasons=["semantic", "token", "terms"],
+    )
+    assert Searcher._hybrid_score(object(), semantic) > Searcher._hybrid_score(object(), lexical)
+
+
+def test_hybrid_score_ignores_metadata_bonus_without_tokens() -> None:
+    semantic = SimpleNamespace(
+        semantic_score=0.55,
+        token_score=0.0,
+        match_reasons=["semantic", "preview", "title"],
+    )
+    assert Searcher._hybrid_score(object(), semantic) == pytest.approx(0.56)
 
 
 def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
@@ -87,6 +111,17 @@ def test_hkm_integration_repo_corpus(tmp_path: Path, monkeypatch) -> None:
     assert hits_emb.docs[0].source_path == "doc5.txt"
     assert hits_emb.docs[0].preview_text
     assert hits_emb.docs[0].window_size > 0
+
+    # Unrouted active documents must remain searchable through the bounded repair scan.
+    target = hits_emb.docs[0]
+    monkeypatch.setattr(searcher, "_unrouted_doc_ids", lambda: {target.doc_id})
+    monkeypatch.setattr(searcher, "_search_node", lambda *args: None)
+    repaired = searcher._search_embeddings(
+        searcher._backend().embed([[40, 41, 42, 43, 44, 45, 99, 777]], role="query")[0],
+        1,
+        "40 41 42 43 44 45 99 777",
+    )
+    assert repaired and repaired[0].source_path == "doc5.txt"
 
     root_centroids = Path(hkm_root) / "centroids.npy"
     assert root_centroids.exists(), "root centroids should be saved"
@@ -515,9 +550,9 @@ def test_leaf_neighbors_use_best_passage_match(tmp_path: Path, monkeypatch) -> N
     def _text(values) -> str:
         return " ".join(str(v) for v in values)
 
-    (docs_src / "anchor.txt").write_text(_text(range(40)), encoding="utf-8")
-    (docs_src / "good.txt").write_text(_text(list(range(32)) + list(range(1000, 1008))), encoding="utf-8")
-    (docs_src / "bad.txt").write_text(_text(range(4, 44)), encoding="utf-8")
+    (docs_src / "anchor.txt").write_text(_text(range(160)), encoding="utf-8")
+    (docs_src / "good.txt").write_text(_text(list(range(128)) + list(range(1000, 1032))), encoding="utf-8")
+    (docs_src / "bad.txt").write_text(_text(range(4, 164)), encoding="utf-8")
 
     root_job = build_search_index(
         docs_dir=str(docs_src),
@@ -537,8 +572,8 @@ def test_leaf_neighbors_use_best_passage_match(tmp_path: Path, monkeypatch) -> N
     hits = searcher.leaf_neighbors(leaf_root, docs["anchor.txt"].doc_id, top_k=2)
     assert hits[0].source_path == "good.txt"
     assert hits[0].score > hits[1].score
-    assert hits[0].anchor_span == (0, 32)
-    assert hits[0].span == (0, 32)
+    assert hits[0].anchor_span == (0, 128)
+    assert hits[0].span == (0, 128)
     assert "0 1 2 3" in hits[0].anchor_preview_text
 
 
@@ -657,7 +692,7 @@ def test_leaf_split_uses_embedding_count_not_doc_count(tmp_path: Path, monkeypat
     docs_src = tmp_path / "corpus"
     docs_src.mkdir()
     for i, start in enumerate((0, 1000)):
-        (docs_src / f"doc{i}.txt").write_text(" ".join(str(v) for v in range(start, start + 80)), encoding="utf-8")
+        (docs_src / f"doc{i}.txt").write_text(" ".join(str(v) for v in range(start, start + 200)), encoding="utf-8")
 
     root_job = build_search_index(
         docs_dir=str(docs_src),
@@ -674,6 +709,6 @@ def test_leaf_split_uses_embedding_count_not_doc_count(tmp_path: Path, monkeypat
 
     root_node = json.loads((tmp_path / "hkm" / "node.json").read_text(encoding="utf-8"))
     assert root_node["doc_count"] == 2
-    assert root_node["embedding_count"] == 8
+    assert root_node["embedding_count"] == 6
     assert not root_node["is_leaf"]
     assert root_node["children"]

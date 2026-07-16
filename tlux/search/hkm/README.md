@@ -257,10 +257,10 @@ Search results currently return:
 
 ## Retrieval guidance
 
-A local book-sized source file was used as a passage-retrieval quality probe.
-The built index contained 395 indexed document chunks and 19,771 embedding
-windows: 15,342 at 32 tokens, 3,691 at 128 tokens, 734 at 512 tokens, and 4 at
-1024 tokens.
+A legacy local book-sized index was used as a passage-retrieval quality probe.
+It included 32-token windows. New indexes use one default configuration:
+128-, 512-, and 1024-token overlapping windows. Rebuild benchmark indexes
+before comparing quality across this change; older indexes remain readable.
 
 For ten random source excerpts, short generalized semantic queries were written
 without relying on specific names or source phrasing. The expected target was
@@ -271,18 +271,16 @@ excerpt. Ranked within each window size:
 - 128-token windows: median target rank 29, worst rank 226 of 3,691, hit@50 7/10.
 - 512-token windows: median target rank 15, worst rank 107 of 734, hit@50 7/9.
 
-Keep all embedding window sizes. Smaller windows are the best primary recall
-layer for short semantic queries because they match query granularity and are
-cheap to pass to a language model. Larger windows still matter because broad
-scene-level matches can rank very high, but they should usually be a secondary
-recall channel rather than the main prompt payload.
+Use 128-token windows as the primary recall and small-model judgment unit.
+Larger stored windows remain useful for broad scene matches and for resolving
+an uncertain 128-token judgment without adding another segmentation layer.
 
 A practical result-surfacing path is:
 
-1. Retrieve the top 200 32-token windows as primary anchors.
-2. Add a smaller set of 128-token and 512-token hits as secondary anchors.
+1. Retrieve independent 128-, 512-, and 1024-token semantic lanes.
+2. Add lexical, hybrid, paraphrase, and HyDE lanes without collapsing windows.
 3. Normalize ranks per window size before merging candidates.
-4. Deduplicate or merge overlapping windows by document id and token span.
+4. Preserve `(document_id, token_start, token_end, window_size)` identity.
 5. Expand surviving anchors to enough surrounding context for display or LM
    reranking.
 
@@ -465,16 +463,16 @@ and contains the bounded query, grounded HKM hits, tool/recovery flags, and
 timings:
 
     printf '%s\n' '{"text":"raw passage"}' | bin/hkm-agent data/fourth_wing_hkm_index \
-        --base-url http://192.168.8.222:1234/v1 --model google/gemma-4-e4b \
+        --base-url http://127.0.0.1:4321/v1 --model google/gemma-4-e4b \
         --deterministic-first --warmup --top-k 5
 
 The persistent CLI defaults to deterministic-first routing; pass `--model-first`
 when every passage must go through the LM Studio planner. Use `--warmup` to pay
 index and model initialization before the first request. Warmup uses a one-time
-15-second planner budget, then restores the bounded 1.0-second request timeout.
+15-second planner budget, then restores the bounded 30-second request timeout.
 The LM Studio client lazily reuses one HTTP/1.1 connection and reconnects once
 after a dropped socket, avoiding connection setup on each planner request;
-timeouts are never retried, so the one-second planner budget remains bounded.
+timeouts are never retried, so the 30-second planner budget remains bounded.
 Current source-index smoke runs took 3.8-7.6 seconds to start and then handled
 known deterministic-first hits in roughly 56-90 ms; these are local reference
 measurements, not a service-level guarantee. The smaller `google/gemma-3-4b`
@@ -494,7 +492,7 @@ model-serving optimization target.
 Use `--language-query` for remembered, conversational requests rather than raw
 passages. The agent searches the original request, inspects bounded snippets,
 asks the local model for up to four paraphrase/antipattern lanes, adds bounded
-deterministic clause lanes, then searches those alternatives in a second round.
+deterministic clause lanes, then searches those alternatives in up to three result-conditioned rounds.
 Natural-language lanes use semantic
 search even when `--tool-mode hybrid` is selected; explicit forgotten-entity
 requests also get a compact token lane for rare remembered terms. Antipatterns
@@ -505,8 +503,8 @@ are soft penalties so a useful hit is never hard-filtered:
       '{"text":"Crowds gathered to watch in horror"}' \
       '{"text":"A person climbs a structure at night while people gather below, but I cannot remember who the person is"}' \
     | bin/hkm-agent data/fourth_wing_hkm_index --language-query \
-        --base-url http://192.168.8.222:1234/v1 --model google/gemma-3-4b \
-        --model-first --tool-mode semantic --timeout 1.5 --top-k 5 --warmup
+        --base-url http://127.0.0.1:4321/v1 --model google/gemma-4-e4b \
+        --model-first --tool-mode semantic --timeout 30 --language-rounds 3 --top-k 5 --warmup
 
 Language responses add `agentic`, `queries`, `antipatterns`, `rounds`, and
 `planner_called` to the normal JSONL contract. `planner_called` is true only
@@ -516,6 +514,36 @@ for vague requests, review the returned previews and query trace rather than
 treating non-empty output as a perfect relevance guarantee. The reviewed
 challenge set and concept-group gate live in
 `plan/benchmark_language_queries.md`.
+
+For the higher-quality experimental path, install scikit-learn into the HKM
+Python environment and run the self-contained active search:
+
+```bash
+bin/hkm-active-search INDEX "Crowds gathered to watch in horror" \
+  --base-url http://127.0.0.1:4321/v1 --max-seconds 600
+```
+
+The small local LM independently labels one exact HKM window per call. After
+its first positive, a query-specific SVC is refit before every call from all
+small-LM positives, at most 128 confirmed hard negatives, and 64 newly sampled
+temporary negatives. Only explicitly relevant small-LM judgments are returned;
+SVC scores only choose the next passage. The JSON trace reports the acquisition
+route, fit time, and whether the run exhausted all windows, reached the time
+budget, or completed three positive-free acquisition cycles.
+
+Create an evaluation-only exhaustive small-LM map with:
+
+```bash
+bin/hkm-active-search INDEX "request" --query-id hard-001 \
+  --exhaustive-map evaluation/hard-001.jsonl
+```
+
+Replay maps with `bin/hkm-active-benchmark INDEX ORACLE.jsonl` to compare
+linear, RBF, and degree-two polynomial SVCs with 32, 64, and 128 temporary
+negatives. The report selects the smallest pool matching the best worst case
+and staying within 2% of its median, and states whether it beat interleaved
+semantic-plus-lexical scanning. Benchmark audits and qrels live under
+`evaluation/`; runtime search never imports them.
 The language agent also keeps a bounded 256-entry cache of immutable HKM lane
 pages per index. In a repeated-query smoke, search time fell from 4.91 seconds
 to 0 ms and end-to-end time from 5.01 seconds to 89 ms on the same process;
@@ -690,6 +718,13 @@ same GGUF directly:
 When LM Studio is serving on its LAN address, use the advertised endpoint and
 model id, for example `--base-url http://192.168.8.222:1234/v1 --model
 google/gemma-4-e4b`.
+
+For optional EmbeddingGemma indexing, point `HKM_EMBEDDER=gemma` at an
+OpenAI-compatible `/v1/embeddings` endpoint before building and querying. Set
+`HKM_GEMMA_MODEL` when the server requires a model id; the index must be rebuilt
+when changing embedding backends:
+
+    HKM_EMBEDDER=gemma HKM_GEMMA_ENDPOINT=http://127.0.0.1:4321/v1/embeddings bin/hkm-index idx data/raw_docs
 
 ## Forward-looking architecture
 

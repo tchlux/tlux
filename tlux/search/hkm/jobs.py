@@ -510,6 +510,11 @@ def reap_running_jobs(fs: FileSystem) -> None:
             job = Job(fs=fs, path=fs.join("ids", job_id))
         except Exception:
             continue
+        if job.status in {"SUCCEEDED", "FAILED"}:
+            continue
+        # Delay reaping briefly so a completed worker can publish its terminal status.
+        if job.start_ts is not None and time.time() - float(job.start_ts) < ORPHAN_GRACE_SECONDS:
+            continue
         monitor_pid = getattr(job, "monitor_pid", None)
         executor_pid = getattr(job, "executor_pid", None)
         if monitor_pid is not None:

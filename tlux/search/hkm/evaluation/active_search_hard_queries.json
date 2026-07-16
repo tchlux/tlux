@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "queries": [
+    {"id": "q303", "source": "beir/scifact", "category": "lexical_rescue", "query": "DMRT1 is a sex-determining gene that is epigenetically regulated by the MHM region.", "qrels_targets": "4388470"},
+    {"id": "q437", "source": "beir/scifact", "category": "deep_candidate", "query": "Functional consequences of genomic alterations due to Myelodysplastic syndrome (MDS) are poorly understood due to the lack of an animal model.", "qrels_targets": "18399038"},
+    {"id": "q560", "source": "beir/scifact", "category": "deep_candidate", "query": "Immune responses result in the development of inflammatory Th17 cells and anti-inflammatory iTregs.", "qrels_targets": "40096222"},
+    {"id": "q691", "source": "beir/scifact", "category": "lexical_rescue", "query": "Leukemia associated Rho guanine nucleotide-exchange factor represses RhoA in response to SRC activation.", "qrels_targets": "10991183"},
+    {"id": "q887", "source": "beir/scifact", "category": "fusion_loss", "query": "Only a minority of cells survive development after differentiation into stress-resistant spores.", "qrels_targets": "18855191"},
+    {"id": "q914", "source": "beir/scifact", "category": "fusion_loss", "query": "PPAR-RXRs can be activated by PPAR ligands.", "qrels_targets": "3203590"},
+    {"id": "q1213", "source": "beir/scifact", "category": "fusion_loss", "query": "The deregulated and prolonged activation of monocytes has deleterious effects in inflammatory diseases.", "qrels_targets": "14407673"},
+    {"id": "q1226", "source": "beir/scifact", "category": "fusion_loss", "query": "The loss of the TET protein functions may have dire biological consequences, such as myeloid cancers.", "qrels_targets": "13777138"},
+    {"id": "LQ-01", "source": "fourth-wing", "category": "paraphrase", "query": "A scenario where something funny is said"},
+    {"id": "LQ-02", "source": "fourth-wing", "category": "paraphrase", "query": "A large wall stands over us"},
+    {"id": "LQ-03", "source": "fourth-wing", "category": "paraphrase", "query": "Crowds gathered to watch in horror"},
+    {"id": "LQ-04", "source": "fourth-wing", "category": "conditional", "query": "When night falls, someone climbs a large structure while a crowd gathers below to watch in horror"},
+    {"id": "LQ-05", "source": "fourth-wing", "category": "missing_subject_object", "query": "I remember a person climbing something tall at night while people watched below, but I forgot who the person was and what the structure was called"},
+    {"id": "LQ-06", "source": "fourth-wing", "category": "conditional_exclusion", "query": "Find the scene where, after someone enters a room, something amusing is said, even though it is not the later discussion about old research"},
+    {"id": "LQ-11", "source": "fourth-wing", "category": "conditional", "query": "If someone climbs a chimney with a rope, find that passage"},
+    {"id": "LQ-12", "source": "fourth-wing", "category": "missing_subject", "query": "After someone climbs a chimney with a rope, even if I forgot their name, find the passage"},
+    {"id": "LQ-13", "source": "fourth-wing", "category": "missing_subject_conditional", "query": "While people watch, if someone climbs a chimney with a rope, return that memory; I do not remember who"},
+    {"id": "LQ-14", "source": "fourth-wing", "category": "missing_subject", "query": "Find the crowd circle where someone screamed, even though I do not know who it was"},
+    {"id": "LQ-15", "source": "fourth-wing", "category": "missing_subject_conditional", "query": "When darkness falls, if someone watches in horror as a tall attacker emerges, find it even if the name is forgotten"},
+    {"id": "LQ-16", "source": "fourth-wing", "category": "conditional_exclusion", "query": "After someone enters the commanding office, a funny remark is made; unless this is Archives research, return it"},
+    {"id": "LQ-17", "source": "fourth-wing", "category": "missing_subject_conditional_exclusion", "query": "Whether the name is forgotten or not, locate the scene where a crowd forms a circle while someone screamed, provided it is not dragon spectators"}
+  ]
+}

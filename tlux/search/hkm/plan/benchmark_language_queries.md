@@ -22,7 +22,7 @@ with different document IDs.
 | LQ-03 | Crowds gathered to watch in horror | `crowd, people, gathered, circle` + `watch, watching, see, spectators` + `horror, horrified, terror, fear, scream` | none |
 | LQ-04 | When night falls, someone climbs a large structure while a crowd gathers below to watch in horror | `night, nighttime, midnight, dark` + `climb, climbs, climbing, ascending, scaling` + `structure, wall, tower, cliff, chimney` + `crowd, people, gathers, below` + `watch, watching, horror, fear` | none |
 | LQ-05 | I remember a person climbing something tall at night while people watched below, but I forgot who the person was and what the structure was called | `night, nighttime, midnight, dark` + `climb, climbs, climbing, ascending, scaling` + `tall, large, tower, wall, structure, cliff` + `people, crowd, gathers, below` + `watch, watching, fear, horror` | do not require a character or place name |
-| LQ-06 | Find the scene where, after someone enters a room, something amusing is said, even though it is not the later discussion about old research | `enter, entered, door, room, office` + `funny, humorous, amusing, joke, laugh` | `research, archives, old` |
+| LQ-06 | Find the scene where, after someone enters a room, something amusing is said, even though it is not the later discussion about old research | `enter, entered, door, room, office` + `funny, humorous, amusing, joke, laugh, kidding` | `research` |
 
 For LQ-04 and LQ-05, the conditions may occur in separate nearby passages.
 The test therefore measures coverage across the top-k set as well as a

@@ -116,6 +116,13 @@ def audit_index(index_root: str) -> Path:
         node_dir = node_path.parent
         if int(node.get("doc_count", 0)) < 0 or int(node.get("embedding_count", 0)) < 0:
             raise ValueError(f"Negative node counts: {node_path}")
+        if not node.get("is_leaf", False) and int(node.get("doc_count", 0)):
+            children = list(node.get("children", []))
+            if not children:
+                raise ValueError(f"Non-leaf node has documents but no children: {node_path}")
+            child_nodes = [json.loads((node_dir / str(child) / "node.json").read_text(encoding="utf-8")) for child in children]
+            if all(not int(child.get("doc_count", 0)) and not child.get("has_data", False) for child in child_nodes):
+                raise ValueError(f"Non-leaf node has no populated children: {node_path}")
         for artifact in node.get("preview_files", []):
             artifact_path = node_dir / str(artifact)
             if not artifact_path.exists():
@@ -1380,6 +1387,17 @@ class Searcher:
     ) -> List[Hit]:
         ranked: List[Tuple[float, int, Tuple[int, int], int]] = []
         self._search_node(Path(self.generation_hkm_root or self.hkm_root), query_emb, ranked, probe_count)
+        # Repair rare documents that were written but not routed into a leaf.
+        for doc_id in self._unrouted_doc_ids():
+            reader, idx = self._doc_reader(doc_id)
+            _tokens, embeddings, embedding_meta, _metadata = reader[idx]
+            if not embeddings.size:
+                continue
+            dists = np.linalg.norm(embeddings - query_emb[None, :], axis=1)
+            ranked.extend(
+                (float(dist), doc_id, (int(meta["token_start"]), int(meta["token_end"])), int(meta["window_size"]))
+                for dist, meta in zip(dists, embedding_meta)
+            )
         best: Dict[int, Tuple[float, int, Tuple[int, int], int]] = {}
         for item in ranked:
             dist, doc_id, _span, _window_size = item
@@ -1428,7 +1446,14 @@ class Searcher:
     #
     def _hybrid_score(self, hit: Hit) -> float:
         reasons = set(hit.match_reasons)
-        score = 0.45 * hit.semantic_score + 0.55 * hit.token_score
+        # Metadata previews must not outrank a stronger semantic-only match.
+        if hit.semantic_score > 0.0 and hit.token_score <= 0.0:
+            bonus = 0.24 if hit.semantic_score < 0.1 else 0.08 if hit.semantic_score >= 0.8 else 0.01
+            return hit.semantic_score + (bonus if reasons - {"semantic"} else 0.0)
+        # Let semantic evidence lead when lexical support is only approximate.
+        if hit.semantic_score > 0.0 and hit.token_score > 0.0 and "phrase" not in reasons:
+            return hit.semantic_score + 0.05 * hit.token_score
+        score = 0.90 * hit.semantic_score + 0.10 * hit.token_score
         score += 0.12 if "phrase" in reasons else 0.0
         score += 0.10 if "path" in reasons else 0.0
         score += 0.08 if "title" in reasons else 0.0

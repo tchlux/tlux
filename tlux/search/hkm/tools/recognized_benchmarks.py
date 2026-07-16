@@ -183,23 +183,29 @@ def _queries(path: Path) -> dict[str, str]:
 #
 # Parameters:
 #   path (Path): Whitespace-separated qrels path.
+#   valid_queries (set[str] | None): Optional query IDs used to reject stale qrels.
 #
 # Returns:
 #   (dict[str, dict[str, float]]): Query-to-document judgments.
-def _qrels(path: Path) -> dict[str, dict[str, float]]:
+#
+def _qrels(path: Path, valid_queries: set[str] | None = None) -> dict[str, dict[str, float]]:
     output: dict[str, dict[str, float]] = {}
-    for line in _lines(path):
+    for line_number, line in enumerate(_lines(path), 1):
         fields = line.split()
+        if not fields or fields[0].lower() in {"query-id", "qid", "query_id"}:
+            continue
         if len(fields) >= 4:
             query_id, document_id, grade = fields[0], fields[2], fields[3]
         elif len(fields) == 3:
             query_id, document_id, grade = fields
         else:
-            continue
+            raise ValueError(f"malformed qrels row at {path}:{line_number}")
         try:
             value = float(grade)
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(f"invalid qrels grade at {path}:{line_number}: {grade}") from exc
+        if valid_queries is not None and query_id not in valid_queries:
+            raise ValueError(f"unknown qrels query ID at {path}:{line_number}: {query_id}")
         if document_id in output.get(query_id, {}):
             raise ValueError(f"duplicate judgment for {query_id}/{document_id} in {path}")
         output.setdefault(query_id, {})[document_id] = value
@@ -229,7 +235,7 @@ def load_beir(root: str | Path, dataset: str = "scifact", split: str = "test") -
         for record in _records(queries)
         if record.get("_id", record.get("id")) is not None
     }
-    return BenchmarkData("beir", dataset, split, corpus, query_map, _qrels(qrels))
+    return BenchmarkData("beir", dataset, split, corpus, query_map, _qrels(qrels, set(query_map)))
 
 
 # Locate a MIRACL language/split directory and load its standard files.
@@ -255,7 +261,8 @@ def load_miracl(root: str | Path, language: str = "en", split: str = "dev") -> B
     )
     topics = _find_file(base, (), ("topic", language, split))
     qrels = _find_file(base, (), ("qrel", language, split))
-    return BenchmarkData("miracl", language, split, corpus, _queries(topics), _qrels(qrels))
+    query_map = _queries(topics)
+    return BenchmarkData("miracl", language, split, corpus, query_map, _qrels(qrels, set(query_map)))
 
 
 # Locate a TREC or MS MARCO TSV collection and load its qrels.
@@ -284,7 +291,8 @@ def load_trec(
         (f"qrels.{split}", f"qrels.{split}.txt", f"qrels.{split}.tsv", "qrels.txt", "qrels.tsv"),
         ("qrel",),
     )
-    return BenchmarkData("trec", "trec", split, corpus, _queries(queries), _qrels(qrels))
+    query_map = _queries(queries)
+    return BenchmarkData("trec", "trec", split, corpus, query_map, _qrels(qrels, set(query_map)))
 
 
 # Stream records from a two-column TREC/MS MARCO collection TSV.
@@ -305,6 +313,28 @@ def _trec_records(path: Path) -> Iterator[dict[str, object]]:
 # Return a document stream for all supported benchmark corpus formats.
 def _benchmark_documents(data: BenchmarkData, max_documents: int | None) -> Iterator[dict[str, object]]:
     yield from data.documents(max_documents)
+
+
+# Find benchmark IDs that made it into the active HKM document index.
+#
+# Parameters:
+#   searcher (Searcher): Open index whose metadata should be inspected.
+#   wanted (set[str]): IDs needed by the loaded qrels.
+#
+# Returns:
+#   (set[str]): IDs found in the indexed corpus.
+def _indexed_document_ids(searcher: Searcher, wanted: set[str]) -> set[str]:
+    found: set[str] = set()
+    for doc_id in sorted(searcher._active_doc_ids()):
+        if not wanted - found:
+            break
+        _tokens, metadata = searcher._doc_context(doc_id)
+        value = metadata.get("source_id") or metadata.get("source_path")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if value is not None and str(value) in wanted:
+            found.add(str(value))
+    return found
 
 
 # Download and safely extract a standard benchmark archive.
@@ -405,10 +435,14 @@ def run_benchmark(
 ) -> dict[str, Any]:
     if k < 1 or workers < 1:
         raise ValueError("k and workers must be positive")
+    if (max_queries is not None and max_queries < 0) or (
+        max_documents is not None and max_documents < 0
+    ):
+        raise ValueError("max_queries and max_documents must be non-negative")
     query_ids = [query_id for query_id in data.queries if query_id in data.qrels]
     if max_queries:
         query_ids = query_ids[:max_queries]
-    qrels = {query_id: data.qrels[query_id] for query_id in query_ids}
+    requested_qrels = {query_id: data.qrels[query_id] for query_id in query_ids}
     started = time.perf_counter()
     build_search_index_from_documents(
         str(index_root),
@@ -418,6 +452,14 @@ def run_benchmark(
     )
     build_seconds = time.perf_counter() - started
     searcher = Searcher.from_index_root(str(index_root))
+    wanted_ids = {document_id for judgments in requested_qrels.values() for document_id in judgments}
+    indexed_ids = _indexed_document_ids(searcher, wanted_ids)
+    qrels = {
+        query_id: {document_id: grade for document_id, grade in judgments.items() if document_id in indexed_ids}
+        for query_id, judgments in requested_qrels.items()
+    }
+    qrels = {query_id: judgments for query_id, judgments in qrels.items() if judgments}
+    unknown_judgments = len(wanted_ids - indexed_ids)
     ingest_report = Path(index_root) / "docs" / "worker_0000" / "ingest_report.json"
     indexed_documents = 0
     if ingest_report.exists():
@@ -435,9 +477,15 @@ def run_benchmark(
         "split": data.split,
         "corpus_path": str(data.corpus_path),
         "queries": len(qrels),
+        "queries_requested": len(requested_qrels),
+        "queries_without_indexed_judgments": len(requested_qrels) - len(qrels),
         "judged_queries": len(data.qrels),
         "judgments": sum(len(items) for items in qrels.values()),
+        "unknown_judgments": unknown_judgments,
         "indexed_documents": indexed_documents,
+        "embedder_backend": searcher.backend_name,
+        "index_root": searcher.index_root,
+        "max_queries": max_queries or 0,
         "max_documents": max_documents or 0,
         "mode": mode,
         "k": k,

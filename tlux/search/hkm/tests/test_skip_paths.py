@@ -105,6 +105,7 @@ def test_default_skips_exclude_generated_and_binary_artifacts(tmp_path, monkeypa
         docs / "tokenizer_config.json",
         docs / "weights.safetensors",
         docs / "image.png",
+        docs / "manual.pdf",
     ]:
         path.write_text("skip me", encoding="utf-8")
 
@@ -114,7 +115,7 @@ def test_default_skips_exclude_generated_and_binary_artifacts(tmp_path, monkeypa
     assert _manifest_files(index_root) == [str(keep)]
     summary = _summary(index_root)
     assert summary["planned"] == 1
-    assert summary["skipped"] == 9
+    assert summary["skipped"] == 10
 
 
 def test_include_and_exclude_globs_use_relative_paths(tmp_path, monkeypatch):

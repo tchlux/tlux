@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any, Dict, Iterable, TextIO
 
 from ..search.searcher import Searcher
@@ -25,13 +26,66 @@ from .agent_benchmark import (
 )
 
 
-# Keep the compact, stable fields needed by a downstream agent or service.
-def _hit_payload(hit: Any) -> Dict[str, Any]:
+# Read a bounded source window so agents can inspect evidence beyond the index preview.
+#
+# Arguments:
+#   hit (Any): Search hit containing source path and byte bounds.
+#   source_root (str): Root directory allowed for source reads.
+#   limit (int): Maximum UTF-8 payload size in bytes.
+#
+# Returns:
+#   (str): Bounded decoded source context, or an empty string.
+#
+def _source_context(hit: Any, source_root: str, limit: int = 2048) -> str:
+    source_path = str(getattr(hit, "source_path", "") or "")
+    document = getattr(hit, "document", None)
+    if not source_path or not source_root or document is None:
+        return ""
+    try:
+        root = Path(source_root).resolve()
+        path = (root / source_path).resolve()
+        path.relative_to(root)
+        start = max(0, int(getattr(document, "byte_start", 0)))
+        end = int(getattr(document, "byte_end", 0))
+        with path.open("rb") as source:
+            if end <= start:
+                source.seek(start)
+                raw = source.read(limit)
+            elif end - start <= limit:
+                source.seek(start)
+                raw = source.read(end - start)
+            else:
+                marker = b"\n...\n"
+                width = max(1, (limit - len(marker)) // 2)
+                source.seek(start)
+                head = source.read(width)
+                source.seek(max(start, end - width))
+                raw = head + marker + source.read(width)
+        return raw.decode("utf-8", errors="ignore").strip()
+    except (OSError, ValueError):
+        return ""
+
+
+# Keep compact stable fields plus bounded source evidence for downstream agents.
+#
+# Arguments:
+#   hit (Any): Search hit to serialize.
+#   source_root (str): Root directory used for bounded source evidence.
+#
+# Returns:
+#   (Dict[str, Any]): JSON-compatible hit payload.
+#
+def _hit_payload(hit: Any, source_root: str = "") -> Dict[str, Any]:
+    context = _source_context(hit, source_root)
     return {
         "doc_id": int(hit.doc_id),
         "source_path": hit.source_path,
         "score": float(hit.score),
         "preview_text": hit.preview_text,
+        "document": {
+            "document_preview": hit.document.document_preview,
+            "source_context": context,
+        },
     }
 
 
@@ -40,7 +94,7 @@ class LocalSearchAgent:
     def __init__(
         self,
         index_root: str,
-        base_url: str = "http://127.0.0.1:1234/v1",
+        base_url: str = "http://127.0.0.1:4321/v1",
         model: str | None = None,
         timeout: float = LMSTUDIO_TIMEOUT,
         mode: str = "token",
@@ -49,6 +103,7 @@ class LocalSearchAgent:
         native_tool: bool = False,
         language_query: bool = False,
         always_refine: bool = False,
+        language_rounds: int = 2,
     ) -> None:
         self.searcher = Searcher.from_index_root(index_root)
         self.language_query = language_query
@@ -58,11 +113,18 @@ class LocalSearchAgent:
             self.runner = runner
         elif language_query and deterministic_first:
             self.client = None
-            self.runner = LanguageSearchAgent(None, mode, always_refine=always_refine)
+            self.runner = LanguageSearchAgent(
+                None, mode, max_rounds=language_rounds, always_refine=always_refine
+            )
         else:
             self.client = LMStudioQueryGenerator(base_url, model, timeout)
             self.runner = (
-                LanguageSearchAgent(self.client, mode, always_refine=always_refine)
+                LanguageSearchAgent(
+                    self.client,
+                    mode,
+                    max_rounds=language_rounds,
+                    always_refine=always_refine,
+                )
                 if language_query
                 else LMStudioPlannerToolAgent(self.client, mode, native_tool)
             )
@@ -111,7 +173,7 @@ class LocalSearchAgent:
         payload = {
             "query": run.get("query", ""),
             "grounded": bool(result.docs),
-            "docs": [_hit_payload(hit) for hit in result.docs],
+            "docs": [_hit_payload(hit, self.searcher.source_root) for hit in result.docs],
             "tool_called": bool(run.get("tool_called")),
             "model_tool_called": bool(run.get("model_tool_called")),
             "recovered": bool(run.get("recovered")),
@@ -150,7 +212,7 @@ def process_lines(agent: LocalSearchAgent, lines: Iterable[str], output: TextIO,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a persistent grounded HKM search agent.")
     parser.add_argument("index_root")
-    parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:4321/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default=None)
@@ -158,6 +220,7 @@ def main() -> None:
     parser.add_argument("--native-planner-tool", action="store_true", help="Require the model to emit search_index after planning")
     parser.add_argument("--language-query", action="store_true", help="Iteratively search natural-language queries and paraphrases")
     parser.add_argument("--always-refine", action="store_true", help="Force one LM inspection/refinement round for every language query")
+    parser.add_argument("--language-rounds", type=int, choices=[1, 2, 3], default=2, help="Maximum result-conditioned search rounds")
     routing = parser.add_mutually_exclusive_group()
     routing.add_argument("--deterministic-first", dest="deterministic_first", action="store_true")
     routing.add_argument("--model-first", dest="deterministic_first", action="store_false")
@@ -175,6 +238,7 @@ def main() -> None:
         native_tool=args.native_planner_tool,
         language_query=args.language_query,
         always_refine=args.always_refine,
+        language_rounds=args.language_rounds,
     )
     if args.warmup:
         agent.warmup()

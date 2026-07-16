@@ -36,7 +36,7 @@ STOP_WORDS = {
 }
 TOOL_QUERY_WORDS = 16
 TOOL_MAX_TOKENS = 16
-PLANNER_MAX_TOKENS = 16
+PLANNER_MAX_TOKENS = 32
 LANGUAGE_MEMORY_MAX_TOKENS = 32
 PLANNER_INPUT_WORDS = 64
 PLANNER_QUERY_CACHE_SIZE = 256
@@ -45,19 +45,21 @@ TOOL_KEYWORD_WORDS = 6
 TOOL_RESCUE_QUERIES = 8
 TOOL_FALLBACK_SCORE = 0.7
 TOOL_EXPANSION_FACTOR = 3
-LMSTUDIO_TIMEOUT = 1.0
+LMSTUDIO_TIMEOUT = 30.0
 LMSTUDIO_WARMUP_TIMEOUT = 15.0
 LANGUAGE_QUERY_MAX_WORDS = 24
 LANGUAGE_QUERY_MAX_VARIANTS = 8
 LANGUAGE_MODEL_QUERY_MAX_VARIANTS = 4
 LANGUAGE_PLAN_MAX_VARIANTS = 4
-LANGUAGE_PLAN_MAX_TOKENS = 64
-LANGUAGE_QUERY_MAX_ROUNDS = 2
+LANGUAGE_PLAN_MAX_TOKENS = 128
+LANGUAGE_QUERY_MAX_ROUNDS = 3
 LANGUAGE_SEARCH_CACHE_SIZE = 256
 LANGUAGE_COVERAGE_WEIGHT = 0.75
 LANGUAGE_FIRST_PASS_BONUS = 0.05
 LANGUAGE_UNLESS_PENALTY = 0.12
 LANGUAGE_CONFIDENCE_COVERAGE = 0.70
+LANGUAGE_ABSTAIN_MIN_TERMS = 3
+LANGUAGE_ABSTAIN_MIN_COVERAGE = 1.0 / 3.0
 LANGUAGE_MEMORY_WORDS = {
     "called", "cannot", "find", "forgot", "forgotten", "forget", "involved",
     "near", "object", "part", "passage", "person", "recall", "remember", "scene",
@@ -85,6 +87,10 @@ QUERY_GUARD_WORDS = STOP_WORDS | {
     "a", "an", "and", "as", "at", "by", "for", "in", "is", "it", "of",
     "on", "or", "the", "to", "was", "were", "will", "you", "your",
     "us", "falls", "even",
+}
+LANGUAGE_QUERY_FILLERS = LANGUAGE_MEMORY_WORDS | {
+    "document", "documents", "explain", "explains", "explained",
+    "happened", "happen", "question", "query", "which", "where",
 }
 QUERY_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -208,10 +214,65 @@ def _language_query_clauses(query: str) -> List[str]:
     ) if part.strip()]
 
 
+# Return bounded adjacent content-word pairs for exact token rescue lanes.
+#
+# Arguments:
+#   clause (str): A remembered positive query clause.
+#   limit (int): Maximum number of pairs to return.
+#
+# Returns:
+#   (list[str]): Ordered adjacent content-word pairs.
+#
+def _language_token_pairs(clause: str, limit: int = 6) -> List[str]:
+    words = [
+        word for word in re.findall(r"[A-Za-z0-9]+", clause.lower())
+        if len(word) >= 4 and word not in QUERY_GUARD_WORDS
+    ]
+    return list(dict.fromkeys(
+        f"{words[index]} {words[index + 1]}"
+        for index in range(len(words) - 1)
+    ))[:limit]
+
+
+# Return a compact named-entity contrast query for a low-confidence request.
+#
+# Arguments:
+#   query (str): Natural-language query containing a named entity.
+#
+# Returns:
+#   (str): Named anchor plus the final distinctive content terms.
+#
+def _language_named_contrast_query(query: str) -> str:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'-]*", query)
+    anchors = [
+        word.lower() for word in words
+        if word[0].isupper() and len(word) >= 6
+        and word.lower() not in QUERY_GUARD_WORDS
+    ]
+    content = [
+        word.lower() for word in words
+        if len(word) >= 6 and word.lower() not in QUERY_GUARD_WORDS
+    ]
+    if not anchors:
+        anchors = [word for word in content if len(word) >= 8]
+    if not anchors or len(content) < 3:
+        return ""
+    return " ".join(dict.fromkeys([anchors[0], *content[-3:]]))
+
+
 # Add compact synonym lanes for concepts explicitly present in a request.
 def _language_concept_queries(query: str) -> List[str]:
     forms = _language_word_forms(query)
     return [phrase for group, phrase in LANGUAGE_CONCEPT_LANES if forms.intersection(group)]
+
+
+# Return one compact concept lane for short, unambiguous requests.
+def _language_compact_concept_query(query: str) -> str:
+    if len(query.split()) > 8 or _language_negative_clauses(query) or _language_missing_entity_query(query):
+        return ""
+    terms = _language_word_forms(" ".join(_language_positive_clauses(query))) - LANGUAGE_QUERY_FILLERS
+    concepts = _language_concept_queries(query)
+    return concepts[0] if len(terms) <= 4 and len(concepts) == 1 else ""
 
 
 # Return short language-query variants while preserving content words.
@@ -447,7 +508,7 @@ def parse_query(response: str) -> str:
 class LMStudioQueryGenerator:
     name = "lmstudio"
 
-    def __init__(self, base_url: str = "http://127.0.0.1:1234/v1", model: str | None = None, timeout: float = LMSTUDIO_TIMEOUT):
+    def __init__(self, base_url: str = "http://127.0.0.1:4321/v1", model: str | None = None, timeout: float = LMSTUDIO_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
@@ -637,6 +698,9 @@ class LMStudioQueryGenerator:
             "not, without, or excluding, keep the positive target in a separate lane "
             "and use the negative scene only as an exclusion; never spend every lane "
             "on the excluded scene. "
+            "Use distinctive terms from promising first-page titles as bounded feedback: "
+            "append only terms that clarify the original claim, and never replace its "
+            "conditions with an unrelated result. "
             "A subject or object may be unknown; do not invent one. Exclusions are soft "
             "antipatterns seen in the results, not facts. Use at most four queries and four "
             "short exclusion terms.\nRequest:\n"
@@ -715,6 +779,7 @@ def _tool_result_payload(result: Any, limit: int) -> Dict[str, Any]:
                 "source_path": hit.source_path,
                 "score": float(hit.score),
                 "preview_text": hit.preview_text[:400],
+                "document_preview": getattr(hit.document, "document_preview", "")[:512],
             }
             for hit in result.docs[:limit]
         ],
@@ -1156,6 +1221,30 @@ def _language_hit_text(hit: Any) -> str:
     ).lower()
 
 
+# Return true when a token-only result page has too little query evidence.
+#
+# Arguments:
+#   query (str): Natural-language request being evaluated.
+#   result (Any): SearchResult-like page returned by the agent.
+#
+# Returns:
+#   (bool): Whether the page should be treated as an unanswered request.
+#
+def _language_should_abstain(query: str, result: Any) -> bool:
+    terms = _language_word_forms(" ".join(_language_positive_clauses(query)))
+    terms -= LANGUAGE_QUERY_FILLERS
+    if len(terms) < LANGUAGE_ABSTAIN_MIN_TERMS or not result.docs:
+        return False
+    if any(float(getattr(hit, "semantic_score", 0.0)) > 0.0 for hit in result.docs):
+        return False
+    coverage = max(
+        len(terms.intersection(_language_word_forms(_language_hit_text(hit))))
+        / float(len(terms))
+        for hit in result.docs
+    )
+    return coverage < LANGUAGE_ABSTAIN_MIN_COVERAGE
+
+
 # Return the local snippet text used for explicit contrast checks.
 def _language_local_hit_text(hit: Any) -> str:
     return " ".join(
@@ -1195,12 +1284,15 @@ def _merge_language_results(
     exclude_terms: List[str],
     top_k: int,
     protect_anchor: bool = False,
+    coverage_weight: float = LANGUAGE_COVERAGE_WEIGHT,
+    lane_queries: List[str] | None = None,
 ) -> Any:
     # Keep the full first-pass candidate page for later refinement rounds.
     base = copy.copy(results[0])
-    grouped: Dict[tuple[int, tuple[int, int]], tuple[Any, int, bool, int | None]] = {}
+    # Rank documents once even when several retrieved chunks belong to one document.
+    grouped: Dict[int, tuple[Any, int, bool, int | None, float]] = {}
     first_ranks = {
-        (int(hit.doc_id), tuple(hit.span)): rank
+        int(hit.doc_id): rank
         for rank, hit in enumerate(results[0].docs, 1)
     }
     positive_clauses = _language_positive_clauses(query)
@@ -1211,22 +1303,32 @@ def _merge_language_results(
     negative_clauses = _language_negative_clauses(query)
     unless_clauses = _language_unless_clauses(query)
     missing_entity = _language_missing_entity_query(query)
-    for result in results:
+    for result_index, result in enumerate(results):
+        lane_terms = _language_word_forms(lane_queries[result_index]) if lane_queries and result_index < len(lane_queries) else set()
         for hit in result.docs:
-            key = (int(hit.doc_id), tuple(hit.span))
+            key = int(hit.doc_id)
+            hit_terms = _language_word_forms(_language_hit_text(hit))
+            lane_coverage = len(lane_terms.intersection(hit_terms)) / float(max(1, len(lane_terms)))
             if key not in grouped:
-                grouped[key] = (hit, 0, result is results[0], first_ranks.get(key))
-            best_hit, lanes, anchor, first_rank = grouped[key]
+                grouped[key] = (hit, 0, result is results[0], first_ranks.get(key), lane_coverage)
+            best_hit, lanes, anchor, first_rank, best_lane_coverage = grouped[key]
             if float(hit.score) > float(best_hit.score):
                 best_hit = hit
-            grouped[key] = (best_hit, lanes + 1, anchor or result is results[0], first_rank)
+            grouped[key] = (
+                best_hit,
+                lanes + 1,
+                anchor or result is results[0],
+                first_rank,
+                max(best_lane_coverage, lane_coverage),
+            )
 
-    def rank_key(item: tuple[Any, int, bool, int | None]) -> tuple[float, float, int, str]:
-        hit, lanes, anchor, first_rank = item
+    def rank_key(item: tuple[Any, int, bool, int | None, float]) -> tuple[float, float, int, str]:
+        hit, lanes, anchor, first_rank, lane_coverage = item
         text = _language_hit_text(hit)
         local_terms = _language_word_forms(_language_local_hit_text(hit))
         terms = _language_word_forms(text)
         coverage = len(query_terms.intersection(terms)) / float(max(1, len(query_terms)))
+        coverage = max(coverage, lane_coverage)
         negative_penalty = sum(
             len(clause.intersection(local_terms)) >= min(2, len(clause))
             for clause in negative_clauses
@@ -1239,17 +1341,19 @@ def _merge_language_results(
         )
         score = (
             float(hit.score) + 0.04 * anchor + first_pass_bonus
-            + 0.005 * min(lanes, 2) + LANGUAGE_COVERAGE_WEIGHT * coverage
+            + 0.005 * min(lanes, 2) + coverage_weight * coverage
             - 0.14 * negative_penalty - 0.03 * penalty
         )
         return (-score, -coverage, int(hit.doc_id), hit.source_path)
 
     ranked = sorted(grouped.values(), key=rank_key)
     contrast_query = bool(negative_clauses)
-    condition_terms = [
-        (_language_full_concept_forms if contrast_query else _language_concept_forms)(clause)
-        for clause in positive_clauses
-    ]
+    condition_builder = (
+        _language_full_concept_forms
+        if contrast_query or missing_entity
+        else _language_concept_forms
+    )
+    condition_terms = [condition_builder(clause) for clause in positive_clauses]
     condition_terms = [terms for terms in condition_terms if terms]
     masks = {
         id(item): sum(
@@ -1257,13 +1361,14 @@ def _merge_language_results(
             for index, terms in enumerate(condition_terms)
             if len((
                 _language_word_forms(_language_local_hit_text(item[0]))
-                if contrast_query else _language_concept_forms(_language_hit_text(item[0]))
+                if contrast_query
+                else condition_builder(_language_hit_text(item[0]))
             ).intersection(terms))
             >= (1 if contrast_query else (2 if len(terms) >= 2 else 1))
         )
         for item in ranked
     }
-    selected: List[tuple[Any, int, bool, int | None]] = []
+    selected: List[tuple[Any, int, bool, int | None, float]] = []
     remaining = list(ranked)
     covered_mask = 0
     coherence_weight = 0.08 if contrast_query else 0.0
@@ -1296,7 +1401,7 @@ def _merge_language_results(
                 rank_key(item)[1:],
             )
         )
-    base.docs = [hit for hit, _, _, _ in selected]
+    base.docs = [hit for hit, _, _, _, _ in selected]
     base.count = len(ranked)
     base.limit = top_k
     base.next_offset = top_k if len(ranked) > top_k else None
@@ -1311,13 +1416,13 @@ class LanguageSearchAgent:
         self,
         client: LMStudioQueryGenerator | None = None,
         mode: str = "hybrid",
-        max_rounds: int = LANGUAGE_QUERY_MAX_ROUNDS,
+        max_rounds: int = 2,
         always_refine: bool = False,
     ) -> None:
         if mode not in {"hybrid", "semantic", "token"}:
             raise ValueError("mode must be hybrid, semantic, or token")
         if max_rounds < 1 or max_rounds > LANGUAGE_QUERY_MAX_ROUNDS:
-            raise ValueError("max_rounds must be in [1, 2]")
+            raise ValueError(f"max_rounds must be in [1, {LANGUAGE_QUERY_MAX_ROUNDS}]")
         self.client = client
         self.model = client.model if client is not None else None
         self.mode = mode
@@ -1357,11 +1462,14 @@ class LanguageSearchAgent:
         if top_k < 1:
             raise ValueError("top_k must be positive")
         started = time.perf_counter()
-        base_variants = _language_query_variants(query)
+        compact_query = _language_compact_concept_query(query)
+        base_variants = [compact_query, query] if compact_query else _language_query_variants(query)
         round_queries = base_variants[:1]
+        coverage_weight = 0.0 if compact_query else LANGUAGE_COVERAGE_WEIGHT
         exclude_terms: List[str] = []
         trace: List[Dict[str, Any]] = []
         results: List[Any] = []
+        result_queries: List[str] = []
         search_ms = 0.0
         recovered = False
         completion_calls = 0
@@ -1386,6 +1494,7 @@ class LanguageSearchAgent:
                 lane_top_k = top_k * (12 if variant_mode == "token" else 3)
                 result, elapsed = self._cached_search(searcher, variant, lane_top_k, 0, variant_mode)
                 results.append(result)
+                result_queries.append(variant)
                 search_ms += elapsed
                 trace.append({
                     "round": round_index,
@@ -1399,14 +1508,14 @@ class LanguageSearchAgent:
                 exclude_terms,
                 top_k,
                 protect_anchor=self.client is not None,
+                coverage_weight=coverage_weight,
+                lane_queries=result_queries,
             )
             seen_exclusions = _language_antipatterns(query, merged.docs)
             exclude_terms = list(dict.fromkeys(exclude_terms + seen_exclusions))[:LANGUAGE_QUERY_MAX_VARIANTS]
             if self.client is None:
-                if (
-                    _language_first_pass_confident(query, merged)
-                    or round_index + 1 >= self.max_rounds
-                ):
+                if ((not compact_query and _language_first_pass_confident(query, merged))
+                        or round_index + 1 >= self.max_rounds):
                     break
                 round_queries = base_variants[1:]
                 continue
@@ -1441,13 +1550,64 @@ class LanguageSearchAgent:
                 round_queries = base_variants[1:]
                 if not round_queries:
                     break
+
+        # Append a source-filtered token lane without disturbing unrelated sources.
+        def append_token_rescue(query_text: str, source_paths: set[str]) -> None:
+            nonlocal search_ms
+            rescue, elapsed = self._cached_search(
+                searcher, query_text, top_k * 3, 0, "token"
+            )
+            rescue.docs = [hit for hit in rescue.docs if hit.source_path in source_paths]
+            if not rescue.docs:
+                return
+            results.append(rescue)
+            result_queries.append(query_text)
+            search_ms += elapsed
+            trace.append({
+                "round": self.max_rounds,
+                "query": query_text,
+                "mode": "token",
+                "hits": len(rescue.docs),
+            })
+
+        if (
+            _language_missing_entity_query(query)
+            and not _language_negative_clauses(query)
+            and results
+            and results[0].docs
+            and not _language_first_pass_confident(query, merged)
+        ):
+            source_paths = {hit.source_path for hit in results[0].docs[:3]}
+            clauses = _language_positive_clauses(query)
+            pairs = list(dict.fromkeys(
+                pair
+                for clause in clauses
+                for pair in _language_token_pairs(clause)
+            ))[:6]
+            for pair in pairs:
+                append_token_rescue(pair, source_paths)
+        if (
+            not _language_missing_entity_query(query)
+            and _language_negative_clauses(query)
+            and results
+            and not _language_first_pass_confident(query, merged)
+        ):
+            contrast_query = _language_named_contrast_query(query)
+            source_paths = {hit.source_path for hit in results[0].docs[:3]}
+            if contrast_query and len(source_paths) == 1:
+                append_token_rescue(contrast_query, source_paths)
         final = _merge_language_results(
             results,
             query,
             exclude_terms,
             top_k,
             protect_anchor=self.client is not None,
+            coverage_weight=coverage_weight,
+            lane_queries=result_queries,
         )
+        if _language_should_abstain(query, final):
+            final.docs = []
+            final.count = 0
         return {
             "tool_called": True,
             "query": query,
@@ -2087,7 +2247,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--max-tokens", type=int, default=48)
     parser.add_argument("--probes", default="0,1,2,4")
-    parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:4321/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--stub", action="store_true", help="Use the deterministic planner without LM Studio")

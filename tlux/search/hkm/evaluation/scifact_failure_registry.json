@@ -1,0 +1,76 @@
+{
+  "schema_version": 2,
+  "benchmark": "beir/scifact",
+  "issues": [
+    {
+      "query_id": "q303",
+      "qrels_targets": ["4388470"],
+      "observed_behavior": "The target was semantic rank 427 but lexical rank 21.",
+      "assessment": "A lexical rescue lane is required before active judging.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "q691",
+      "qrels_targets": ["10991183"],
+      "observed_behavior": "The target was semantic rank 50 but lexical rank 2.",
+      "assessment": "Fusion must retain exact lexical evidence.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "q437",
+      "qrels_targets": ["18399038"],
+      "observed_behavior": "The MDS/genomic-alterations request had semantic rank 222 and lexical rank 983.",
+      "assessment": "The qrel appears to describe a glioma/iPSC paper without an apparent MDS connection.",
+      "status": "suspected_bad_qrel"
+    },
+    {
+      "query_id": "q560",
+      "qrels_targets": ["40096222"],
+      "observed_behavior": "The Th17/iTreg request had semantic rank 287 and no lexical candidate.",
+      "assessment": "The JAM-A intestinal-barrier compensation connection is indirect and needs rubric review.",
+      "status": "ambiguous_relevance"
+    },
+    {
+      "query_id": "q887",
+      "qrels_targets": ["18855191"],
+      "observed_behavior": "The target was semantic rank 9 and was demoted by fusion.",
+      "assessment": "The candidate existed but final fusion lost it.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "q914",
+      "qrels_targets": ["3203590"],
+      "observed_behavior": "The target was semantic rank 7 and was demoted by fusion.",
+      "assessment": "The candidate existed but final fusion lost it.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "q1213",
+      "qrels_targets": ["14407673"],
+      "observed_behavior": "The target was semantic rank 9 and was demoted by fusion.",
+      "assessment": "The candidate existed but final fusion lost it.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "q1226",
+      "qrels_targets": ["13777138"],
+      "observed_behavior": "The target was semantic rank 10 and was demoted by fusion.",
+      "assessment": "The candidate existed but final fusion lost it.",
+      "status": "confirmed_search_failure"
+    },
+    {
+      "query_id": "scifact_sparse_qrels",
+      "qrels_targets": [],
+      "observed_behavior": "Most retrieved documents have no judgment.",
+      "assessment": "Unjudged documents cannot automatically be counted as irrelevant.",
+      "status": "sparse_qrels_artifact"
+    },
+    {
+      "query_id": "scifact_283_document_subset",
+      "qrels_targets": [],
+      "observed_behavior": "The qrels-only corpus contains 283 documents instead of all 5,183.",
+      "assessment": "Removing distractors materially inflates measured recall.",
+      "status": "bounded_corpus_artifact"
+    }
+  ]
+}

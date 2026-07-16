@@ -129,6 +129,7 @@ def _hit_text(hit: Dict[str, Any]) -> str:
         hit.get("preview_text", ""),
         hit.get("source_path", ""),
         document.get("document_preview", "") if isinstance(document, dict) else "",
+        document.get("source_context", "") if isinstance(document, dict) else "",
     ))
 
 
@@ -296,7 +297,7 @@ def main() -> None:
         default="plan/benchmark_language_judgements.json",
         help="optional stable relevant/negative clause sidecar",
     )
-    parser.add_argument("--base-url", default="http://127.0.0.1:1234/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:4321/v1")
     parser.add_argument("--model", default=None)
     parser.add_argument("--timeout", type=float, default=LMSTUDIO_TIMEOUT)
     parser.add_argument("--tool-mode", choices=["hybrid", "token", "semantic"], default="semantic")
